@@ -4,6 +4,8 @@
 #include <controller_interface/controller.h>
 #include <hardware_interface/joint_command_interface.h>
 #include <std_msgs/Float64.h>
+#include <urdf/model.h>
+
 
 namespace hector_ros_controllers {
 class VelocityToPositionController : public controller_interface::Controller<hardware_interface::PositionJointInterface> {
@@ -29,8 +31,11 @@ private:
  * \brief Callback from /command subscriber for setpoint
  */
   void setCommandCB(const std_msgs::Float64ConstPtr& msg);
+  void enforceJointLimits(double &command);
 
   hardware_interface::JointHandle joint_;
+  urdf::JointConstSharedPtr joint_urdf_;
+
   double vel_command_;                                /**< Last commanded velocity. */
   double pos_command_;
   ros::Subscriber sub_command_;
