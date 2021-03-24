@@ -1,0 +1,7 @@
+<library path="lib/libhector_ros_controllers">
+    <class name="hector_ros_controllers/VelocityToPositionController" type="hector_ros_controllers::VelocityToPositionController" base_class_type="controller_interface::ControllerBase">
+        <description>
+            The VelocityToJointController tracks velocity commands by converting them to position commands. It expects a PositionJointInterface type of hardware interface.
+        </description>
+    </class>
+</library>
