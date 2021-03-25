@@ -47,8 +47,9 @@ void VelocityToPositionController::starting(const ros::Time &time) {
 
 void VelocityToPositionController::update(const ros::Time &time, const ros::Duration &period) {
   // Integrate velocity
+  enforceVelocityLimits(vel_command_);
   pos_command_ += vel_command_ * period.toSec();
-  enforceJointLimits(pos_command_);
+  enforcePositionLimits(pos_command_);
   joint_.setCommand(pos_command_);
 }
 
@@ -56,7 +57,7 @@ void VelocityToPositionController::setCommandCB(const std_msgs::Float64ConstPtr 
   vel_command_ = msg->data;
 }
 
-void VelocityToPositionController::enforceJointLimits(double &command) {
+void VelocityToPositionController::enforcePositionLimits(double &command) {
   // Check that this joint has applicable limits
   if (joint_urdf_->type == urdf::Joint::REVOLUTE || joint_urdf_->type == urdf::Joint::PRISMATIC) {
     if (command > joint_urdf_->limits->upper) { // above upper limit
@@ -65,6 +66,11 @@ void VelocityToPositionController::enforceJointLimits(double &command) {
       command = joint_urdf_->limits->lower;
     }
   }
+}
+
+void VelocityToPositionController::enforceVelocityLimits(double &command) {
+  // Check velocity limit
+  command = std::max(-joint_urdf_->limits->velocity, std::min(joint_urdf_->limits->velocity, command));
 }
 
 } // namespace hector_ros_controllers

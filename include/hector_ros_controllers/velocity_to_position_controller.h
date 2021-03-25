@@ -31,7 +31,8 @@ private:
  * \brief Callback from /command subscriber for setpoint
  */
   void setCommandCB(const std_msgs::Float64ConstPtr& msg);
-  void enforceJointLimits(double &command);
+  void enforceVelocityLimits(double& command);
+  void enforcePositionLimits(double& command);
 
   hardware_interface::JointHandle joint_;
   urdf::JointConstSharedPtr joint_urdf_;
