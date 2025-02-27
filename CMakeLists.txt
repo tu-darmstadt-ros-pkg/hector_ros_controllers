@@ -24,27 +24,34 @@ foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${Dependency} REQUIRED)
 endforeach()
 
+# Add parameter_libaries here
+
 generate_parameter_library(
   speed_to_position_command_controller_parameters
   src/speed_to_position_command_controller_parameters.yaml
 )
 
-add_library(speed_to_position_command_controller SHARED
+# Add controllers here
+# Define Controllers as Shared Libraries
+
+add_library(speed_to_position_controller SHARED
   src/speed_to_position_controllers_base.cpp
   src/speed_to_position_command_controller.cpp
 )
-target_compile_features(speed_to_position_command_controller PUBLIC cxx_std_17)
-target_include_directories(speed_to_position_command_controller PUBLIC
+target_compile_features(speed_to_position_controller PUBLIC cxx_std_17)
+target_include_directories(speed_to_position_controller PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include/speed_to_position_command_controller>
+  $<INSTALL_INTERFACE:include/speed_to_position_controller>
 )
-target_link_libraries(speed_to_position_command_controller PUBLIC
+target_link_libraries(speed_to_position_controller PUBLIC
   speed_to_position_command_controller_parameters
 )
-ament_target_dependencies(speed_to_position_command_controller PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+ament_target_dependencies(speed_to_position_controller PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+
 # Causes the visibility macros to use dllexport rather than dllimport,
 # which is appropriate when building the dll but not consuming it.
-target_compile_definitions(speed_to_position_command_controller PRIVATE "SPEED_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+target_compile_definitions(speed_to_position_controller PRIVATE "SPEED_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+
 pluginlib_export_plugin_description_file(controller_interface hector_ros_controller_plugin.xml)
 
 
@@ -69,26 +76,26 @@ if(BUILD_TESTING)
     test/test_speed_to_position_command_controller.cpp
   )
   target_link_libraries(test_speed_to_position_command_controller
-    speed_to_position_command_controller
+    speed_to_position_controller
   )
 
 endif()
 
 install(
   DIRECTORY include/
-  DESTINATION include/speed_to_position_command_controller
+  DESTINATION include/
 )
 install(
   TARGETS
-    speed_to_position_command_controller
+    speed_to_position_controller
     speed_to_position_command_controller_parameters
-  EXPORT export_speed_to_position_command_controller
+  EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   INCLUDES DESTINATION include
 )
 
-ament_export_targets(export_speed_to_position_command_controller HAS_LIBRARY_TARGET)
+ament_export_targets(export_hector_ros_controllers HAS_LIBRARY_TARGET)
 ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
 ament_package()
