@@ -1,72 +1,94 @@
-cmake_minimum_required(VERSION 3.0.2)
-project(hector_ros_controllers)
+cmake_minimum_required(VERSION 3.16)
+project(hector_ros_controllers LANGUAGES CXX)
 
-# Default to C++14
-if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14)
+if(CMAKE_CXX_COMPILER_ID MATCHES "(GNU|Clang)")
+  add_compile_options(-Wall -Wextra -Wpedantic -Werror=conversion -Werror=unused-but-set-variable
+                      -Werror=return-type -Werror=shadow -Werror=format -Werror=range-loop-construct
+                      -Werror=missing-braces)
 endif()
 
-## Find catkin macros and libraries
-find_package(catkin REQUIRED COMPONENTS
-  angles
-  control_msgs
-  control_toolbox
+set(THIS_PACKAGE_INCLUDE_DEPENDS
   controller_interface
+  generate_parameter_library
   hardware_interface
   pluginlib
+  rclcpp
+  rclcpp_lifecycle
   realtime_tools
-  roscpp
   std_msgs
-  urdf
 )
 
+find_package(ament_cmake REQUIRED)
+find_package(backward_ros REQUIRED)
+foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
+  find_package(${Dependency} REQUIRED)
+endforeach()
 
-###################################
-## catkin specific configuration ##
-###################################
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES hector_ros_controllers
-  CATKIN_DEPENDS angles control_msgs control_toolbox controller_interface hardware_interface pluginlib realtime_tools roscpp std_msgs urdf
-#  DEPENDS system_lib
+generate_parameter_library(
+  speed_to_position_command_controller_parameters
+  src/speed_to_position_command_controller_parameters.yaml
 )
 
-###########
-## Build ##
-###########
+add_library(speed_to_position_command_controller SHARED
+  src/speed_to_position_controllers_base.cpp
+  src/speed_to_position_command_controller.cpp
+)
+target_compile_features(speed_to_position_command_controller PUBLIC cxx_std_17)
+target_include_directories(speed_to_position_command_controller PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/speed_to_position_command_controller>
+)
+target_link_libraries(speed_to_position_command_controller PUBLIC
+  speed_to_position_command_controller_parameters
+)
+ament_target_dependencies(speed_to_position_command_controller PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+# Causes the visibility macros to use dllexport rather than dllimport,
+# which is appropriate when building the dll but not consuming it.
+target_compile_definitions(speed_to_position_command_controller PRIVATE "SPEED_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+pluginlib_export_plugin_description_file(controller_interface hector_ros_controller_plugin.xml)
 
-include_directories(
- include
-  ${catkin_INCLUDE_DIRS}
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gmock REQUIRED)
+  find_package(controller_manager REQUIRED)
+  find_package(ros2_control_test_assets REQUIRED)
+
+  ament_add_gmock(test_load_speed_to_position_command_controller
+    test/test_load_speed_to_position_command_controller.cpp
+  )
+  target_link_libraries(test_load_speed_to_position_command_controller
+    speed_to_position_command_controller
+  )
+  ament_target_dependencies(test_load_speed_to_position_command_controller
+    controller_manager
+    hardware_interface
+    ros2_control_test_assets
+  )
+
+  ament_add_gmock(test_speed_to_position_command_controller
+    test/test_speed_to_position_command_controller.cpp
+  )
+  target_link_libraries(test_speed_to_position_command_controller
+    speed_to_position_command_controller
+  )
+
+endif()
+
+install(
+  DIRECTORY include/
+  DESTINATION include/speed_to_position_command_controller
+)
+install(
+  TARGETS
+    speed_to_position_command_controller
+    speed_to_position_command_controller_parameters
+  EXPORT export_speed_to_position_command_controller
+  RUNTIME DESTINATION bin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  INCLUDES DESTINATION include
 )
 
-## Declare a C++ library
-add_library(${PROJECT_NAME}
-  src/velocity_to_position_controller.cpp
-)
-
-## Specify libraries to link a library or executable target against
-target_link_libraries(${PROJECT_NAME}
-  ${catkin_LIBRARIES}
-)
-
-#############
-## Install ##
-#############
-
-# Install headers
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-)
-
-# Install targets
-install(TARGETS ${PROJECT_NAME}
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-)
-
-# Install plugins
-install(FILES controller_plugins.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
+ament_export_targets(export_speed_to_position_command_controller HAS_LIBRARY_TARGET)
+ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
+ament_package()

@@ -1,0 +1,7 @@
+<library path="hector_ros_controller">
+  <class name="speed_to_position_command_controller/SpeedToPositionCommandController" type="speed_to_position_command_controller::SpeedToPositionCommandController" base_class_type="controller_interface::ControllerInterface">
+  <description>
+    The speed to position command controller provides a velocity input and coverts it to position commands.
+  </description>
+  </class>
+</library>

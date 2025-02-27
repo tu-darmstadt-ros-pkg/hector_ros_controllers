@@ -1,0 +1,6 @@
+speed_to_position_command_controller:
+  joints: {
+    type: string_array,
+    default_value: [],
+    description: "Name of the joints to control",
+  }
