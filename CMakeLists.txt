@@ -31,26 +31,33 @@ generate_parameter_library(
   src/velocity_to_position_command_controller_parameters.yaml
 )
 
+generate_parameter_library(
+  passthrough_controller_parameters
+  src/passthrough_controller_parameters.yaml
+)
+
 # Add controllers here
 # Define Controllers as Shared Libraries
 
-add_library(velocity_to_position_controller SHARED
+add_library(controllers SHARED
   src/velocity_to_position_controllers_base.cpp
   src/velocity_to_position_command_controller.cpp
+  src/passthrough_controller.cpp
 )
-target_compile_features(velocity_to_position_controller PUBLIC cxx_std_17)
-target_include_directories(velocity_to_position_controller PUBLIC
+target_compile_features(controllers PUBLIC cxx_std_17)
+target_include_directories(controllers PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include/velocity_to_position_controller>
+  $<INSTALL_INTERFACE:include/controllers>
 )
-target_link_libraries(velocity_to_position_controller PUBLIC
+target_link_libraries(controllers PUBLIC
   velocity_to_position_command_controller_parameters
+  passthrough_controller_parameters
 )
-ament_target_dependencies(velocity_to_position_controller PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 # Causes the visibility macros to use dllexport rather than dllimport,
 # which is appropriate when building the dll but not consuming it.
-target_compile_definitions(velocity_to_position_controller PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+target_compile_definitions(controllers PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
 
 pluginlib_export_plugin_description_file(controller_interface hector_ros_controller_plugin.xml)
 
@@ -87,8 +94,9 @@ install(
 )
 install(
   TARGETS
-    velocity_to_position_controller
+    controllers
     velocity_to_position_command_controller_parameters
+    passthrough_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib

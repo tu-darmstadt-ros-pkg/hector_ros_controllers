@@ -26,14 +26,9 @@
 namespace velocity_to_position_command_controller
 {
 /**
- * \brief Forward command controller for a set of joints.
+ * \brief Speudo speed command controller for a set of joints.
  *
  * This class forwards the command signal down to a set of joints on the specified interface.
- *
- * \param primary_joint Name of the primary joint to control.
- * \param mimic_joints Name of the mimic joints to control based on the primary joint.
- * \param interface_name Name of the interface to command.
- *
  * Subscribes to:
  * - \b commands (std_msgs::msg::Float64MultiArray) : The commands to apply.
  */
