@@ -29,12 +29,12 @@ endforeach()
 
 generate_parameter_library(
   velocity_to_position_command_controller_parameters
-  src/velocity_to_position_command_controller_parameters.yaml
+  params/velocity_to_position_command_controller_parameters.yaml
 )
 
 generate_parameter_library(
   passthrough_controller_parameters
-  src/passthrough_controller_parameters.yaml
+  params/passthrough_controller_parameters.yaml
 )
 
 # Add controllers here
