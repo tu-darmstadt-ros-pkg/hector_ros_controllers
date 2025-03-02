@@ -46,8 +46,13 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
 
   urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF(this->get_robot_description());
 
+  std::string interface_prefix = "";
+
+  if(!params_.passthrough_controller.empty())
+    interface_prefix = params_.passthrough_controller + "/";
+
   for (const auto & joint : params_.joints){
-    command_interface_types_.push_back(joint + "/" + "position");
+    command_interface_types_.push_back(interface_prefix + joint + "/position");
     state_interface_types_.push_back(joint + "/" + "position");
     //joint_limits_.push_back(*(urdf->getJoint(joint)->limits));
 

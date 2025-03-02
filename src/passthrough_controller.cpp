@@ -21,21 +21,17 @@ namespace passthrough_controller
 
 controller_interface::CallbackReturn PassthroughController::on_init()
 {
-  try
-  {
-    param_listener_ = std::make_shared<ParamListener>(get_node());
+  try {
+    param_listener_ = std::make_shared<ParamListener>( get_node() );
     params_ = param_listener_->get_params();
-  }
-  catch (const std::exception & e)
-  {
-    fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
+  } catch ( const std::exception &e ) {
+    fprintf( stderr, "Exception thrown during init stage with message: %s \n", e.what() );
     return controller_interface::CallbackReturn::ERROR;
   }
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::InterfaceConfiguration
-PassthroughController::command_interface_configuration() const
+controller_interface::InterfaceConfiguration PassthroughController::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration command_interfaces_config;
   command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -44,99 +40,107 @@ PassthroughController::command_interface_configuration() const
   return command_interfaces_config;
 }
 
-controller_interface::InterfaceConfiguration PassthroughController::state_interface_configuration()
-  const
+controller_interface::InterfaceConfiguration PassthroughController::state_interface_configuration() const
 {
   return controller_interface::InterfaceConfiguration{
-    controller_interface::interface_configuration_type::NONE};
+      controller_interface::interface_configuration_type::NONE };
 }
 
-controller_interface::CallbackReturn PassthroughController::on_configure(
-  const rclcpp_lifecycle::State & /*previous_state*/)
+controller_interface::CallbackReturn
+PassthroughController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
-  params_ = param_listener_->get_params();
-  command_interface_names_ = params_.interfaces;
 
-  joints_cmd_sub_ = this->get_node()->create_subscription<DataType>(
-    "~/commands", rclcpp::SystemDefaultsQoS(),
-    [this](const DataType::SharedPtr msg)
-    {
-      // check if message is correct size, if not ignore
-      if (msg->data.size() == command_interface_names_.size())
-      {
-        rt_buffer_ptr_.writeFromNonRT(msg);
-      }
-      else
-      {
-        RCLCPP_ERROR(
-          this->get_node()->get_logger(), "Invalid command received of %zu size, expected %zu size",
-          msg->data.size(), command_interface_names_.size());
-      }
-    });
+  if ( !param_listener_ ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Error encountered during init" );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  params_ = param_listener_->get_params();
+
+  if ( params_.joints.empty() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "'joints' parameter was empty" );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  joints_ = params_.joints;
+
+  if ( params_.interface_types.empty() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "'interface_types' parameter was empty" );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  command_interface_names_.reserve( joints_.size() * params_.interface_types.size() );
+
+  for ( auto i = 0ul; i < joints_.size(); i++ ) {
+    for ( auto j = 0ul; j < params_.interface_types.size(); j++ ) {
+      command_interface_names_.push_back( joints_[i] + "/" + params_.interface_types[j] );
+    }
+  }
+
+  urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
 
   // pre-reserve command interfaces
-  command_interfaces_.reserve(command_interface_names_.size());
 
-  RCLCPP_INFO(this->get_node()->get_logger(), "configure successful");
+  RCLCPP_INFO( this->get_node()->get_logger(), "configure successful" );
 
   // The names should be in the same order as for command interfaces for easier matching
-  reference_interface_names_ = command_interface_names_;
+  for ( auto i = 0ul; i < command_interface_names_.size(); i++ )
+    reference_interface_names_.push_back( command_interface_names_[i] );
   // for any case make reference interfaces size of command interfaces
-  reference_interfaces_.resize(
-    reference_interface_names_.size(), std::numeric_limits<double>::quiet_NaN());
+  reference_interfaces_.resize( reference_interface_names_.size(),
+                                std::numeric_limits<double>::quiet_NaN() );
+  
+  auto node = get_node();
+
+  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>( *tf_buffer_ );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn PassthroughController::on_activate(
-  const rclcpp_lifecycle::State & /*previous_state*/)
+controller_interface::CallbackReturn
+PassthroughController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   //  check if we have all resources defined in the "points" parameter
   //  also verify that we *only* have the resources defined in the "points" parameter
   // ATTENTION(destogl): Shouldn't we use ordered interface all the time?
-  std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>>
-    ordered_interfaces;
-  if (
-    !controller_interface::get_ordered_interfaces(
-      command_interfaces_, command_interface_names_, std::string(""), ordered_interfaces) ||
-    command_interface_names_.size() != ordered_interfaces.size())
-  {
-    RCLCPP_ERROR(
-      this->get_node()->get_logger(), "Expected %zu command interfaces, got %zu",
-      command_interface_names_.size(), ordered_interfaces.size());
+  std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_interfaces;
+  if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_names_,
+                                                      std::string( "" ), ordered_interfaces ) ||
+       command_interface_names_.size() != ordered_interfaces.size() ) {
+    RCLCPP_ERROR( this->get_node()->get_logger(), "Expected %zu command interfaces, got %zu",
+                  command_interface_names_.size(), ordered_interfaces.size() );
     return controller_interface::CallbackReturn::ERROR;
   }
 
   // reset command buffer if a command came through callback when controller was inactive
-  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>(nullptr);
+  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
 
-  RCLCPP_INFO(this->get_node()->get_logger(), "activate successful");
+  RCLCPP_INFO( this->get_node()->get_logger(), "activate successful" );
 
-  std::fill(
-    reference_interfaces_.begin(), reference_interfaces_.end(),
-    std::numeric_limits<double>::quiet_NaN());
+  std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
+             std::numeric_limits<double>::quiet_NaN() );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn PassthroughController::on_deactivate(
-  const rclcpp_lifecycle::State & /*previous_state*/)
+controller_interface::CallbackReturn
+PassthroughController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   // reset command buffer
-  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>(nullptr);
+  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-bool PassthroughController::on_set_chained_mode(bool /*chained_mode*/) { return true; }
+bool PassthroughController::on_set_chained_mode( bool /*chained_mode*/ ) { return true; }
 
-controller_interface::return_type PassthroughController::update_and_write_commands(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+controller_interface::return_type
+PassthroughController::update_and_write_commands( const rclcpp::Time & /*time*/,
+                                                  const rclcpp::Duration & /*period*/ )
 {
-  for (size_t i = 0; i < command_interfaces_.size(); ++i)
-  {
-    if (!std::isnan(reference_interfaces_[i]))
-    {
-      command_interfaces_[i].set_value(reference_interfaces_[i]);
+  for ( size_t i = 0; i < command_interfaces_.size(); ++i ) {
+    if ( !std::isnan( reference_interfaces_[i] ) ) {
+      command_interfaces_[i].set_value( reference_interfaces_[i] );
     }
   }
 
@@ -148,37 +152,57 @@ PassthroughController::on_export_reference_interfaces()
 {
   std::vector<hardware_interface::CommandInterface> reference_interfaces;
 
-  for (size_t i = 0; i < reference_interface_names_.size(); ++i)
-  {
-    reference_interfaces.push_back(hardware_interface::CommandInterface(
-      get_node()->get_name(), reference_interface_names_[i], &reference_interfaces_[i]));
+  for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
+    reference_interfaces.push_back( hardware_interface::CommandInterface(
+        get_node()->get_name(), reference_interface_names_[i], &reference_interfaces_[i] ) );
   }
 
   return reference_interfaces;
 }
 
-controller_interface::return_type PassthroughController::update_reference_from_subscribers(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+void PassthroughController::set_child_links( urdf::ModelInterfaceSharedPtr urdf )
+{
+  joint_child_link_names_.reserve( joints_.size() );
+
+  for ( auto i = 0ul; i < joints_.size(); i++ ) {
+    joint_child_link_names_.push_back(urdf->getJoint( joints_[i] )->child_link_name);
+  }
+}
+
+void PassthroughController::aggregate_collision_primitives( urdf::ModelInterfaceSharedPtr urdf )
+{
+  for ( std::string link_name : joint_child_link_names_ ) {
+
+    links_aggregated_collision_primitives_[link_name] = std::vector < std::shared_ptr<urdf::Collision>>();
+
+    auto collision_elements = urdf->getLink( link_name )->collision_array;
+    for ( auto it = collision_elements.begin(); it != collision_elements.end(); ++it ) {
+      links_aggregated_collision_primitives_[link_name].push_back( *it );
+    }
+  }
+}
+
+controller_interface::return_type
+PassthroughController::update_reference_from_subscribers( const rclcpp::Time & /*time*/,
+                                                          const rclcpp::Duration & /*period*/ )
 {
   auto joint_commands = rt_buffer_ptr_.readFromRT();
   // message is valid
-  if (!(!joint_commands || !(*joint_commands)))
-  {
-    if (reference_interfaces_.size() != (*joint_commands)->data.size())
-    {
+  if ( !( !joint_commands || !( *joint_commands ) ) ) {
+    if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
       RCLCPP_ERROR_THROTTLE(
-        get_node()->get_logger(), *(get_node()->get_clock()), 1000,
-        "command size (%zu) does not match number of reference interfaces (%zu)",
-        (*joint_commands)->data.size(), reference_interfaces_.size());
+          get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+          "command size (%zu) does not match number of reference interfaces (%zu)",
+          ( *joint_commands )->data.size(), reference_interfaces_.size() );
       return controller_interface::return_type::ERROR;
     }
-    reference_interfaces_ = (*joint_commands)->data;
+    reference_interfaces_ = ( *joint_commands )->data;
   }
 
   return controller_interface::return_type::OK;
 }
 
-}  // namespace passthrough_controller
+} // namespace passthrough_controller
 
-PLUGINLIB_EXPORT_CLASS(
-  passthrough_controller::PassthroughController, controller_interface::ChainableControllerInterface)
+PLUGINLIB_EXPORT_CLASS( passthrough_controller::PassthroughController,
+                        controller_interface::ChainableControllerInterface )

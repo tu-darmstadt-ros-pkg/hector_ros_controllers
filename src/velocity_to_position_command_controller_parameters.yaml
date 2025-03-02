@@ -4,3 +4,9 @@ velocity_to_position_command_controller:
     default_value: [],
     description: "Name of the joints to control",
   }
+
+  passthrough_controller: {
+    type: string,
+    default_value: "",
+    description: "Name of passthrough controller which exposes command interfaces for the specified joints"
+  }
