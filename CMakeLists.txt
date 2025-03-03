@@ -27,30 +27,30 @@ endforeach()
 # Add parameter_libaries here
 
 generate_parameter_library(
-  speed_to_position_command_controller_parameters
-  src/speed_to_position_command_controller_parameters.yaml
+  velocity_to_position_command_controller_parameters
+  src/velocity_to_position_command_controller_parameters.yaml
 )
 
 # Add controllers here
 # Define Controllers as Shared Libraries
 
-add_library(speed_to_position_controller SHARED
-  src/speed_to_position_controllers_base.cpp
-  src/speed_to_position_command_controller.cpp
+add_library(velocity_to_position_controller SHARED
+  src/velocity_to_position_controllers_base.cpp
+  src/velocity_to_position_command_controller.cpp
 )
-target_compile_features(speed_to_position_controller PUBLIC cxx_std_17)
-target_include_directories(speed_to_position_controller PUBLIC
+target_compile_features(velocity_to_position_controller PUBLIC cxx_std_17)
+target_include_directories(velocity_to_position_controller PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include/speed_to_position_controller>
+  $<INSTALL_INTERFACE:include/velocity_to_position_controller>
 )
-target_link_libraries(speed_to_position_controller PUBLIC
-  speed_to_position_command_controller_parameters
+target_link_libraries(velocity_to_position_controller PUBLIC
+  velocity_to_position_command_controller_parameters
 )
-ament_target_dependencies(speed_to_position_controller PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+ament_target_dependencies(velocity_to_position_controller PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 # Causes the visibility macros to use dllexport rather than dllimport,
 # which is appropriate when building the dll but not consuming it.
-target_compile_definitions(speed_to_position_controller PRIVATE "SPEED_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+target_compile_definitions(velocity_to_position_controller PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
 
 pluginlib_export_plugin_description_file(controller_interface hector_ros_controller_plugin.xml)
 
@@ -60,23 +60,23 @@ if(BUILD_TESTING)
   find_package(controller_manager REQUIRED)
   find_package(ros2_control_test_assets REQUIRED)
 
-  ament_add_gmock(test_load_speed_to_position_command_controller
-    test/test_load_speed_to_position_command_controller.cpp
+  ament_add_gmock(test_load_velocity_to_position_command_controller
+    test/test_load_velocity_to_position_command_controller.cpp
   )
-  target_link_libraries(test_load_speed_to_position_command_controller
-    speed_to_position_command_controller
+  target_link_libraries(test_load_velocity_to_position_command_controller
+    velocity_to_position_command_controller
   )
-  ament_target_dependencies(test_load_speed_to_position_command_controller
+  ament_target_dependencies(test_load_velocity_to_position_command_controller
     controller_manager
     hardware_interface
     ros2_control_test_assets
   )
 
-  ament_add_gmock(test_speed_to_position_command_controller
-    test/test_speed_to_position_command_controller.cpp
+  ament_add_gmock(test_velocity_to_position_command_controller
+    test/test_velocity_to_position_command_controller.cpp
   )
-  target_link_libraries(test_speed_to_position_command_controller
-    speed_to_position_controller
+  target_link_libraries(test_velocity_to_position_command_controller
+    velocity_to_position_controller
   )
 
 endif()
@@ -87,8 +87,8 @@ install(
 )
 install(
   TARGETS
-    speed_to_position_controller
-    speed_to_position_command_controller_parameters
+    velocity_to_position_controller
+    velocity_to_position_command_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib

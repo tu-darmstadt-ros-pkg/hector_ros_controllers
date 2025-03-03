@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "speed_to_position_command_controller/speed_to_position_controllers_base.hpp"
+#include "velocity_to_position_command_controller/velocity_to_position_controllers_base.hpp"
 
 #include <memory>
 #include <string>
@@ -23,16 +23,16 @@
 #include "rclcpp/logging.hpp"
 #include "rclcpp/qos.hpp"
 
-namespace speed_to_position_command_controller
+namespace velocity_to_position_command_controller
 {
-SpeedToPositionControllersBase::SpeedToPositionControllersBase()
+VelocityToPositionControllersBase::VelocityToPositionControllersBase()
 : controller_interface::ControllerInterface(),
   rt_command_ptr_(nullptr),
   joints_command_subscriber_(nullptr)
 {
 }
 
-controller_interface::CallbackReturn SpeedToPositionControllersBase::on_init()
+controller_interface::CallbackReturn VelocityToPositionControllersBase::on_init()
 {
   try
   {
@@ -47,7 +47,7 @@ controller_interface::CallbackReturn SpeedToPositionControllersBase::on_init()
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn SpeedToPositionControllersBase::on_configure(
+controller_interface::CallbackReturn VelocityToPositionControllersBase::on_configure(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   auto ret = this->read_parameters();
@@ -68,7 +68,7 @@ controller_interface::CallbackReturn SpeedToPositionControllersBase::on_configur
 }
 
 controller_interface::InterfaceConfiguration
-SpeedToPositionControllersBase::command_interface_configuration() const
+VelocityToPositionControllersBase::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration command_interfaces_config;
   command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -77,7 +77,7 @@ SpeedToPositionControllersBase::command_interface_configuration() const
   return command_interfaces_config;
 }
 
-controller_interface::InterfaceConfiguration SpeedToPositionControllersBase::state_interface_configuration()
+controller_interface::InterfaceConfiguration VelocityToPositionControllersBase::state_interface_configuration()
   const
 {
   controller_interface::InterfaceConfiguration state_interface_config;
@@ -87,7 +87,7 @@ controller_interface::InterfaceConfiguration SpeedToPositionControllersBase::sta
   return state_interface_config;
 }
 
-controller_interface::CallbackReturn SpeedToPositionControllersBase::on_activate(
+controller_interface::CallbackReturn VelocityToPositionControllersBase::on_activate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   //  check if we have all resources defined in the "points" parameter
@@ -116,7 +116,7 @@ controller_interface::CallbackReturn SpeedToPositionControllersBase::on_activate
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn SpeedToPositionControllersBase::on_deactivate(
+controller_interface::CallbackReturn VelocityToPositionControllersBase::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   // reset command buffer
@@ -124,7 +124,7 @@ controller_interface::CallbackReturn SpeedToPositionControllersBase::on_deactiva
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::return_type SpeedToPositionControllersBase::update(
+controller_interface::return_type VelocityToPositionControllersBase::update(
   const rclcpp::Time & /*time*/, const rclcpp::Duration & p/*period*/)
 {
   auto joint_vel_commands = rt_command_ptr_.readFromRT();

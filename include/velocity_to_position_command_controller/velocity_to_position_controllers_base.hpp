@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SPEED_TO_POSITION_COMMAND_CONTROLLER__SPEED_TO_POSITION_CONTROLLERS_BASE_HPP_
-#define SPEED_TO_POSITION_COMMAND_CONTROLLER__SPEED_TO_POSITION_CONTROLLERS_BASE_HPP_
+#ifndef VELOCITY_TO_POSITION_COMMAND_CONTROLLER__VELOCITY_TO_POSITION_CONTROLLERS_BASE_HPP_
+#define VELOCITY_TO_POSITION_COMMAND_CONTROLLER__VELOCITY_TO_POSITION_CONTROLLERS_BASE_HPP_
 
 #include <memory>
 #include <string>
@@ -22,13 +22,13 @@
 
 #include <urdf_parser/urdf_parser.h>
 #include "controller_interface/controller_interface.hpp"
-#include "speed_to_position_command_controller/visibility_control.h"
+#include "velocity_to_position_command_controller/visibility_control.h"
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/state.hpp"
-#include "realtime_tools/realtime_buffer.h"
+#include "realtime_tools/realtime_buffer.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
-namespace speed_to_position_command_controller
+namespace velocity_to_position_command_controller
 {
 using CmdType = std_msgs::msg::Float64MultiArray;
 
@@ -40,37 +40,37 @@ using CmdType = std_msgs::msg::Float64MultiArray;
  * Subscribes to:
  * - \b commands (std_msgs::msg::Float64) : The commands to apply.
  */
-class SpeedToPositionControllersBase : public controller_interface::ControllerInterface
+class VelocityToPositionControllersBase : public controller_interface::ControllerInterface
 {
 public:
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-  SpeedToPositionControllersBase();
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VelocityToPositionControllersBase();
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-  ~SpeedToPositionControllersBase() = default;
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  ~VelocityToPositionControllersBase() = default;
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::InterfaceConfiguration command_interface_configuration() const override;
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::InterfaceConfiguration state_interface_configuration() const override;
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn on_init() override;
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn on_configure(
     const rclcpp_lifecycle::State & previous_state) override;
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn on_activate(
     const rclcpp_lifecycle::State & previous_state) override;
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn on_deactivate(
     const rclcpp_lifecycle::State & previous_state) override;
 
-  SPEED_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::return_type update(
     const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
@@ -106,6 +106,6 @@ protected:
   rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
 };
 
-}  // namespace SPEED_TO_POSITION_COMMAND_controller
+}  // namespace VELOCITY_TO_POSITION_COMMAND_controller
 
-#endif  // SPEED_TO_POSITION_COMMAND_CONTROLLER__FORWARD_CONTROLLERS_BASE_HPP_
+#endif  // VELOCITY_TO_POSITION_COMMAND_CONTROLLER__FORWARD_CONTROLLERS_BASE_HPP_

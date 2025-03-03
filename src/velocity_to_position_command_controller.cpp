@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "speed_to_position_command_controller/speed_to_position_command_controller.hpp"
+#include "velocity_to_position_command_controller/velocity_to_position_command_controller.hpp"
 
 #include <memory>
 #include <string>
@@ -20,16 +20,16 @@
 
 #include "rclcpp/logging.hpp"
 
-namespace speed_to_position_command_controller
+namespace velocity_to_position_command_controller
 {
-SpeedToPositionCommandController::SpeedToPositionCommandController() : SpeedToPositionControllersBase() {}
+VelocityToPositionCommandController::VelocityToPositionCommandController() : VelocityToPositionControllersBase() {}
 
-void SpeedToPositionCommandController::declare_parameters()
+void VelocityToPositionCommandController::declare_parameters()
 {
   param_listener_ = std::make_shared<ParamListener>(get_node());
 }
 
-controller_interface::CallbackReturn SpeedToPositionCommandController::read_parameters()
+controller_interface::CallbackReturn VelocityToPositionCommandController::read_parameters()
 {
   if (!param_listener_)
   {
@@ -67,4 +67,4 @@ controller_interface::CallbackReturn SpeedToPositionCommandController::read_para
 #include "pluginlib/class_list_macros.hpp"
 
 PLUGINLIB_EXPORT_CLASS(
-  speed_to_position_command_controller::SpeedToPositionCommandController, controller_interface::ControllerInterface)
+  velocity_to_position_command_controller::VelocityToPositionCommandController, controller_interface::ControllerInterface)
