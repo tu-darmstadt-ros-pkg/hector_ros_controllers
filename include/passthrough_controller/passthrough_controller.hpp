@@ -24,6 +24,8 @@
 
 #include "boost/shared_ptr.hpp"
 #include "controller_interface/chainable_controller_interface.hpp"
+#include "fcl/narrowphase/collision.h"
+#include "fcl/geometry/collision_geometry.h"
 #include "realtime_tools/realtime_buffer.h"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "tf2/exceptions.h"
@@ -73,7 +75,11 @@ protected:
                                      const rclcpp::Duration &period ) override;
 
   void set_child_links( urdf::ModelInterfaceSharedPtr urdf );
+
   void aggregate_collision_primitives( urdf::ModelInterfaceSharedPtr urdf );
+
+  std::shared_ptr<fcl::CollisionGeometry<double>>
+  convert_urdf_geom_to_fcl_geom( std::shared_ptr<urdf::Geometry> urdf_geom );
 
   std::shared_ptr<ParamListener> param_listener_;
   Params params_;

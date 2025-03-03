@@ -89,10 +89,10 @@ PassthroughController::on_configure( const rclcpp_lifecycle::State & /*previous_
   // for any case make reference interfaces size of command interfaces
   reference_interfaces_.resize( reference_interface_names_.size(),
                                 std::numeric_limits<double>::quiet_NaN() );
-  
+
   auto node = get_node();
 
-  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node->get_clock());
+  tf_buffer_ = std::make_unique<tf2_ros::Buffer>( node->get_clock() );
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>( *tf_buffer_ );
 
   return controller_interface::CallbackReturn::SUCCESS;
@@ -165,7 +165,7 @@ void PassthroughController::set_child_links( urdf::ModelInterfaceSharedPtr urdf 
   joint_child_link_names_.reserve( joints_.size() );
 
   for ( auto i = 0ul; i < joints_.size(); i++ ) {
-    joint_child_link_names_.push_back(urdf->getJoint( joints_[i] )->child_link_name);
+    joint_child_link_names_.push_back( urdf->getJoint( joints_[i] )->child_link_name );
   }
 }
 
@@ -173,12 +173,45 @@ void PassthroughController::aggregate_collision_primitives( urdf::ModelInterface
 {
   for ( std::string link_name : joint_child_link_names_ ) {
 
-    links_aggregated_collision_primitives_[link_name] = std::vector < std::shared_ptr<urdf::Collision>>();
+    links_aggregated_collision_primitives_[link_name] =
+        std::vector<std::shared_ptr<urdf::Collision>>();
 
     auto collision_elements = urdf->getLink( link_name )->collision_array;
     for ( auto it = collision_elements.begin(); it != collision_elements.end(); ++it ) {
       links_aggregated_collision_primitives_[link_name].push_back( *it );
     }
+  }
+}
+
+std::shared_ptr<fcl::CollisionGeometry<double>>
+PassthroughController::convert_urdf_geom_to_fcl_geom( std::shared_ptr<urdf::Geometry> urdf_geom )
+{
+
+  switch ( urdf_geom->type ) {
+  case urdf::Geometry::SPHERE :
+  {
+    std::shared_ptr<urdf::Sphere> urdf_sphere = std::static_pointer_cast<urdf::Sphere>( urdf_geom );
+    std::shared_ptr<fcl::Sphere<double>> fcl_sphere =
+        std::make_shared<fcl::Sphere<double>>( urdf_sphere->radius );
+    return std::static_pointer_cast<fcl::CollisionGeometry<double>>( fcl_sphere );
+  }
+  case urdf::Geometry::BOX:
+  {
+    std::shared_ptr<urdf::Box> urdf_box = std::static_pointer_cast<urdf::Box>( urdf_geom );
+    std::shared_ptr<fcl::Box<double>> fcl_box = std::make_shared<fcl::Box<double>>( urdf_box->dim.x, urdf_box->dim.y, urdf_box->dim.z );
+    return std::static_pointer_cast<fcl::CollisionGeometry<double>>( fcl_box );
+  }
+  case urdf::Geometry::CYLINDER :
+  {
+    std::shared_ptr<urdf::Cylinder> urdf_cylinder =
+        std::static_pointer_cast<urdf::Cylinder>( urdf_geom );
+    std::shared_ptr<fcl::Cylinder<double>> fcl_cylinder =
+        std::make_shared<fcl::Cylinder<double>>( urdf_cylinder->radius, urdf_cylinder->length );
+    return std::static_pointer_cast<fcl::CollisionGeometry<double>>( fcl_cylinder );
+  }
+  default:{
+    return nullptr;
+  }
   }
 }
 
