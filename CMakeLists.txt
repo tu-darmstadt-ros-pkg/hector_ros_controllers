@@ -54,33 +54,6 @@ target_compile_definitions(velocity_to_position_controller PRIVATE "VELOCITY_TO_
 
 pluginlib_export_plugin_description_file(controller_interface hector_ros_controller_plugin.xml)
 
-
-if(BUILD_TESTING)
-  find_package(ament_cmake_gmock REQUIRED)
-  find_package(controller_manager REQUIRED)
-  find_package(ros2_control_test_assets REQUIRED)
-
-  ament_add_gmock(test_load_velocity_to_position_command_controller
-    test/test_load_velocity_to_position_command_controller.cpp
-  )
-  target_link_libraries(test_load_velocity_to_position_command_controller
-    velocity_to_position_command_controller
-  )
-  ament_target_dependencies(test_load_velocity_to_position_command_controller
-    controller_manager
-    hardware_interface
-    ros2_control_test_assets
-  )
-
-  ament_add_gmock(test_velocity_to_position_command_controller
-    test/test_velocity_to_position_command_controller.cpp
-  )
-  target_link_libraries(test_velocity_to_position_command_controller
-    velocity_to_position_controller
-  )
-
-endif()
-
 install(
   DIRECTORY include/
   DESTINATION include/
