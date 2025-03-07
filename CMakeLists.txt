@@ -9,6 +9,7 @@ endif()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   controller_interface
+  visualization_msgs
   generate_parameter_library
   hardware_interface
   pluginlib
@@ -17,6 +18,8 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   realtime_tools
   std_msgs
   tf2_ros
+  fcl
+  ad_kinematics
 )
 
 find_package(ament_cmake REQUIRED)
@@ -51,9 +54,11 @@ target_include_directories(controllers PUBLIC
   $<INSTALL_INTERFACE:include/controllers>
 )
 target_link_libraries(controllers PUBLIC
+  fcl
   velocity_to_position_command_controller_parameters
   passthrough_controller_parameters
 )
+target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 # Causes the visibility macros to use dllexport rather than dllimport,
