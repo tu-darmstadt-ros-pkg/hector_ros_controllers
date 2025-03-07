@@ -20,3 +20,15 @@ passthrough_controller:
     default_value: 0.01,
     description: "Safety margin for collision checks"
   }
+
+  collision_mat: {
+    type: int_array,
+    default_value: [],
+    description: "Array specifying which child links of specified joints can collide"
+  }
+
+  safety_margin: {
+    type: double,
+    default_value: 0.01,
+    description: "Safety margin for collision checks"
+  }

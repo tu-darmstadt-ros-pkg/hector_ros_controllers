@@ -22,6 +22,7 @@
 #include <string>
 #include <urdf_parser/urdf_parser.h>
 #include <vector>
+#include <chrono>
 
 #include "ad_kinematics/tree.h"
 #include "boost/shared_ptr.hpp"
