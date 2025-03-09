@@ -9,6 +9,7 @@ endif()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   controller_interface
+  srdfdom
   visualization_msgs
   generate_parameter_library
   hardware_interface

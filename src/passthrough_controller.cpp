@@ -46,7 +46,6 @@ controller_interface::InterfaceConfiguration PassthroughController::state_interf
   state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
 
   for ( std::string joint_name : active_joints_ ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "Add state interface %s", joint_name.c_str() );
     state_interfaces_config.names.push_back( joint_name + "/position" );
   }
 
@@ -71,27 +70,42 @@ PassthroughController::on_configure( const rclcpp_lifecycle::State & /*previous_
 
   controlled_joints_ = params_.joints;
 
-  if ( params_.interface_types.empty() ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "'interface_types' parameter was empty" );
+  if ( params_.joint_interface_types.size() != params_.joints.size() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Need to specifiy an interface type for each joint" );
     return controller_interface::CallbackReturn::ERROR;
   }
 
   // Use half since collision geom size increases are applied to source and target collision
   safety_margin_ = params_.safety_margin / 2;
 
-  command_interface_names_.reserve( controlled_joints_.size() * params_.interface_types.size() );
+  command_interface_names_.reserve( controlled_joints_.size() );
+  interface_types_.reserve( controlled_joints_.size() );
 
   for ( auto i = 0ul; i < controlled_joints_.size(); i++ ) {
-    for ( auto j = 0ul; j < params_.interface_types.size(); j++ ) {
-      command_interface_names_.push_back( controlled_joints_[i] + "/" + params_.interface_types[j] );
+
+    if ( params_.joint_interface_types[i] != "position" &&
+         params_.joint_interface_types[i] != "velocity" ) {
+      RCLCPP_ERROR( get_node()->get_logger(),
+                    "Only \"position\" and \"velocity\" interfaces are supported" );
+      return controller_interface::CallbackReturn::ERROR;
     }
+
+    command_interface_names_.push_back( controlled_joints_[i] + "/" +
+                                        params_.joint_interface_types[i] );
+    interface_types_.push_back( params_.joint_interface_types[i] );
   }
+
+  command_interface_names_.shrink_to_fit();
+  interface_types_.shrink_to_fit();
 
   // pre-reserve command interfaces
   // The names should be in the same order as for command interfaces for easier matching
-  for ( auto i = 0ul; i < command_interface_names_.size(); i++ )
+  for ( auto i = 0ul; i < command_interface_names_.size(); i++ ) {
     reference_interface_names_.push_back( command_interface_names_[i] );
-  // for any case make reference interfaces size of command interfaces
+  }
+
+  // reference_interface_names_.shrink_to_fit();
+  //  for any case make reference interfaces size of command interfaces
   reference_interfaces_.resize( reference_interface_names_.size(),
                                 std::numeric_limits<double>::quiet_NaN() );
 
@@ -101,9 +115,21 @@ PassthroughController::on_configure( const rclcpp_lifecycle::State & /*previous_
 
   urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
 
+  auto qos = rclcpp::QoS( 10 );
+  qos.transient_local();
+  srdf_received_ = false;
+  semantic_description_sub = get_node()->create_subscription<std_msgs::msg::String>(
+      "robot_description_semantic", qos, [this, urdf]( const std_msgs::msg::String::SharedPtr msg ) {
+        srdf_ = srdf::Model();
+        srdf_.initString( *urdf, msg->data );
+        srdf_received_ = true;
+      } );
+
   set_joint_infos( urdf );
 
-  set_potentially_colliding_links();
+  set_dependend_links( urdf );
+
+  set_potentially_colliding_links( urdf );
 
   collect_collision_primitives( urdf );
 
@@ -147,7 +173,7 @@ void PassthroughController::create_debug_marker( int id, std::shared_ptr<urdf::G
   }
   }
 
-  marker_pub_->publish( marker );
+  // marker_pub_->publish( marker );
 }
 
 void PassthroughController::modify_debug_marker( int id, const fcl::Transform3d &t,
@@ -235,22 +261,70 @@ void PassthroughController::modify_debug_marker( int id, const fcl::Transform3d 
     break;
   }
   }
-  marker_pub_->publish( marker );
+  // marker_pub_->publish( marker );
 }
 
-void PassthroughController::set_potentially_colliding_links()
+void PassthroughController::set_potentially_colliding_links( const urdf::ModelInterfaceSharedPtr urdf )
 {
-  for ( auto i = 0ul; i < controlled_joints_.size(); i++ ) {
+  RCLCPP_INFO( get_node()->get_logger(), "Waiting for semantic description" );
+  // wait for the semantic description message to be received
+  rclcpp::Rate rate( 3 );
+  int attempt = 0;
+  while ( !srdf_received_ ) {
+    rate.sleep();
+    attempt++;
+    if ( attempt % 10 == 0 )
+      RCLCPP_INFO( get_node()->get_logger(), "Waiting for semantic robot description on topic " );
+  }
 
-    potentially_colliding_links_.push_back( std::vector<long unsigned>{} );
+  RCLCPP_INFO( get_node()->get_logger(), "Setting possible collision" );
 
-    for ( auto j = 0ul; j < controlled_joints_.size(); j++ ) {
-      if ( params_.collision_mat[i * controlled_joints_.size() + j] == 1 )
-        potentially_colliding_links_[i].push_back( j );
+  std::set<std::string> all_link_names;
+
+  for ( auto it = urdf->links_.begin(); it != urdf->links_.end(); ++it ) {
+    all_link_names.insert( it->first );
+  }
+
+  std::set<std::string> all_dependent_links;
+  for ( std::vector<std::string> &dependent_links : controlled_joint_dependent_links ) {
+    for ( std::string &dependent_link : dependent_links ) {
+      auto result = all_dependent_links.insert( dependent_link );
+      // If encountering a dependent link for first time initialize
+      // potentially colliding links with all links
+      if ( result.second ) {
+        potentially_colliding_links_[dependent_link] = all_link_names;
+        potentially_colliding_links_[dependent_link].erase( dependent_link );
+      }
     }
+  }
 
-    RCLCPP_INFO( this->get_node()->get_logger(), "Coll targets for joint %s : %i",
-                 controlled_joints_[i].c_str(), (int)potentially_colliding_links_[i].size() );
+  const std::vector<srdf::Model::CollisionPair> &coll_pairs = srdf_.getDisabledCollisionPairs();
+  /*
+    for ( auto &coll_pair : coll_pairs ) {
+      if ( all_dependent_links.find( coll_pair.link1_ ) != all_dependent_links.end() )
+        potentially_colliding_links_[coll_pair.link1_].push_back( coll_pair.link2_ );
+      if ( all_dependent_links.find( coll_pair.link2_ ) != all_dependent_links.end() )
+        potentially_colliding_links_[coll_pair.link2_].push_back( coll_pair.link1_ );
+  */
+  for ( auto &coll_pair : coll_pairs ) {
+
+    if ( all_dependent_links.find( coll_pair.link1_ ) != all_dependent_links.end() ) {
+      potentially_colliding_links_[coll_pair.link1_].erase( coll_pair.link2_ );
+      RCLCPP_INFO( get_node()->get_logger(), "Erase %s from collision with %s",
+                   coll_pair.link2_.c_str(), coll_pair.link1_.c_str() );
+    }
+    if ( all_dependent_links.find( coll_pair.link2_ ) != all_dependent_links.end() ) {
+      potentially_colliding_links_[coll_pair.link2_].erase( coll_pair.link1_ );
+      RCLCPP_INFO( get_node()->get_logger(), "Erase %s from collision with %s",
+                   coll_pair.link1_.c_str(), coll_pair.link2_.c_str() );
+    }
+  }
+
+  for ( auto &it : potentially_colliding_links_ ) {
+    for ( auto l : it.second ) {
+      RCLCPP_INFO( get_node()->get_logger(), "Link %s can collide with %s", it.first.c_str(),
+                   l.c_str() );
+    }
   }
 }
 
@@ -308,7 +382,11 @@ bool PassthroughController::write_valid_reference_commands( std::vector<bool> &c
         success = success && command_interfaces_[i].set_value( reference_interfaces_[i] );
         prev_command_vals[i] = reference_interfaces_[i];
       } else {
-        success = success && command_interfaces_[i].set_value( prev_command_vals[i] );
+
+        if ( interface_types_[i] == "position" )
+          success = success && command_interfaces_[i].set_value( prev_command_vals[i] );
+        else
+          success = success && command_interfaces_[i].set_value( 0.0 );
       }
     }
   }
@@ -318,10 +396,10 @@ bool PassthroughController::write_valid_reference_commands( std::vector<bool> &c
 
 controller_interface::return_type
 PassthroughController::update_and_write_commands( const rclcpp::Time & /*time*/,
-                                                  const rclcpp::Duration & )
+                                                  const rclcpp::Duration &p )
 {
   std::chrono::time_point<std::chrono::system_clock> start, end;
- 
+
   start = std::chrono::system_clock::now();
 
   update_joint_angles();
@@ -330,45 +408,58 @@ PassthroughController::update_and_write_commands( const rclcpp::Time & /*time*/,
 
   for ( size_t i = 0; i < controlled_joints_.size(); i++ ) {
 
-    std::string child_link = joint_child_link_names_[i];
-    std::string joint = controlled_joints_[i];
-
     // skip if no command received from high level controller
     if ( std::isnan( reference_interfaces_[i] ) )
       continue;
     // Set hypothetical joint position
-    joint_angles_[q_indices_controlled[i]] = reference_interfaces_[i];
-
-    auto source_collisions = link_collision_primitives_[child_link];
-
-    bool any_collision = false;
-
-    for ( unsigned long coll_target : potentially_colliding_links_[i] ) {
-
-      std::string target_link = joint_child_link_names_[coll_target];
-
-      try {
-        fcl::Transform3d base_to_child_l = get_transform_from_base_link( child_link );
-        fcl::Transform3d base_to_target_l = get_transform_from_base_link( target_link );
-
-        any_collision = any_collision ||
-                        pairwise_primitive_collision_check( source_collisions,
-                                                            link_collision_primitives_[target_link],
-                                                            base_to_child_l, base_to_target_l );
-
-        RCLCPP_INFO( this->get_node()->get_logger(), "Collision: %i", any_collision );
-
-      } catch ( ... ) {
-        RCLCPP_INFO( this->get_node()->get_logger(), "Error for source %s to target %s.",
-                     joint.c_str(), target_link.c_str() );
-      }
-
-      // Some link is colliding -> skip other checks
-      if ( any_collision )
-        break;
+    if ( interface_types_[i] == "position" ) {
+      joint_angles_[q_indices_controlled[i]] = reference_interfaces_[i];
+    } else {
+      joint_angles_[q_indices_controlled[i]] += reference_interfaces_[i] * p.seconds();
     }
 
-    collision_results[i] = any_collision;
+    bool any_collision = false;
+    // Some depedent limk is colliding -> skip other checks
+    for ( size_t j = 0; j < controlled_joint_dependent_links[i].size() && !any_collision; j++ ) {
+
+      std::string &dependent_link = controlled_joint_dependent_links[i][j];
+
+      auto dependent_link_collisions = link_collision_primitives_[dependent_link];
+      fcl::Transform3d base_dependent_link_transform = get_transform_from_base_link( dependent_link );
+
+      // Some potentially link is colliding -> skip other checks
+      for ( auto it = potentially_colliding_links_[dependent_link].begin();
+            it != potentially_colliding_links_[dependent_link].end() && !any_collision; it++ ) {
+
+        std::string potentially_colliding_link = *it;
+
+        try {
+          fcl::Transform3d base_pot_colliding_link_transform =
+              get_transform_from_base_link( potentially_colliding_link );
+
+          any_collision = pairwise_primitive_collision_check(
+              dependent_link_collisions, link_collision_primitives_[potentially_colliding_link],
+              base_dependent_link_transform, base_pot_colliding_link_transform );
+
+          /*RCLCPP_INFO(
+              this->get_node()->get_logger(),
+              "Collision check %s : %i for dependent link \"%s\" and colliding link \"%s\" ",
+              controlled_joints_[i].c_str(), any_collision, dependent_link.c_str(),
+              potentially_colliding_link.c_str() );*/
+
+        } catch ( ... ) {
+          RCLCPP_INFO( this->get_node()->get_logger(), "Error for source %s to target %s.",
+                       dependent_link.c_str(), potentially_colliding_link.c_str() );
+        }
+      }
+
+      collision_results[i] = any_collision;
+    }
+
+    if ( any_collision ) {
+      // Reset hypothetical position
+      joint_angles_[q_indices_controlled[i]] = prev_command_vals[i];
+    }
   }
 
   bool success = write_valid_reference_commands( collision_results );
@@ -376,9 +467,9 @@ PassthroughController::update_and_write_commands( const rclcpp::Time & /*time*/,
   end = std::chrono::system_clock::now();
   std::chrono::duration<double> elapsed_seconds = end - start;
 
-  avg_update_dur = (avg_update_dur + elapsed_seconds.count())/2;
+  avg_update_dur = ( avg_update_dur + elapsed_seconds.count() ) / 2;
 
-  RCLCPP_INFO( this->get_node()->get_logger(), "Update loop took: %f s", avg_update_dur);
+  RCLCPP_INFO( this->get_node()->get_logger(), "Update loop took: %f s", avg_update_dur );
 
   if ( !success )
     return controller_interface::return_type::ERROR;
@@ -392,6 +483,8 @@ PassthroughController::on_export_reference_interfaces()
   std::vector<hardware_interface::CommandInterface> reference_interfaces;
 
   for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
+    RCLCPP_INFO( get_node()->get_logger(), "Export ref interface %s",
+                 reference_interface_names_[i].c_str() );
     reference_interfaces.push_back( hardware_interface::CommandInterface(
         get_node()->get_name(), reference_interface_names_[i], &reference_interfaces_[i] ) );
   }
@@ -428,10 +521,51 @@ void PassthroughController::set_joint_infos( const urdf::ModelInterfaceSharedPtr
   joint_angles_.resize( active_joints_.size() );
 }
 
+void PassthroughController::get_dependent_links_from_joint( const urdf::ModelInterfaceSharedPtr urdf,
+                                                            urdf::JointConstSharedPtr joint,
+                                                            std::vector<std::string> &dependend_links )
+{
+  get_dependent_links_from_link( urdf, urdf->getLink( joint->child_link_name ), dependend_links );
+}
+
+void PassthroughController::get_dependent_links_from_link( const urdf::ModelInterfaceSharedPtr urdf,
+                                                           urdf::LinkConstSharedPtr link,
+                                                           std::vector<std::string> &dependend_links )
+{
+  dependend_links.push_back( link->name );
+
+  for ( auto child_joint : link->child_joints )
+    get_dependent_links_from_joint( urdf, child_joint, dependend_links );
+
+  for ( auto child_link : link->child_links )
+    get_dependent_links_from_link( urdf, child_link, dependend_links );
+}
+
+void PassthroughController::set_dependend_links( const urdf::ModelInterfaceSharedPtr urdf )
+{
+
+  for ( size_t i = 0; i < controlled_joints_.size(); i++ ) {
+    controlled_joint_dependent_links.push_back( std::vector<std::string>() );
+    get_dependent_links_from_joint( urdf, urdf->getJoint( controlled_joints_[i] ),
+                                    controlled_joint_dependent_links[i] );
+  }
+
+  controlled_joint_dependent_links.resize( controlled_joints_.size() );
+}
+
 void PassthroughController::collect_collision_primitives( const urdf::ModelInterfaceSharedPtr urdf )
 {
   int id = 0;
-  for ( std::string &link_name : joint_child_link_names_ ) {
+
+  std::set<std::string> relevant_links;
+
+  for ( auto &it : potentially_colliding_links_ ) {
+    for ( auto &potentially_colliding_link : it.second ) {
+      relevant_links.insert( potentially_colliding_link );
+    }
+  }
+
+  for ( const std::string &link_name : relevant_links ) {
 
     link_collision_primitives_[link_name] = std::vector<CollisionPrimitive>();
     auto urdf_collision_elements = urdf->getLink( link_name )->collision_array;
@@ -566,9 +700,6 @@ bool PassthroughController::pairwise_primitive_collision_check(
       collision_detected = result.isCollision();
     }
   }
-
-  // for ( auto j = 0ul; j < target_coll_objs.size(); j++ ) delete ( target_coll_objs[j] );
-  // for ( auto i = 0ul; i < source_coll_objs.size(); i++ ) delete ( source_coll_objs[i] );
 
   return collision_detected;
 }

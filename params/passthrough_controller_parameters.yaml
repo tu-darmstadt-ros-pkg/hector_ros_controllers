@@ -9,16 +9,10 @@ passthrough_controller:
         }
   }
 
-  interface_types: {
+  joint_interface_types: {
     type: string_array,
     default_value: [],
-    description: "Type of command interfaces that are forwarded."
-  }
-
-  collision_mat: {
-    type: int_array,
-    default_value: [],
-    description: "Array specifying which child links of specified joints can collide"
+    description: "Type of command interfaces per joint that are forwarded."
   }
 
   safety_margin: {
