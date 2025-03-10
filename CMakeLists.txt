@@ -18,7 +18,6 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   rclcpp_lifecycle
   realtime_tools
   std_msgs
-  tf2_ros
   fcl
   ad_kinematics
 )
@@ -37,8 +36,8 @@ generate_parameter_library(
 )
 
 generate_parameter_library(
-  passthrough_controller_parameters
-  params/passthrough_controller_parameters.yaml
+  self_collision_avoidance_controller_parameters
+  params/self_collision_avoidance_controller_parameters.yaml
 )
 
 # Add controllers here
@@ -47,7 +46,7 @@ generate_parameter_library(
 add_library(controllers SHARED
   src/velocity_to_position_controllers_base.cpp
   src/velocity_to_position_command_controller.cpp
-  src/passthrough_controller.cpp
+  src/self_collision_avoidance_controller.cpp
 )
 target_compile_features(controllers PUBLIC cxx_std_17)
 target_include_directories(controllers PUBLIC
@@ -57,7 +56,7 @@ target_include_directories(controllers PUBLIC
 target_link_libraries(controllers PUBLIC
   fcl
   velocity_to_position_command_controller_parameters
-  passthrough_controller_parameters
+  self_collision_avoidance_controller_parameters
 )
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -76,7 +75,7 @@ install(
   TARGETS
     controllers
     velocity_to_position_command_controller_parameters
-    passthrough_controller_parameters
+    self_collision_avoidance_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib

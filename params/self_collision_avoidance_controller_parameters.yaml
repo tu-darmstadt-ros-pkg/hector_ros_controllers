@@ -1,4 +1,4 @@
-passthrough_controller:
+self_collision_avoidance_controller:
   joints: {
     type: string_array,
     default_value: [],

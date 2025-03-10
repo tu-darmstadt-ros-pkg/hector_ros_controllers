@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "passthrough_controller/passthrough_controller.hpp"
+#include "self_collision_avoidance_controller/self_collision_avoidance_controller.hpp"
 #include "controller_interface/helpers.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
-namespace passthrough_controller
+namespace self_collision_avoidance_controller
 {
 
-controller_interface::CallbackReturn PassthroughController::on_init()
+controller_interface::CallbackReturn SelfCollisionAvoidanceController::on_init()
 {
   try {
     param_listener_ = std::make_shared<ParamListener>( get_node() );
@@ -31,7 +31,7 @@ controller_interface::CallbackReturn PassthroughController::on_init()
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::InterfaceConfiguration PassthroughController::command_interface_configuration() const
+controller_interface::InterfaceConfiguration SelfCollisionAvoidanceController::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration command_interfaces_config;
   command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -40,7 +40,7 @@ controller_interface::InterfaceConfiguration PassthroughController::command_inte
   return command_interfaces_config;
 }
 
-controller_interface::InterfaceConfiguration PassthroughController::state_interface_configuration() const
+controller_interface::InterfaceConfiguration SelfCollisionAvoidanceController::state_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration state_interfaces_config;
   state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -53,7 +53,7 @@ controller_interface::InterfaceConfiguration PassthroughController::state_interf
 }
 
 controller_interface::return_type
-PassthroughController::update_reference_from_subscribers( const rclcpp::Time & /*time*/,
+SelfCollisionAvoidanceController::update_reference_from_subscribers( const rclcpp::Time & /*time*/,
                                                           const rclcpp::Duration & /*period*/ )
 {
   auto joint_commands = rt_buffer_ptr_.readFromRT();
@@ -73,7 +73,7 @@ PassthroughController::update_reference_from_subscribers( const rclcpp::Time & /
 }
 
 std::vector<hardware_interface::CommandInterface>
-PassthroughController::on_export_reference_interfaces()
+SelfCollisionAvoidanceController::on_export_reference_interfaces()
 {
   std::vector<hardware_interface::CommandInterface> reference_interfaces;
 
@@ -85,7 +85,7 @@ PassthroughController::on_export_reference_interfaces()
   return reference_interfaces;
 }
 
-controller_interface::CallbackReturn PassthroughController::process_params()
+controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_params()
 {
 
   if ( !param_listener_ ) {
@@ -148,7 +148,7 @@ controller_interface::CallbackReturn PassthroughController::process_params()
 }
 
 controller_interface::CallbackReturn
-PassthroughController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
+SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
 
   controller_interface::CallbackReturn result = process_params();
@@ -183,7 +183,7 @@ PassthroughController::on_configure( const rclcpp_lifecycle::State & /*previous_
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-void PassthroughController::set_potentially_colliding_links( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::set_potentially_colliding_links( const urdf::ModelInterfaceSharedPtr urdf )
 {
   // wait for the semantic description message to be received
   rclcpp::Rate rate( 3 );
@@ -226,7 +226,7 @@ void PassthroughController::set_potentially_colliding_links( const urdf::ModelIn
 }
 
 controller_interface::CallbackReturn
-PassthroughController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
+SelfCollisionAvoidanceController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   //  check if we have all resources defined in the "points" parameter
   //  also verify that we *only* have the resources defined in the "points" parameter
@@ -251,16 +251,16 @@ PassthroughController::on_activate( const rclcpp_lifecycle::State & /*previous_s
 }
 
 controller_interface::CallbackReturn
-PassthroughController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
+SelfCollisionAvoidanceController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   // reset command buffer
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-bool PassthroughController::on_set_chained_mode( bool /*chained_mode*/ ) { return true; }
+bool SelfCollisionAvoidanceController::on_set_chained_mode( bool /*chained_mode*/ ) { return true; }
 
-void PassthroughController::update_joint_angles()
+void SelfCollisionAvoidanceController::update_joint_angles()
 {
   for ( auto index = 0ul; index < q_indices_active_.size(); ++index ) {
     auto state_val = state_interfaces_[index].get_value();
@@ -269,7 +269,7 @@ void PassthroughController::update_joint_angles()
   }
 }
 
-bool PassthroughController::write_valid_reference_commands( std::vector<bool> &collision_results )
+bool SelfCollisionAvoidanceController::write_valid_reference_commands( std::vector<bool> &collision_results )
 {
   bool success = true;
   for ( size_t i = 0; i < command_interfaces_.size(); ++i ) {
@@ -291,7 +291,7 @@ bool PassthroughController::write_valid_reference_commands( std::vector<bool> &c
 }
 
 controller_interface::return_type
-PassthroughController::update_and_write_commands( const rclcpp::Time & /*time*/,
+SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time & /*time*/,
                                                   const rclcpp::Duration &p )
 {
   std::chrono::time_point<std::chrono::system_clock> start, end;
@@ -378,7 +378,7 @@ PassthroughController::update_and_write_commands( const rclcpp::Time & /*time*/,
   return controller_interface::return_type::OK;
 }
 
-void PassthroughController::set_joint_infos( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::set_joint_infos( const urdf::ModelInterfaceSharedPtr urdf )
 {
   for ( auto i = 0ul; i < controlled_joints_.size(); i++ )
     auto urdf_joint = urdf->getJoint( controlled_joints_[i] );
@@ -391,14 +391,14 @@ void PassthroughController::set_joint_infos( const urdf::ModelInterfaceSharedPtr
   joint_angles_.resize( active_joints_.size() );
 }
 
-void PassthroughController::get_dependent_links_from_joint( const urdf::ModelInterfaceSharedPtr urdf,
+void SelfCollisionAvoidanceController::get_dependent_links_from_joint( const urdf::ModelInterfaceSharedPtr urdf,
                                                             urdf::JointConstSharedPtr joint,
                                                             std::vector<std::string> &dependend_links )
 {
   get_dependent_links_from_link( urdf, urdf->getLink( joint->child_link_name ), dependend_links );
 }
 
-void PassthroughController::get_dependent_links_from_link( const urdf::ModelInterfaceSharedPtr urdf,
+void SelfCollisionAvoidanceController::get_dependent_links_from_link( const urdf::ModelInterfaceSharedPtr urdf,
                                                            urdf::LinkConstSharedPtr link,
                                                            std::vector<std::string> &dependend_links )
 {
@@ -411,7 +411,7 @@ void PassthroughController::get_dependent_links_from_link( const urdf::ModelInte
     get_dependent_links_from_link( urdf, child_link, dependend_links );
 }
 
-void PassthroughController::set_dependend_links( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::set_dependend_links( const urdf::ModelInterfaceSharedPtr urdf )
 {
 
   for ( size_t i = 0; i < controlled_joints_.size(); i++ ) {
@@ -423,7 +423,7 @@ void PassthroughController::set_dependend_links( const urdf::ModelInterfaceShare
   controlled_joint_dependent_links_.resize( controlled_joints_.size() );
 }
 
-void PassthroughController::collect_collision_primitives( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::collect_collision_primitives( const urdf::ModelInterfaceSharedPtr urdf )
 {
   // Get collision primitives for all links that are considered for collisions
   std::set<std::string> relevant_links;
@@ -457,15 +457,15 @@ void PassthroughController::collect_collision_primitives( const urdf::ModelInter
   }
 }
 
-fcl::Transform3d PassthroughController::get_transform_from_base_link( std::string &link )
+fcl::Transform3d SelfCollisionAvoidanceController::get_transform_from_base_link( std::string &link )
 {
   return kinematics_transform_to_fcl_transform(
       transformTree_->computeTransform<double>( link, joint_angles_ ) );
 }
 
-bool PassthroughController::pairwise_primitive_collision_check(
-    std::vector<passthrough_controller::CollisionPrimitive> &dependent_link_colls,
-    std::vector<passthrough_controller::CollisionPrimitive> &pot_coll_link_colls,
+bool SelfCollisionAvoidanceController::pairwise_primitive_collision_check(
+    std::vector<self_collision_avoidance_controller::CollisionPrimitive> &dependent_link_colls,
+    std::vector<self_collision_avoidance_controller::CollisionPrimitive> &pot_coll_link_colls,
     fcl::Transform3d &base_to_dependent_link, fcl::Transform3d &pot_coll_link_to_base )
 {
 
@@ -511,7 +511,7 @@ bool PassthroughController::pairwise_primitive_collision_check(
  Conversion functions
 */
 
-fcl::Transform3d PassthroughController::pose_to_fcl_transform( const urdf::Pose &urdf_pose )
+fcl::Transform3d SelfCollisionAvoidanceController::pose_to_fcl_transform( const urdf::Pose &urdf_pose )
 {
   return create_fcl_transform_from_data(
       urdf_pose.rotation.w, urdf_pose.rotation.x, urdf_pose.rotation.y, urdf_pose.rotation.z,
@@ -519,14 +519,14 @@ fcl::Transform3d PassthroughController::pose_to_fcl_transform( const urdf::Pose 
 }
 
 fcl::Transform3d
-PassthroughController::geom_transform_to_fcl_transform( const geometry_msgs::msg::Transform &transform )
+SelfCollisionAvoidanceController::geom_transform_to_fcl_transform( const geometry_msgs::msg::Transform &transform )
 {
   return create_fcl_transform_from_data(
       transform.rotation.w, transform.rotation.x, transform.rotation.y, transform.rotation.z,
       transform.translation.x, transform.translation.y, transform.translation.z );
 }
 
-fcl::Transform3d PassthroughController::kinematics_transform_to_fcl_transform(
+fcl::Transform3d SelfCollisionAvoidanceController::kinematics_transform_to_fcl_transform(
     const ad_kinematics::Transform<double> &transform )
 {
   fcl::Transform3d pose = fcl::Transform3d::Identity();
@@ -535,7 +535,7 @@ fcl::Transform3d PassthroughController::kinematics_transform_to_fcl_transform(
   return pose;
 }
 
-fcl::Transform3d PassthroughController::create_fcl_transform_from_data( double quat_w,
+fcl::Transform3d SelfCollisionAvoidanceController::create_fcl_transform_from_data( double quat_w,
                                                                         double quat_x, double quat_y,
                                                                         double quat_z, double t_x,
                                                                         double t_y, double t_z )
@@ -551,7 +551,7 @@ fcl::Transform3d PassthroughController::create_fcl_transform_from_data( double q
 }
 
 std::shared_ptr<fcl::CollisionGeometry<double>>
-PassthroughController::urdf_geom_to_fcl_geom( std::shared_ptr<const urdf::Geometry> urdf_geom )
+SelfCollisionAvoidanceController::urdf_geom_to_fcl_geom( std::shared_ptr<const urdf::Geometry> urdf_geom )
 {
 
   switch ( urdf_geom->type ) {
@@ -727,5 +727,5 @@ void PassthroughController::modify_debug_marker( int id, const fcl::Transform3d 
 
 } // namespace passthrough_controller
 
-PLUGINLIB_EXPORT_CLASS( passthrough_controller::PassthroughController,
+PLUGINLIB_EXPORT_CLASS( self_collision_avoidance_controller::SelfCollisionAvoidanceController,
                         controller_interface::ChainableControllerInterface )

@@ -1,14 +1,16 @@
 <library path="libcontrollers">
-  <class name="velocity_to_position_command_controller/VelocityToPositionCommandController" type="velocity_to_position_command_controller::VelocityToPositionCommandController" base_class_type="controller_interface::ControllerInterface">
-  <description>
-    The velocity to position command controller provides a velocity input and converts it to position commands.
-  </description>
+  <class name="velocity_to_position_command_controller/VelocityToPositionCommandController" 
+         type="velocity_to_position_command_controller::VelocityToPositionCommandController" 
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      The velocity to position command controller provides a velocity input and converts it to position commands.
+    </description>
   </class>
-  <class name="passthrough_controller/PassthroughController"
-         type="passthrough_controller::PassthroughController"
+  <class name="self_collision_avoidance_controller/SelfCollisionAvoidanceController"
+         type="self_collision_avoidance_controller::SelfCollisionAvoidanceController"
          base_class_type="controller_interface::ChainableControllerInterface">
     <description>
-      A simple demo of chainable controllers. It passes commands through without change.
+      A chainable controller that only forwards joint commands if the resulting configuration is collision free.
     </description>
   </class>
 </library>
