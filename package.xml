@@ -24,6 +24,8 @@
   <depend>rclcpp_lifecycle</depend>
   <depend>realtime_tools</depend>
   <depend>std_msgs</depend>
+  <depend>libfcl-dev</depend>
+  <depend>ad_kinematics</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

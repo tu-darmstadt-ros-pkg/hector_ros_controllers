@@ -1,0 +1,22 @@
+self_collision_avoidance_controller:
+  joints: {
+    type: string_array,
+    default_value: [],
+    description: "Names of the joints whose command interfaces will be forwarded. Their child links will be considered for collision checks.",
+    validation: {
+          not_empty<>: null,
+          unique<>: null,
+        }
+  }
+
+  joint_interface_types: {
+    type: string_array,
+    default_value: [],
+    description: "Type of command interfaces per joint that are forwarded."
+  }
+
+  safety_margin: {
+    type: double,
+    default_value: 0.01,
+    description: "Safety margin for collision checks"
+  }

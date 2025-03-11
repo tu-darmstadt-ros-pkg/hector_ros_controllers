@@ -19,8 +19,9 @@
 #include <string>
 #include <vector>
 #include <float.h>
-
+#include <boost/shared_ptr.hpp>
 #include <urdf_parser/urdf_parser.h>
+
 #include "controller_interface/controller_interface.hpp"
 #include "velocity_to_position_command_controller/visibility_control.h"
 #include "rclcpp/subscription.hpp"

@@ -9,6 +9,8 @@ endif()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   controller_interface
+  srdfdom
+  visualization_msgs
   generate_parameter_library
   hardware_interface
   pluginlib
@@ -16,6 +18,8 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   rclcpp_lifecycle
   realtime_tools
   std_msgs
+  fcl
+  ad_kinematics
 )
 
 find_package(ament_cmake REQUIRED)
@@ -28,29 +32,38 @@ endforeach()
 
 generate_parameter_library(
   velocity_to_position_command_controller_parameters
-  src/velocity_to_position_command_controller_parameters.yaml
+  params/velocity_to_position_command_controller_parameters.yaml
+)
+
+generate_parameter_library(
+  self_collision_avoidance_controller_parameters
+  params/self_collision_avoidance_controller_parameters.yaml
 )
 
 # Add controllers here
 # Define Controllers as Shared Libraries
 
-add_library(velocity_to_position_controller SHARED
+add_library(controllers SHARED
   src/velocity_to_position_controllers_base.cpp
   src/velocity_to_position_command_controller.cpp
+  src/self_collision_avoidance_controller.cpp
 )
-target_compile_features(velocity_to_position_controller PUBLIC cxx_std_17)
-target_include_directories(velocity_to_position_controller PUBLIC
+target_compile_features(controllers PUBLIC cxx_std_17)
+target_include_directories(controllers PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include/velocity_to_position_controller>
+  $<INSTALL_INTERFACE:include/controllers>
 )
-target_link_libraries(velocity_to_position_controller PUBLIC
+target_link_libraries(controllers PUBLIC
+  fcl
   velocity_to_position_command_controller_parameters
+  self_collision_avoidance_controller_parameters
 )
-ament_target_dependencies(velocity_to_position_controller PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
+ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 # Causes the visibility macros to use dllexport rather than dllimport,
 # which is appropriate when building the dll but not consuming it.
-target_compile_definitions(velocity_to_position_controller PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+target_compile_definitions(controllers PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
 
 pluginlib_export_plugin_description_file(controller_interface hector_ros_controller_plugin.xml)
 
@@ -60,8 +73,9 @@ install(
 )
 install(
   TARGETS
-    velocity_to_position_controller
+    controllers
     velocity_to_position_command_controller_parameters
+    self_collision_avoidance_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
