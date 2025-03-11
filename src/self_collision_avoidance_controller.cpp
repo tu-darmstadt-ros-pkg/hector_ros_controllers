@@ -1,17 +1,3 @@
-// Copyright (c) 2023, PAL Robotics
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "self_collision_avoidance_controller/self_collision_avoidance_controller.hpp"
 #include "controller_interface/helpers.hpp"
 #include "pluginlib/class_list_macros.hpp"
@@ -31,7 +17,8 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::on_init()
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::InterfaceConfiguration SelfCollisionAvoidanceController::command_interface_configuration() const
+controller_interface::InterfaceConfiguration
+SelfCollisionAvoidanceController::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration command_interfaces_config;
   command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -40,21 +27,21 @@ controller_interface::InterfaceConfiguration SelfCollisionAvoidanceController::c
   return command_interfaces_config;
 }
 
-controller_interface::InterfaceConfiguration SelfCollisionAvoidanceController::state_interface_configuration() const
+controller_interface::InterfaceConfiguration
+SelfCollisionAvoidanceController::state_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration state_interfaces_config;
   state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
 
-  for ( std::string joint_name : active_joints_ ) {
+  for ( const std::string &joint_name : active_joints_ ) {
     state_interfaces_config.names.push_back( joint_name + "/position" );
   }
 
   return state_interfaces_config;
 }
 
-controller_interface::return_type
-SelfCollisionAvoidanceController::update_reference_from_subscribers( const rclcpp::Time & /*time*/,
-                                                          const rclcpp::Duration & /*period*/ )
+controller_interface::return_type SelfCollisionAvoidanceController::update_reference_from_subscribers(
+    const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
 {
   auto joint_commands = rt_buffer_ptr_.readFromRT();
   // message is valid
@@ -144,7 +131,6 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
   prev_command_vals_ = std::vector<double>( reference_interface_names_.size() );
 
   return controller_interface::CallbackReturn::SUCCESS;
-
 }
 
 controller_interface::CallbackReturn
@@ -152,7 +138,6 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
 {
 
   controller_interface::CallbackReturn result = process_params();
-
   if ( result == controller_interface::CallbackReturn::ERROR )
     return controller_interface::CallbackReturn::ERROR;
 
@@ -172,7 +157,7 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
 
   set_joint_infos( urdf );
 
-  set_dependend_links( urdf );
+  set_dependent_links( urdf );
 
   set_potentially_colliding_links( urdf );
 
@@ -183,7 +168,8 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-void SelfCollisionAvoidanceController::set_potentially_colliding_links( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::set_potentially_colliding_links(
+    const urdf::ModelInterfaceSharedPtr urdf )
 {
   // wait for the semantic description message to be received
   rclcpp::Rate rate( 3 );
@@ -196,9 +182,7 @@ void SelfCollisionAvoidanceController::set_potentially_colliding_links( const ur
   }
 
   std::set<std::string> all_link_names;
-  for ( auto it = urdf->links_.begin(); it != urdf->links_.end(); ++it ) {
-    all_link_names.insert( it->first );
-  }
+  for ( auto &link : urdf->links_ ) { all_link_names.insert( link.first ); }
 
   std::set<std::string> all_dependent_links;
   for ( std::vector<std::string> &dependent_links : controlled_joint_dependent_links_ ) {
@@ -269,7 +253,8 @@ void SelfCollisionAvoidanceController::update_joint_angles()
   }
 }
 
-bool SelfCollisionAvoidanceController::write_valid_reference_commands( std::vector<bool> &collision_results )
+bool SelfCollisionAvoidanceController::write_valid_reference_commands(
+    std::vector<bool> &collision_results )
 {
   bool success = true;
   for ( size_t i = 0; i < command_interfaces_.size(); ++i ) {
@@ -292,12 +277,8 @@ bool SelfCollisionAvoidanceController::write_valid_reference_commands( std::vect
 
 controller_interface::return_type
 SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time & /*time*/,
-                                                  const rclcpp::Duration &p )
+                                                             const rclcpp::Duration &p )
 {
-  std::chrono::time_point<std::chrono::system_clock> start, end;
-
-  start = std::chrono::system_clock::now();
-
   // Apply joint updates read from state interfaces
   update_joint_angles();
 
@@ -319,7 +300,7 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
 
     bool any_collision = false;
     // Iterate over all links that are moved by the new reference value
-    // Some depedent limk is colliding -> skip other checks
+    // Some dependent link is colliding -> skip other checks
     for ( size_t j = 0; j < controlled_joint_dependent_links_[i].size() && !any_collision; j++ ) {
 
       std::string &dependent_link = controlled_joint_dependent_links_[i][j];
@@ -332,7 +313,7 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
       for ( auto it = potentially_colliding_links_[dependent_link].begin();
             it != potentially_colliding_links_[dependent_link].end() && !any_collision; it++ ) {
 
-        std::string potentially_colliding_link = *it;
+        const std::string &potentially_colliding_link = *it;
 
         try {
           fcl::Transform3d base_pot_colliding_link_transform =
@@ -349,8 +330,8 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
               potentially_colliding_link.c_str() );*/
 
         } catch ( ... ) {
-          RCLCPP_INFO( this->get_node()->get_logger(), "Error for source %s to target %s.",
-                       dependent_link.c_str(), potentially_colliding_link.c_str() );
+          RCLCPP_ERROR( this->get_node()->get_logger(), "Error for source %s to target %s.",
+                        dependent_link.c_str(), potentially_colliding_link.c_str() );
         }
       }
 
@@ -365,23 +346,15 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
 
   bool success = write_valid_reference_commands( collision_results );
 
-  end = std::chrono::system_clock::now();
-  std::chrono::duration<double> elapsed_seconds = end - start;
-
-  avg_update_dur = ( avg_update_dur + elapsed_seconds.count() ) / 2;
-
-  RCLCPP_INFO( this->get_node()->get_logger(), "Update loop took: %f s", avg_update_dur );
-
   if ( !success )
     return controller_interface::return_type::ERROR;
 
   return controller_interface::return_type::OK;
 }
 
-void SelfCollisionAvoidanceController::set_joint_infos( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::set_joint_infos( const urdf::ModelInterfaceSharedPtr &urdf )
 {
-  for ( auto i = 0ul; i < controlled_joints_.size(); i++ )
-    auto urdf_joint = urdf->getJoint( controlled_joints_[i] );
+  for ( auto &joint : controlled_joints_ ) auto urdf_joint = urdf->getJoint( joint );
 
   active_joints_ = transformTree_->getActiveJointNames();
   q_indices_controlled_ = transformTree_->getJointQIndices( controlled_joints_ );
@@ -391,31 +364,31 @@ void SelfCollisionAvoidanceController::set_joint_infos( const urdf::ModelInterfa
   joint_angles_.resize( active_joints_.size() );
 }
 
-void SelfCollisionAvoidanceController::get_dependent_links_from_joint( const urdf::ModelInterfaceSharedPtr urdf,
-                                                            urdf::JointConstSharedPtr joint,
-                                                            std::vector<std::string> &dependend_links )
+void SelfCollisionAvoidanceController::get_dependent_links_from_joint(
+    const urdf::ModelInterfaceSharedPtr &urdf, const urdf::JointConstSharedPtr &joint,
+    std::vector<std::string> &dependent_links )
 {
-  get_dependent_links_from_link( urdf, urdf->getLink( joint->child_link_name ), dependend_links );
+  get_dependent_links_from_link( urdf, urdf->getLink( joint->child_link_name ), dependent_links );
 }
 
-void SelfCollisionAvoidanceController::get_dependent_links_from_link( const urdf::ModelInterfaceSharedPtr urdf,
-                                                           urdf::LinkConstSharedPtr link,
-                                                           std::vector<std::string> &dependend_links )
+void SelfCollisionAvoidanceController::get_dependent_links_from_link(
+    const urdf::ModelInterfaceSharedPtr &urdf, const urdf::LinkConstSharedPtr &link,
+    std::vector<std::string> &dependent_links )
 {
-  dependend_links.push_back( link->name );
+  dependent_links.push_back( link->name );
 
-  for ( auto child_joint : link->child_joints )
-    get_dependent_links_from_joint( urdf, child_joint, dependend_links );
+  for ( const auto &child_joint : link->child_joints )
+    get_dependent_links_from_joint( urdf, child_joint, dependent_links );
 
-  for ( auto child_link : link->child_links )
-    get_dependent_links_from_link( urdf, child_link, dependend_links );
+  for ( const auto &child_link : link->child_links )
+    get_dependent_links_from_link( urdf, child_link, dependent_links );
 }
 
-void SelfCollisionAvoidanceController::set_dependend_links( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::set_dependent_links( const urdf::ModelInterfaceSharedPtr &urdf )
 {
 
   for ( size_t i = 0; i < controlled_joints_.size(); i++ ) {
-    controlled_joint_dependent_links_.push_back( std::vector<std::string>() );
+    controlled_joint_dependent_links_.emplace_back();
     get_dependent_links_from_joint( urdf, urdf->getJoint( controlled_joints_[i] ),
                                     controlled_joint_dependent_links_[i] );
   }
@@ -423,7 +396,8 @@ void SelfCollisionAvoidanceController::set_dependend_links( const urdf::ModelInt
   controlled_joint_dependent_links_.resize( controlled_joints_.size() );
 }
 
-void SelfCollisionAvoidanceController::collect_collision_primitives( const urdf::ModelInterfaceSharedPtr urdf )
+void SelfCollisionAvoidanceController::collect_collision_primitives(
+    const urdf::ModelInterfaceSharedPtr &urdf )
 {
   // Get collision primitives for all links that are considered for collisions
   std::set<std::string> relevant_links;
@@ -440,33 +414,33 @@ void SelfCollisionAvoidanceController::collect_collision_primitives( const urdf:
     link_collision_primitives_[link_name] = std::vector<CollisionPrimitive>();
     auto urdf_collision_elements = urdf->getLink( link_name )->collision_array;
 
-    for ( auto it = urdf_collision_elements.begin(); it != urdf_collision_elements.end(); ++it ) {
+    for ( auto &urdf_collision_element : urdf_collision_elements ) {
 
       // Convert urdf::geometry object to fcl::CollisionObject
       // Pose will be set at runtime based on current joint configuration
       auto coll_obj = std::make_shared<fcl::CollisionObjectd>(
-          urdf_geom_to_fcl_geom( ( *it )->geometry ), fcl::Transform3d::Identity() );
+          urdf_geom_to_fcl_geom( urdf_collision_element->geometry ), fcl::Transform3d::Identity() );
       // Convert link -> primitive transform to fcl format
-      auto joint_coll_transform =
-          std::make_shared<fcl::Transform3d>( pose_to_fcl_transform( ( *it )->origin ) );
+      auto joint_coll_transform = std::make_shared<fcl::Transform3d>(
+          pose_to_fcl_transform( urdf_collision_element->origin ) );
 
-      link_collision_primitives_[link_name].push_back(
-          std::make_tuple( coll_obj, joint_coll_transform, id ) );
+      link_collision_primitives_[link_name].emplace_back( coll_obj, joint_coll_transform, id );
       id++;
     }
   }
 }
 
-fcl::Transform3d SelfCollisionAvoidanceController::get_transform_from_base_link( std::string &link )
+fcl::Transform3d
+SelfCollisionAvoidanceController::get_transform_from_base_link( const std::string &link ) const
 {
   return kinematics_transform_to_fcl_transform(
       transformTree_->computeTransform<double>( link, joint_angles_ ) );
 }
 
 bool SelfCollisionAvoidanceController::pairwise_primitive_collision_check(
-    std::vector<self_collision_avoidance_controller::CollisionPrimitive> &dependent_link_colls,
-    std::vector<self_collision_avoidance_controller::CollisionPrimitive> &pot_coll_link_colls,
-    fcl::Transform3d &base_to_dependent_link, fcl::Transform3d &pot_coll_link_to_base )
+    const std::vector<self_collision_avoidance_controller::CollisionPrimitive> &dependent_link_colls,
+    const std::vector<self_collision_avoidance_controller::CollisionPrimitive> &pot_coll_link_colls,
+    const fcl::Transform3d &base_to_dependent_link, const fcl::Transform3d &pot_coll_link_to_base )
 {
 
   std::vector<fcl::CollisionObjectd *> dependent_link_coll_objs;
@@ -494,9 +468,9 @@ bool SelfCollisionAvoidanceController::pairwise_primitive_collision_check(
   pot_coll_link_coll_objs.resize( pot_coll_link_colls.size() );
 
   bool collision_detected = false;
-  fcl::CollisionRequest<double> request;
   for ( auto i = 0ul; i < dependent_link_coll_objs.size() && !collision_detected; i++ ) {
     for ( auto j = 0ul; j < pot_coll_link_coll_objs.size() && !collision_detected; j++ ) {
+      fcl::CollisionRequest<double> request;
       // Check collision in base link frame
       fcl::CollisionResult<double> result;
       fcl::collide( dependent_link_coll_objs[i], pot_coll_link_coll_objs[j], request, result );
@@ -518,8 +492,8 @@ fcl::Transform3d SelfCollisionAvoidanceController::pose_to_fcl_transform( const 
       urdf_pose.position.x, urdf_pose.position.y, urdf_pose.position.z );
 }
 
-fcl::Transform3d
-SelfCollisionAvoidanceController::geom_transform_to_fcl_transform( const geometry_msgs::msg::Transform &transform )
+fcl::Transform3d SelfCollisionAvoidanceController::geom_transform_to_fcl_transform(
+    const geometry_msgs::msg::Transform &transform )
 {
   return create_fcl_transform_from_data(
       transform.rotation.w, transform.rotation.x, transform.rotation.y, transform.rotation.z,
@@ -535,10 +509,9 @@ fcl::Transform3d SelfCollisionAvoidanceController::kinematics_transform_to_fcl_t
   return pose;
 }
 
-fcl::Transform3d SelfCollisionAvoidanceController::create_fcl_transform_from_data( double quat_w,
-                                                                        double quat_x, double quat_y,
-                                                                        double quat_z, double t_x,
-                                                                        double t_y, double t_z )
+fcl::Transform3d SelfCollisionAvoidanceController::create_fcl_transform_from_data(
+    const double quat_w, const double quat_x, const double quat_y, const double quat_z,
+    const double t_x, const double t_y, const double t_z )
 {
   fcl::Quaterniond q = fcl::Quaterniond( quat_w, quat_x, quat_y, quat_z );
   fcl::Vector3d t = fcl::Vector3d( t_x, t_y, t_z );
@@ -550,8 +523,8 @@ fcl::Transform3d SelfCollisionAvoidanceController::create_fcl_transform_from_dat
   return pose;
 }
 
-std::shared_ptr<fcl::CollisionGeometry<double>>
-SelfCollisionAvoidanceController::urdf_geom_to_fcl_geom( std::shared_ptr<const urdf::Geometry> urdf_geom )
+std::shared_ptr<fcl::CollisionGeometry<double>> SelfCollisionAvoidanceController::urdf_geom_to_fcl_geom(
+    const std::shared_ptr<const urdf::Geometry> &urdf_geom ) const
 {
 
   switch ( urdf_geom->type ) {
@@ -566,8 +539,8 @@ SelfCollisionAvoidanceController::urdf_geom_to_fcl_geom( std::shared_ptr<const u
     std::shared_ptr<const urdf::Box> urdf_box =
         std::static_pointer_cast<const urdf::Box>( urdf_geom );
     std::shared_ptr<fcl::Box<double>> fcl_box = std::make_shared<fcl::Box<double>>(
-        urdf_box->dim.x + safety_margin_, urdf_box->dim.y + safety_margin_,
-        urdf_box->dim.z + safety_margin_ );
+        urdf_box->dim.x + 2 * safety_margin_, urdf_box->dim.y + 2 * safety_margin_,
+        urdf_box->dim.z + 2 * safety_margin_ );
     return std::static_pointer_cast<fcl::CollisionGeometry<double>>( fcl_box );
   }
   case urdf::Geometry::CYLINDER: {
@@ -725,7 +698,7 @@ void PassthroughController::modify_debug_marker( int id, const fcl::Transform3d 
   // marker_pub_->publish( marker );
 }*/
 
-} // namespace passthrough_controller
+} // namespace self_collision_avoidance_controller
 
 PLUGINLIB_EXPORT_CLASS( self_collision_avoidance_controller::SelfCollisionAvoidanceController,
                         controller_interface::ChainableControllerInterface )
