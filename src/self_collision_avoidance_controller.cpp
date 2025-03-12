@@ -94,6 +94,29 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  if ( params_.joint_groups.empty() ) {
+
+    // No joint groups
+  } else if ( params_.joint_groups.size() != params_.joints.size() ) {
+    RCLCPP_ERROR( get_node()->get_logger(),
+                  "Need to specifiy a joint group for each joint or none" );
+    return controller_interface::CallbackReturn::ERROR;
+  } else {
+
+    for ( size_t i = 0ul; i < params_.joint_groups.size(); i++ ) {
+      const std::string &joint_group = params_.joint_groups[i];
+
+      if ( joint_group != "None" && joint_group != "" ) {
+        joint_groups_[params_.joints[i]] = joint_group;
+
+        if ( group_joints_.find( joint_group ) != group_joints_.end() )
+          group_joints_[joint_group].emplace_back( i );
+        else
+          group_joints_[joint_group] = std::vector<size_t>{ i };
+      }
+    }
+  }
+
   // Use half since collision geom size increases are applied to source and target collision
   safety_margin_ = params_.safety_margin / 2;
 
@@ -253,21 +276,41 @@ void SelfCollisionAvoidanceController::update_joint_angles()
   }
 }
 
+bool SelfCollisionAvoidanceController::block_joint( const size_t &joint_idx )
+{
+  if ( interface_types_[joint_idx] == "position" )
+    return command_interfaces_[joint_idx].set_value( prev_command_vals_[joint_idx] );
+  else
+    return command_interfaces_[joint_idx].set_value( 0.0 );
+}
+
 bool SelfCollisionAvoidanceController::write_valid_reference_commands(
     std::vector<bool> &collision_results )
 {
+
+  // Propagate collisions for respective joint group
+  for ( size_t i = 0; i < collision_results.size(); i++ ) {
+
+    if ( !collision_results[i] )
+      continue;
+
+    // If joint has a defined group, set all of them to collision
+    if ( joint_groups_.find( controlled_joints_[i] ) != joint_groups_.end() ) {
+      for ( const size_t &joint_idx : group_joints_[joint_groups_[controlled_joints_[i]]] ) {
+        collision_results[joint_idx] = true;
+      }
+    }
+
+  }
+
   bool success = true;
-  for ( size_t i = 0; i < command_interfaces_.size(); ++i ) {
+  for ( size_t i = 0; i < command_interfaces_.size(); i++ ) {
     if ( !std::isnan( reference_interfaces_[i] ) ) {
       if ( !collision_results[i] ) {
         success = success && command_interfaces_[i].set_value( reference_interfaces_[i] );
         prev_command_vals_[i] = reference_interfaces_[i];
       } else {
-
-        if ( interface_types_[i] == "position" )
-          success = success && command_interfaces_[i].set_value( prev_command_vals_[i] );
-        else
-          success = success && command_interfaces_[i].set_value( 0.0 );
+        success = success && block_joint( i );
       }
     }
   }
