@@ -22,17 +22,16 @@
 #include <string>
 #include <urdf_parser/urdf_parser.h>
 #include <vector>
-#include <chrono>
 
 #include "ad_kinematics/tree.h"
 #include "boost/shared_ptr.hpp"
 #include "controller_interface/chainable_controller_interface.hpp"
 #include "fcl/geometry/collision_geometry.h"
 #include "fcl/narrowphase/collision.h"
+#include "geometry_msgs/msg/transform.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
-#include "geometry_msgs/msg/transform.hpp"
 // #include "visualization_msgs/msg/marker.hpp"
 #include <srdfdom/model.h>
 
@@ -77,27 +76,31 @@ protected:
                                      const rclcpp::Duration &period ) override;
 
   std::shared_ptr<fcl::CollisionGeometry<double>>
-  urdf_geom_to_fcl_geom(const std::shared_ptr<const urdf::Geometry> &urdf_geom ) const;
+  urdf_geom_to_fcl_geom( const std::shared_ptr<const urdf::Geometry> &urdf_geom ) const;
 
   static fcl::Transform3d pose_to_fcl_transform( const urdf::Pose &urdf_pose );
 
-  static fcl::Transform3d geom_transform_to_fcl_transform( const geometry_msgs::msg::Transform &transform );
+  static fcl::Transform3d
+  geom_transform_to_fcl_transform( const geometry_msgs::msg::Transform &transform );
 
   static fcl::Transform3d
   kinematics_transform_to_fcl_transform( const ad_kinematics::Transform<double> &transform );
 
-  static fcl::Transform3d create_fcl_transform_from_data( double quat_w, double quat_x, double quat_y,
-                                                   double quat_z, double t_x, double t_y,
-                                                   double t_z );
+  static fcl::Transform3d create_fcl_transform_from_data( double quat_w, double quat_x,
+                                                          double quat_y, double quat_z, double t_x,
+                                                          double t_y, double t_z );
 
-  fcl::Transform3d get_transform_from_base_link(const std::string &link ) const;
+  fcl::Transform3d get_transform_from_base_link( const std::string &link ) const;
 
-  static bool pairwise_primitive_collision_check(const std::vector<CollisionPrimitive> &dependent_link_colls,
-                                           const std::vector<CollisionPrimitive> &pot_coll_link_colls,
-                                           const fcl::Transform3d &base_to_dependent_link,
-                                           const fcl::Transform3d &pot_coll_link_to_base );
+  static bool
+  pairwise_primitive_collision_check( const std::vector<CollisionPrimitive> &dependent_link_colls,
+                                      const std::vector<CollisionPrimitive> &pot_coll_link_colls,
+                                      const fcl::Transform3d &base_to_dependent_link,
+                                      const fcl::Transform3d &pot_coll_link_to_base );
 
   bool write_valid_reference_commands( std::vector<bool> &collision_results );
+
+  bool block_joint( const size_t &joint_idx );
 
   std::shared_ptr<ParamListener> param_listener_;
   Params params_;
@@ -105,6 +108,8 @@ protected:
   // Params
   std::vector<std::string> controlled_joints_;
   std::vector<std::string> interface_types_;
+  std::map<std::string, std::string> joint_groups_;
+  std::map<std::string, std::vector<size_t>> group_joints_;
   double safety_margin_ = 0.01;
 
   std::shared_ptr<ad_kinematics::Tree> transformTree_;
@@ -142,13 +147,13 @@ private:
                                       const urdf::LinkConstSharedPtr &link,
                                       std::vector<std::string> &dependent_links );
 
-  void set_joint_infos( const urdf::ModelInterfaceSharedPtr& urdf );
+  void set_joint_infos( const urdf::ModelInterfaceSharedPtr &urdf );
 
-  void set_dependent_links( const urdf::ModelInterfaceSharedPtr& urdf );
+  void set_dependent_links( const urdf::ModelInterfaceSharedPtr &urdf );
 
   void set_potentially_colliding_links( urdf::ModelInterfaceSharedPtr urdf );
 
-  void collect_collision_primitives( const urdf::ModelInterfaceSharedPtr& urdf );
+  void collect_collision_primitives( const urdf::ModelInterfaceSharedPtr &urdf );
 
   /*
   void modify_debug_marker( int id, const fcl::Transform3d &t, std::string link_name,
@@ -159,6 +164,6 @@ private:
   void log_transform( const fcl::Transform3d &t, const std::string title );
     */
 };
-} 
+} // namespace self_collision_avoidance_controller
 
-#endif 
+#endif
