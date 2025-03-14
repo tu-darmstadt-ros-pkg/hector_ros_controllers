@@ -69,6 +69,8 @@ public:
   update_and_write_commands( const rclcpp::Time &time, const rclcpp::Duration &period ) override;
 
 protected:
+  rcl_interfaces::msg::SetParametersResult setParamCb( const rclcpp::Parameter &p );
+
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
 
   controller_interface::return_type
@@ -103,6 +105,7 @@ protected:
   bool block_joint( const size_t &joint_idx );
 
   std::shared_ptr<ParamListener> param_listener_;
+  std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
   Params params_;
 
   // Params
@@ -137,6 +140,7 @@ protected:
 
 private:
   controller_interface::CallbackReturn process_params();
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_;
 
   void update_joint_angles();
 
@@ -152,7 +156,7 @@ private:
 
   void set_dependent_links( const urdf::ModelInterfaceSharedPtr &urdf );
 
-  void set_potentially_colliding_links( urdf::ModelInterfaceSharedPtr urdf );
+  controller_interface::CallbackReturn set_potentially_colliding_links( urdf::ModelInterfaceSharedPtr urdf );
 
   void collect_collision_primitives( const urdf::ModelInterfaceSharedPtr &urdf );
 

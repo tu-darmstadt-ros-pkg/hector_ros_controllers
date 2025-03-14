@@ -5,11 +5,37 @@
 namespace self_collision_avoidance_controller
 {
 
+rcl_interfaces::msg::SetParametersResult
+SelfCollisionAvoidanceController::setParamCb( const rclcpp::Parameter &p )
+{
+  auto result = rcl_interfaces::msg::SetParametersResult();
+  result.successful = true;
+
+  if ( p.get_name() == "velocity_look_ahead_factor" ) {
+    const double val = p.as_double();
+
+    if ( val <= 0 )
+      result.successful = false;
+    else {
+      velocity_look_ahead_factor_ = val;
+      RCLCPP_INFO( get_node()->get_logger(), "Reconfigured velocity_look_ahead_factor to %f",
+                   velocity_look_ahead_factor_ );
+    }
+  }
+
+  return result;
+}
+
 controller_interface::CallbackReturn SelfCollisionAvoidanceController::on_init()
 {
   try {
     param_listener_ = std::make_shared<ParamListener>( get_node() );
     params_ = param_listener_->get_params();
+    param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( get_node() );
+    cb_handle_ = param_subscriber_->add_parameter_callback(
+        "velocity_look_ahead_factor",
+        std::bind( &SelfCollisionAvoidanceController::setParamCb, this, std::placeholders::_1 ) );
+
   } catch ( const std::exception &e ) {
     fprintf( stderr, "Exception thrown during init stage with message: %s \n", e.what() );
     return controller_interface::CallbackReturn::ERROR;
@@ -94,7 +120,7 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  velocity_look_ahead_factor_ = (int) params_.velocity_look_ahead_factor;
+  velocity_look_ahead_factor_ = (int)params_.velocity_look_ahead_factor;
 
   if ( params_.joint_groups.empty() ) {
 
@@ -184,7 +210,8 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
 
   set_dependent_links( urdf );
 
-  set_potentially_colliding_links( urdf );
+  if ( set_potentially_colliding_links( urdf ) != controller_interface::CallbackReturn::SUCCESS )
+    return controller_interface::CallbackReturn::ERROR;
 
   collect_collision_primitives( urdf );
 
@@ -193,17 +220,20 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-void SelfCollisionAvoidanceController::set_potentially_colliding_links(
+controller_interface::CallbackReturn SelfCollisionAvoidanceController::set_potentially_colliding_links(
     const urdf::ModelInterfaceSharedPtr urdf )
 {
   // wait for the semantic description message to be received
   rclcpp::Rate rate( 3 );
   int attempt = 0;
+  int max_attempts = 50;
   while ( !srdf_received_ ) {
     rate.sleep();
     attempt++;
     if ( attempt % 10 == 0 )
       RCLCPP_INFO( get_node()->get_logger(), "Waiting for semantic robot description on topic " );
+    if ( attempt > max_attempts )
+      return controller_interface::CallbackReturn::ERROR;
   }
 
   std::set<std::string> all_link_names;
@@ -232,6 +262,8 @@ void SelfCollisionAvoidanceController::set_potentially_colliding_links(
       potentially_colliding_links_[coll_pair.link2_].erase( coll_pair.link1_ );
     }
   }
+
+  return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn
@@ -302,8 +334,7 @@ bool SelfCollisionAvoidanceController::write_valid_reference_commands(
         collision_results[joint_idx] = true;
       }
     }
-
-  }       
+  }
 
   bool success = true;
   for ( size_t i = 0; i < command_interfaces_.size(); i++ ) {
@@ -342,7 +373,8 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
     if ( interface_types_[i] == "position" ) {
       joint_angles_[q_indices_controlled_[i]] = reference_interfaces_[i];
     } else {
-      joint_angles_[q_indices_controlled_[i]] += reference_interfaces_[i] * velocity_look_ahead_factor_ * p.seconds();
+      joint_angles_[q_indices_controlled_[i]] +=
+          reference_interfaces_[i] * velocity_look_ahead_factor_ * p.seconds();
     }
 
     bool any_collision = false;
