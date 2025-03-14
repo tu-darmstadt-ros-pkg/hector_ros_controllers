@@ -111,7 +111,7 @@ protected:
   std::map<std::string, std::string> joint_groups_;
   std::map<std::string, std::vector<size_t>> group_joints_;
   double safety_margin_ = 0.01;
-  int velocity_look_ahead_factor_ = 1;
+  double velocity_look_ahead_factor_ = 1.0;
 
   std::shared_ptr<ad_kinematics::Tree> transformTree_;
   std::vector<std::string> active_joints_;

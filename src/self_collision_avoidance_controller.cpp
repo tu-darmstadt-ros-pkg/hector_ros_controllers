@@ -303,7 +303,7 @@ bool SelfCollisionAvoidanceController::write_valid_reference_commands(
       }
     }
 
-  }
+  }       
 
   bool success = true;
   for ( size_t i = 0; i < command_interfaces_.size(); i++ ) {
@@ -335,6 +335,8 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
     // skip if no command received from high level controller
     if ( std::isnan( reference_interfaces_[i] ) )
       continue;
+
+    double pre_command_angle = joint_angles_[q_indices_controlled_[i]];
 
     // Set hypothetical joint position
     if ( interface_types_[i] == "position" ) {
@@ -385,7 +387,7 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
 
     if ( any_collision ) {
       // Reset hypothetical position
-      joint_angles_[q_indices_controlled_[i]] = prev_command_vals_[i];
+      joint_angles_[q_indices_controlled_[i]] = pre_command_angle;
     }
   }
 
