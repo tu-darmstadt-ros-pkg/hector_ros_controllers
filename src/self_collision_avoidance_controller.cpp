@@ -94,6 +94,8 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  velocity_look_ahead_factor_ = (int) params_.velocity_look_ahead_factor;
+
   if ( params_.joint_groups.empty() ) {
 
     // No joint groups
@@ -338,7 +340,7 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
     if ( interface_types_[i] == "position" ) {
       joint_angles_[q_indices_controlled_[i]] = reference_interfaces_[i];
     } else {
-      joint_angles_[q_indices_controlled_[i]] += reference_interfaces_[i] * p.seconds();
+      joint_angles_[q_indices_controlled_[i]] += reference_interfaces_[i] * velocity_look_ahead_factor_ * p.seconds();
     }
 
     bool any_collision = false;

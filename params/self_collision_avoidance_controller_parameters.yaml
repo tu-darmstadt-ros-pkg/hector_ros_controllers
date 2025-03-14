@@ -26,3 +26,9 @@ self_collision_avoidance_controller:
     default_value: 0.01,
     description: "Safety margin for collision checks"
   }
+
+  velocity_look_ahead_factor: {
+    type: int,
+    default_value: 1,
+    description: "Amount of update steps in the future to predict resulting joint position based on current velocity command."
+  }
