@@ -15,19 +15,19 @@
 #ifndef VELOCITY_TO_POSITION_COMMAND_CONTROLLER__VELOCITY_TO_POSITION_CONTROLLERS_BASE_HPP_
 #define VELOCITY_TO_POSITION_COMMAND_CONTROLLER__VELOCITY_TO_POSITION_CONTROLLERS_BASE_HPP_
 
+#include <boost/shared_ptr.hpp>
+#include <float.h>
 #include <memory>
 #include <string>
-#include <vector>
-#include <float.h>
-#include <boost/shared_ptr.hpp>
 #include <urdf_parser/urdf_parser.h>
+#include <vector>
 
 #include "controller_interface/controller_interface.hpp"
-#include "velocity_to_position_command_controller/visibility_control.h"
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "velocity_to_position_command_controller/visibility_control.h"
 
 namespace velocity_to_position_command_controller
 {
@@ -60,20 +60,20 @@ public:
   controller_interface::CallbackReturn on_init() override;
 
   VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-  controller_interface::CallbackReturn on_configure(
-    const rclcpp_lifecycle::State & previous_state) override;
+  controller_interface::CallbackReturn
+  on_configure( const rclcpp_lifecycle::State &previous_state ) override;
 
   VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-  controller_interface::CallbackReturn on_activate(
-    const rclcpp_lifecycle::State & previous_state) override;
+  controller_interface::CallbackReturn
+  on_activate( const rclcpp_lifecycle::State &previous_state ) override;
 
   VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-  controller_interface::CallbackReturn on_deactivate(
-    const rclcpp_lifecycle::State & previous_state) override;
+  controller_interface::CallbackReturn
+  on_deactivate( const rclcpp_lifecycle::State &previous_state ) override;
 
   VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-  controller_interface::return_type update(
-    const rclcpp::Time & time, const rclcpp::Duration & period) override;
+  controller_interface::return_type update( const rclcpp::Time &time,
+                                            const rclcpp::Duration &period ) override;
 
 protected:
   /**
@@ -102,11 +102,10 @@ protected:
 
   std::vector<double> last_positions_;
 
-
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;
   rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
 };
 
-}  // namespace VELOCITY_TO_POSITION_COMMAND_controller
+} // namespace velocity_to_position_command_controller
 
-#endif  // VELOCITY_TO_POSITION_COMMAND_CONTROLLER__FORWARD_CONTROLLERS_BASE_HPP_
+#endif // VELOCITY_TO_POSITION_COMMAND_CONTROLLER__FORWARD_CONTROLLERS_BASE_HPP_

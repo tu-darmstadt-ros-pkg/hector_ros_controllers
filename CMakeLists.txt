@@ -2,86 +2,95 @@ cmake_minimum_required(VERSION 3.16)
 project(hector_ros_controllers LANGUAGES CXX)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "(GNU|Clang)")
-  add_compile_options(-Wall -Wextra -Wpedantic -Werror=conversion -Werror=unused-but-set-variable
-                      -Werror=return-type -Werror=shadow -Werror=format -Werror=range-loop-construct
-                      -Werror=missing-braces)
+  add_compile_options(
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Werror=conversion
+    -Werror=unused-but-set-variable
+    -Werror=return-type
+    -Werror=shadow
+    -Werror=format
+    -Werror=range-loop-construct
+    -Werror=missing-braces)
 endif()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
-  controller_interface
-  srdfdom
-  visualization_msgs
-  generate_parameter_library
-  hardware_interface
-  pluginlib
-  rclcpp
-  rclcpp_lifecycle
-  realtime_tools
-  std_msgs
-  fcl
-  ad_kinematics
-)
+    ament_cmake
+    backward_ros
+    controller_interface
+    srdfdom
+    visualization_msgs
+    generate_parameter_library
+    hardware_interface
+    pluginlib
+    rclcpp
+    rclcpp_lifecycle
+    realtime_tools
+    std_msgs
+    fcl
+    ad_kinematics)
 
-find_package(ament_cmake REQUIRED)
-find_package(backward_ros REQUIRED)
-foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
-  find_package(${Dependency} REQUIRED)
+foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
+  find_package(${dependency} REQUIRED)
 endforeach()
 
 # Add parameter_libaries here
 
 generate_parameter_library(
   velocity_to_position_command_controller_parameters
-  params/velocity_to_position_command_controller_parameters.yaml
-)
+  params/velocity_to_position_command_controller_parameters.yaml)
 
 generate_parameter_library(
   self_collision_avoidance_controller_parameters
-  params/self_collision_avoidance_controller_parameters.yaml
-)
+  params/self_collision_avoidance_controller_parameters.yaml)
 
-# Add controllers here
-# Define Controllers as Shared Libraries
+generate_parameter_library(safety_forward_controller_parameters
+                           params/safety_forward_controller_parameters.yaml)
 
-add_library(controllers SHARED
+# Add controllers here Define Controllers as Shared Libraries
+
+add_library(
+  controllers SHARED
   src/velocity_to_position_controllers_base.cpp
+  src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
-  src/self_collision_avoidance_controller.cpp
-)
+  src/self_collision_avoidance_controller.cpp)
+
 target_compile_features(controllers PUBLIC cxx_std_17)
-target_include_directories(controllers PUBLIC
-  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include/controllers>
-)
-target_link_libraries(controllers PUBLIC
-  fcl
-  velocity_to_position_command_controller_parameters
-  self_collision_avoidance_controller_parameters
-)
+
+target_include_directories(
+  controllers PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+                     $<INSTALL_INTERFACE:include/controllers>)
+
+target_link_libraries(
+  controllers
+  PUBLIC fcl velocity_to_position_command_controller_parameters
+         self_collision_avoidance_controller_parameters
+         safety_forward_controller_parameters)
+
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
-# Causes the visibility macros to use dllexport rather than dllimport,
-# which is appropriate when building the dll but not consuming it.
-target_compile_definitions(controllers PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+# Causes the visibility macros to use dllexport rather than dllimport, which is
+# appropriate when building the dll but not consuming it.
+target_compile_definitions(
+  controllers PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
 
-pluginlib_export_plugin_description_file(controller_interface hector_ros_controller_plugin.xml)
+pluginlib_export_plugin_description_file(controller_interface
+                                         hector_ros_controller_plugin.xml)
 
+install(DIRECTORY include/ DESTINATION include/)
 install(
-  DIRECTORY include/
-  DESTINATION include/
-)
-install(
-  TARGETS
-    controllers
-    velocity_to_position_command_controller_parameters
-    self_collision_avoidance_controller_parameters
+  TARGETS controllers velocity_to_position_command_controller_parameters
+          self_collision_avoidance_controller_parameters
+          safety_forward_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
-  INCLUDES DESTINATION include
-)
+  INCLUDES
+  DESTINATION include)
 
 ament_export_targets(export_hector_ros_controllers HAS_LIBRARY_TARGET)
 ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})

@@ -156,7 +156,8 @@ private:
 
   void set_dependent_links( const urdf::ModelInterfaceSharedPtr &urdf );
 
-  controller_interface::CallbackReturn set_potentially_colliding_links( urdf::ModelInterfaceSharedPtr urdf );
+  controller_interface::CallbackReturn
+  set_potentially_colliding_links( urdf::ModelInterfaceSharedPtr urdf );
 
   void collect_collision_primitives( const urdf::ModelInterfaceSharedPtr &urdf );
 

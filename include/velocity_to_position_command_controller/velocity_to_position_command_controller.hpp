@@ -34,18 +34,18 @@ namespace velocity_to_position_command_controller
  */
 class VelocityToPositionCommandController : public VelocityToPositionControllersBase
 {
-  public:
-    VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-    VelocityToPositionCommandController();
+public:
+  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
+  VelocityToPositionCommandController();
 
-  protected:
-    void declare_parameters() override;
-    controller_interface::CallbackReturn read_parameters() override;
+protected:
+  void declare_parameters() override;
+  controller_interface::CallbackReturn read_parameters() override;
 
-    std::shared_ptr<ParamListener> param_listener_;
-    Params params_;
+  std::shared_ptr<ParamListener> param_listener_;
+  Params params_;
 };
 
-}  // namespace velocity_to_position_command_controller
+} // namespace velocity_to_position_command_controller
 
-#endif 
+#endif
