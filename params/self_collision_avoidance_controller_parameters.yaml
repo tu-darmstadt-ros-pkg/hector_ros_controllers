@@ -1,34 +1,10 @@
 self_collision_avoidance_controller:
-  joints: {
-    type: string_array,
-    default_value: [],
-    description: "Names of the joints whose command interfaces will be forwarded. Their child links will be considered for collision checks.",
-    validation: {
-          not_empty<>: null,
-          unique<>: null,
-        }
-  }
+  joints: { type: string_array, default_value: [], description: "Names of the joints whose command interfaces will be forwarded. Their child links will be considered for collision checks.", validation: { not_empty<>: null, unique<>: null } }
 
-  joint_interface_types: {
-    type: string_array,
-    default_value: [],
-    description: "Type of command interfaces per joint that are forwarded."
-  }
+  joint_interface_types: { type: string_array, default_value: [], description: "Type of command interfaces per joint that are forwarded." }
 
-  joint_groups: {
-    type: string_array,
-    default_value: [],
-    description: "Group associated with each joint. When commands for one or more joints in the respective group would result in collision the whole group is blocked. Specify 'None' or '' for no group. If empty no groups will be used."
-  }
+  joint_groups: { type: string_array, default_value: [], description: "Group associated with each joint. When commands for one or more joints in the respective group would result in collision the whole group is blocked. Specify 'None' or '' for no group. If empty no groups will be used." }
 
-  safety_margin: {
-    type: double,
-    default_value: 0.01,
-    description: "Safety margin for collision checks"
-  }
+  safety_margin: { type: double, default_value: 0.01, description: "Safety margin for collision checks" }
 
-  velocity_look_ahead_factor: {
-    type: double,
-    default_value: 1.0,
-    description: "Amount of update steps in the future to predict resulting joint position based on current velocity command."
-  }
+  velocity_look_ahead_factor: { type: double, default_value: 1.0, description: "Amount of update steps in the future to predict resulting joint position based on current velocity command." }

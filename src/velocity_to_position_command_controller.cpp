@@ -22,54 +22,54 @@
 
 namespace velocity_to_position_command_controller
 {
-VelocityToPositionCommandController::VelocityToPositionCommandController() : VelocityToPositionControllersBase() {}
+VelocityToPositionCommandController::VelocityToPositionCommandController()
+    : VelocityToPositionControllersBase()
+{
+}
 
 void VelocityToPositionCommandController::declare_parameters()
 {
-  param_listener_ = std::make_shared<ParamListener>(get_node());
+  param_listener_ = std::make_shared<ParamListener>( get_node() );
 }
 
 controller_interface::CallbackReturn VelocityToPositionCommandController::read_parameters()
 {
-  if (!param_listener_)
-  {
-    RCLCPP_ERROR(get_node()->get_logger(), "Error encountered during init");
+  if ( !param_listener_ ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Error encountered during init" );
     return controller_interface::CallbackReturn::ERROR;
   }
   params_ = param_listener_->get_params();
 
-  if (params_.joints.empty())
-  {
-    RCLCPP_ERROR(get_node()->get_logger(), "'joints' parameter was empty");
+  if ( params_.joints.empty() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "'joints' parameter was empty" );
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF(this->get_robot_description());
+  urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
 
   std::string interface_prefix = "";
 
-  if(!params_.passthrough_controller.empty())
+  if ( !params_.passthrough_controller.empty() )
     interface_prefix = params_.passthrough_controller + "/";
 
-  for (const auto & joint : params_.joints){
-    command_interface_types_.push_back(interface_prefix + joint + "/position");
-    state_interface_types_.push_back(joint + "/" + "position");
-    //joint_limits_.push_back(*(urdf->getJoint(joint)->limits));
+  for ( const auto &joint : params_.joints ) {
+    command_interface_types_.push_back( interface_prefix + joint + "/position" );
+    state_interface_types_.push_back( joint + "/" + "position" );
+    // joint_limits_.push_back(*(urdf->getJoint(joint)->limits));
 
-    //if(urdf->getJoint(joint)->limits){
-    //  RCLCPP_INFO(get_node()->get_logger(), "Got limit for joint %s", joint.c_str());
-    //  joint_limits_.insert({joint, urdf->getJoint(joint)->limits});
-    joint_limits_.push_back(urdf->getJoint(joint)->limits);
-    last_positions_.push_back(-1);
-    }
-   
+    // if(urdf->getJoint(joint)->limits){
+    //   RCLCPP_INFO(get_node()->get_logger(), "Got limit for joint %s", joint.c_str());
+    //   joint_limits_.insert({joint, urdf->getJoint(joint)->limits});
+    joint_limits_.push_back( urdf->getJoint( joint )->limits );
+    last_positions_.push_back( -1 );
+  }
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-}  // namespace forward_command_controller
+} // namespace velocity_to_position_command_controller
 
 #include "pluginlib/class_list_macros.hpp"
 
-PLUGINLIB_EXPORT_CLASS(
-  velocity_to_position_command_controller::VelocityToPositionCommandController, controller_interface::ControllerInterface)
+PLUGINLIB_EXPORT_CLASS( velocity_to_position_command_controller::VelocityToPositionCommandController,
+                        controller_interface::ControllerInterface )
