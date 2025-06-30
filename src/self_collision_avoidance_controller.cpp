@@ -304,10 +304,9 @@ bool SelfCollisionAvoidanceController::on_set_chained_mode( bool /*chained_mode*
 void SelfCollisionAvoidanceController::update_joint_angles()
 {
   for ( auto index = 0ul; index < q_indices_active_.size(); ++index ) {
-    auto state_opt = state_interfaces_[index].get_optional();
-    if ( state_opt.has_value() && std::isnan( state_opt.value() ) ) {
-      joint_angles_[q_indices_active_[index]] = state_opt.value();
-    }
+    auto state_val = state_interfaces_[index].get_value();
+    if ( !std::isnan( state_val ) )
+      joint_angles_[q_indices_active_[index]] = state_val;
   }
 }
 
