@@ -1,0 +1,51 @@
+/**:
+  ros__parameters:
+    # Optional emergency‑stop topic.  Empty → start immediately.
+    estop_topic: ""
+
+    # How long to wait between retry attempts (HW + controllers).
+    retry_delay: 5.0
+
+    # ---------- hardware interfaces (activate = always) ----------
+    hardware_interfaces:
+      - "athena_flipper_interface" # TODO: athena_flipper_hardware_interface on real robot
+      - "athena_arm_interface" # TODO: athena_arm_hardware_interface on real robot
+
+    # ---------- controllers, in deterministic order -------------
+    controllers:
+      - joint_state_broadcaster
+      - flipper_trajectory_controller
+      #- self_collision_avoidance_controller
+      #- flipper_velocity_controller
+      - gripper_trajectory_controller
+      - arm_trajectory_controller
+      - moveit_twist_controller
+
+    # Per‑controller options
+    joint_state_broadcaster:
+      activate: true
+      retry_on_failure: true
+
+    flipper_trajectory_controller:
+      activate: false
+      retry_on_failure: false
+
+    #self_collision_avoidance_controller:
+    #  activate: true          # part of --activate‑as‑group
+    #  retry_on_failure: false
+
+    #flipper_velocity_controller:
+    #  activate: true          # part of --activate‑as‑group
+    #  retry_on_failure: false
+
+    gripper_trajectory_controller:
+      activate: true
+      retry_on_failure: false
+
+    arm_trajectory_controller:
+      activate: true
+      retry_on_failure: false
+
+    moveit_twist_controller:
+      activate: false
+      retry_on_failure: false

@@ -1,0 +1,8 @@
+launch:
+  - node:
+      pkg: hector_controller_spawner
+      exec: hector_controller_spawner
+      name: multi_controller_spawner
+      output: screen
+      param:
+        - from: "$(find-pkg-share hector_controller_spawner)/config/athena.yaml"
