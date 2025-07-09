@@ -1,38 +1,32 @@
-# hector_controller_spawner
+# Hector Controller Spawner - Multispawner – ROS2 Hardware & Controller Launcher
 
-Robust hardware interface and controller spawning
+Multispawner is a lightweight ROS2 node that boots an entire *ros2\_control* setup in a single shot. It resolves the tedium of juggling multiple **spawner** processes by batching every step:
 
-- [hector_controller_spawner](#hector_controller_spawner)
+* **Wait‑for‑safety/Wait-for-Hardware:** Optionally blocks on an emergency‑stop (`std_msgs/Bool`) topic before doing anything. The motors may be impossible to activate while the e‑stop is engaged.
+* **Hardware first:** Ensures every listed hardware interface is *loaded* **and** *active* (with automatic retries).
+* **Smart loading:** Loads only the controllers that are missing (skips those already present).
+* **Reduced overhead:** No per‑controller spawner nodes required, just one multispawner node.
 
+---
 
-## `hector_controller_spawner`
+## Key Parameters
 
-### Subscribed Topics
+| Name                      | Type       | Default | Purpose                                                             |
+| ------------------------- | ---------- | ------- | ------------------------------------------------------------------- |
+| `hardware_interfaces`     | `string[]` | —       | Ordered list of hardware interface names to activate.               |
+| `controllers`             | `string[]` | —       | Ordered list of controller names under management.                  |
+| `<ctrl>.activate`         | `bool`     | `true`  | Activate this controller after loading?                             |
+| `<ctrl>.retry_on_failure` | `bool`     | `false` | Keep retrying the *load* step if it fails?                          |
+| `retry_delay`             | `double`   | `5.0`   | Seconds between retry attempts.                                     |
+| `estop_topic`             | `string`   | ""      | Topic to wait on (false ⇒ proceed). Empty string disables the gate. |
 
-| Topic | Type | Description |
-| --- | --- | --- |
-|  |  |  |
+See **athena.yaml** for a full example.
 
-### Published Topics
+---
 
-| Topic | Type | Description |
-| --- | --- | --- |
-|  |  |  |
+## Typical Usage
 
-### Services
-
-| Service | Type | Description |
-| --- | --- | --- |
-|  |  |  |
-
-### Actions
-
-| Action | Type | Description |
-| --- | --- | --- |
-|  |  |  |
-
-### Parameters
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-|  |  |  |
+```bash
+ros2 launch hector_controller_spawner hector_controller_spawner_launch.yml
+```
+Add it to a launch file exactly once—no per‑controller spawner nodes required.
