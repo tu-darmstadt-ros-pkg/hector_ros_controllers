@@ -72,51 +72,125 @@ void MultiSpawner::estopCb( const std_msgs::msg::Bool::SharedPtr msg )
 // --------------------------------------------------------------
 void MultiSpawner::start_sequence()
 {
-  RCLCPP_INFO( get_logger(),
-               "[MultiControllerSpawner] Starting hardware & controller activation sequence." );
   started_ = true;
-  long retry_delay = static_cast<long>( retry_delay_ * 1e9 ); // convert to nanoseconds
 
-  // --- Hardware Interfaces ---
+  const auto sleep_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>( retry_delay_ ) );
+
+  // ===== Controller Manager Availability =================================
+  while ( rclcpp::ok() && !list_ctrl_client_->wait_for_service( sleep_ns ) ) {
+    RCLCPP_WARN( get_logger(), "Controller Manager is not yet available %.1fs", retry_delay_ );
+  }
+
+  // ===== Hardware =========================================================
   for ( const auto &hw : hw_interfaces_ ) {
     while ( rclcpp::ok() ) {
       if ( loadAndActivateHardware( hw ) ) {
         RCLCPP_INFO( get_logger(), "Hardware '%s' is active.", hw.c_str() );
         break;
       }
-      RCLCPP_WARN( get_logger(), "Hardware '%s' failed to start – retrying in %.1fs", hw.c_str(),
+      RCLCPP_WARN( get_logger(), "Hardware '%s' failed – retrying in %.1fs", hw.c_str(),
                    retry_delay_ );
-      rclcpp::sleep_for( std::chrono::nanoseconds( retry_delay ) );
+      rclcpp::sleep_for( sleep_ns );
     }
   }
 
-  // --- Controllers ---
-  for ( const auto &ctrl : controllers_ ) {
-    const auto &cfg = controller_cfg_.at( ctrl );
+  // ===== Controllers ======================================================
+  // 0) Snapshot current controller states once -----------------------------
+  std::unordered_map<std::string, std::string> current_state; // name → state string
+
+  if ( list_ctrl_client_->wait_for_service( 2s ) ) {
+    auto req = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
+    auto fut = list_ctrl_client_->async_send_request( req );
+    if ( rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
+         rclcpp::FutureReturnCode::SUCCESS ) {
+      auto resp = fut.get();
+      for ( const auto &c : resp->controller )
+        current_state[c.name] = c.state; // ACTIVE / inactive / etc.
+    }
+  }
+
+  // 1) Decide what to load / activate / deactivate -------------------------
+  std::vector<std::string> to_load;
+  std::vector<std::string> to_activate;
+  std::vector<std::string> to_deactivate;
+
+  // a) Pass 1 – deal with requested controllers
+  for ( const auto &name : controllers_ ) {
+    const auto cfg = controller_cfg_.at( name );
+    const auto it = current_state.find( name );
+
+    const bool present = ( it != current_state.end() );
+    const bool active = present && ( it->second == "active" || it->second == "ACTIVE" );
+
+    if ( !present )
+      to_load.push_back( name );
+
+    if ( cfg.activate ) {
+      if ( !active )
+        to_activate.push_back( name );
+    } else // requested inactive
+    {
+      if ( active )
+        to_deactivate.push_back( name );
+    }
+  }
+
+  // b) Pass 2 – any other active controllers that should be shut down?
+  for ( const auto &[name, state] : current_state ) {
+    if ( state == "active" || state == "ACTIVE" ) {
+      // if not in our list *or* listed but with activate=false we already handled
+      if ( std::find( controllers_.begin(), controllers_.end(), name ) == controllers_.end() )
+        to_deactivate.push_back( name );
+    }
+  }
+
+  // 2) Load missing controllers (one service call per controller) ----------
+  for ( const auto &name : to_load ) {
     while ( rclcpp::ok() ) {
-      if ( loadController( ctrl, cfg.activate ) ) {
-        RCLCPP_INFO( get_logger(), "Controller '%s' ready%s.", ctrl.c_str(),
-                     cfg.activate ? " & active" : " (inactive)" );
+      if ( loadControllerOnly( name ) ) {
+        RCLCPP_INFO( get_logger(), "Controller '%s' loaded.", name.c_str() );
         break;
       }
-
-      if ( !cfg.retry_on_failure ) {
-        RCLCPP_ERROR( get_logger(), "Controller '%s' failed & retry disabled — giving up.",
-                      ctrl.c_str() );
-        break;
-      }
-      RCLCPP_WARN( get_logger(), "Controller '%s' failed — retrying in %.1fs", ctrl.c_str(),
+      RCLCPP_WARN( get_logger(), "Failed to load '%s' – retrying in %.1fs", name.c_str(),
                    retry_delay_ );
-      rclcpp::sleep_for( std::chrono::nanoseconds( retry_delay ) );
+      rclcpp::sleep_for( sleep_ns );
     }
   }
 
-  RCLCPP_INFO( get_logger(), "[MultiControllerSpawner]  All requested hardware & controllers are "
-                             "processed. Shutting down." );
+  // 3) Single switch_controller call --------------------------------------
+  if ( !to_activate.empty() || !to_deactivate.empty() ) {
+    if ( !switch_ctrl_client_->wait_for_service( 2s ) ) {
+      RCLCPP_ERROR( get_logger(),
+                    "switch_controller service unavailable – cannot activate/deactivate batch" );
+    } else {
+      const auto sw_req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+      sw_req->activate_controllers = to_activate;
+      sw_req->deactivate_controllers = to_deactivate;
+      sw_req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+      sw_req->timeout = rclcpp::Duration::from_seconds( 5.0 );
+
+      auto sw_future = switch_ctrl_client_->async_send_request( sw_req );
+      if ( rclcpp::spin_until_future_complete( shared_from_this(), sw_future ) !=
+               rclcpp::FutureReturnCode::SUCCESS ||
+           !sw_future.get()->ok ) {
+        RCLCPP_WARN( get_logger(),
+                     "Batch switch_controller call failed – controllers may be in mixed states" );
+      } else {
+        RCLCPP_INFO( get_logger(), "Batch activation/deactivation complete (A:%zu, D:%zu).",
+                     to_activate.size(), to_deactivate.size() );
+      }
+    }
+  } else {
+    RCLCPP_INFO( get_logger(), "All required controllers are loaded and in the desired state. No "
+                               "further activation necessary." );
+  }
+
+  // ===== Done =============================================================
+  RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete – shutting down." );
   rclcpp::shutdown();
 }
 
-// --------------------------------------------------------------
 bool MultiSpawner::loadAndActivateHardware( const std::string &name )
 {
   if ( !set_hw_state_client_->wait_for_service( std::chrono::seconds( 3 ) ) ) {
@@ -137,86 +211,24 @@ bool MultiSpawner::loadAndActivateHardware( const std::string &name )
   return act_future.get()->ok;
 }
 
-// --------------------------------------------------------------
-bool MultiSpawner::loadController( const std::string &name, bool activate )
+bool MultiSpawner::loadControllerOnly( const std::string &name )
 {
-  // ---- Step 0: discover current state ------------------------------------
-  bool already_loaded = false;
-  bool already_active = false;
-  RCLCPP_INFO( get_logger(), "Checking controller '%s' state.", name.c_str() );
-  if ( list_ctrl_client_->wait_for_service( 2s ) ) {
-    auto list_req = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
-    auto list_future = list_ctrl_client_->async_send_request( list_req );
-    if ( rclcpp::spin_until_future_complete( shared_from_this(), list_future ) ==
-         rclcpp::FutureReturnCode::SUCCESS ) {
-      RCLCPP_INFO( get_logger(), "[MultiControllerSpawner] Retrieved controller list." );
-      auto resp = list_future.get();
-      if ( !resp ) {
-        RCLCPP_ERROR( get_logger(), "ListControllers response null – aborting" );
-        return false;
-      }
+  if ( !load_ctrl_client_->wait_for_service( 2s ) )
+    return false;
 
-      for ( const auto &c : resp->controller ) {
-        RCLCPP_INFO( get_logger(), "[MultiControllerSpawner] Retrieved controller list." );
-
-        if ( c.name == name ) {
-          already_loaded = true;
-          already_active = ( c.state == "active" || c.state == "ACTIVE" );
-          break;
-        }
-      }
-    }
-  }
-  RCLCPP_INFO( get_logger(), "[MultiControllerSpawner] Loading controller ." );
-  // ---- Step 1: load if not present ---------------------------------------
-  if ( !already_loaded ) {
-    RCLCPP_INFO( get_logger(), "Controller '%s' not loaded yet, loading now.", name.c_str() );
-    if ( !load_ctrl_client_->wait_for_service( 2s ) ) {
-      RCLCPP_DEBUG( get_logger(), "Service /load_controller not available yet." );
-      return false;
-    }
-    auto load_req = std::make_shared<controller_manager_msgs::srv::LoadController::Request>();
-    load_req->name = name;
-    auto load_future = load_ctrl_client_->async_send_request( load_req );
-    if ( rclcpp::spin_until_future_complete( shared_from_this(), load_future ) !=
-         rclcpp::FutureReturnCode::SUCCESS ) {
-      return false;
-    }
-    if ( !load_future.get()->ok ) {
-      RCLCPP_ERROR( get_logger(), "Loading controller '%s' failed", name.c_str() );
-      return false;
-    }
-    already_loaded = true;  // now it is
-    already_active = false; // freshly loaded controllers start inactive
-  }
-
-  // ---- Step 2: activate if requested -------------------------------------
-  if ( activate && !already_active ) {
-    RCLCPP_INFO( get_logger(), "Activating controller '%s'.", name.c_str() );
-    if ( !switch_ctrl_client_->wait_for_service( 2s ) ) {
-      return false;
-    }
-    auto sw_req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-    sw_req->activate_controllers.push_back( name );
-    sw_req->strictness = controller_manager_msgs::srv::SwitchController::Request::STRICT;
-    sw_req->timeout = rclcpp::Duration::from_seconds( 0.0 );
-    auto sw_future = switch_ctrl_client_->async_send_request( sw_req );
-    if ( rclcpp::spin_until_future_complete( shared_from_this(), sw_future ) !=
-         rclcpp::FutureReturnCode::SUCCESS ) {
-      return false;
-    }
-    return sw_future.get()->ok;
-  }
-  // either activation not requested or already active
-  return true;
+  const auto req = std::make_shared<controller_manager_msgs::srv::LoadController::Request>();
+  req->name = name;
+  auto fut = load_ctrl_client_->async_send_request( req );
+  return rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
+             rclcpp::FutureReturnCode::SUCCESS &&
+         fut.get()->ok;
 }
-
 } // namespace hector_controller_spawner
 
 int main( int argc, char **argv )
 {
   rclcpp::init( argc, argv );
-  auto node = std::make_shared<hector_controller_spawner::MultiSpawner>();
+  const auto node = std::make_shared<hector_controller_spawner::MultiSpawner>();
   node->initialize();
   rclcpp::spin( node );
   return 0;

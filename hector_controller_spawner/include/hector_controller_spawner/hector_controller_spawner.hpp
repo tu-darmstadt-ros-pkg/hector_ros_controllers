@@ -41,7 +41,7 @@ private:
 
   // ----- helpers -----
   bool loadAndActivateHardware( const std::string &name );
-  bool loadController( const std::string &name, bool activate );
+  bool loadControllerOnly( const std::string &name );
 
   // ----- parameters -----
   std::vector<std::string> hw_interfaces_;
