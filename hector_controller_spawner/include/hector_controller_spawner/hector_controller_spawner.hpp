@@ -20,13 +20,14 @@ namespace hector_controller_spawner
 
 /**
  *  @brief  Multispawner waits for an (optional) e‑stop, then loads & activates
- *          hardware interfaces followed by controllers in a deterministic order.
+ *          hardware interfaces followed by controllers.
  */
 class MultiSpawner : public rclcpp::Node
 {
 public:
   explicit MultiSpawner();
   void initialize();
+  bool is_finished() const noexcept { return done_; }
 
 private:
   // ----- helper structs -----
@@ -50,6 +51,7 @@ private:
   double retry_delay_{ 5.0 };
   std::string estop_topic_;
   bool started_{ false };
+  std::atomic<bool> done_{ false };
 
   // ----- service clients -----
   rclcpp::Client<controller_manager_msgs::srv::SetHardwareComponentState>::SharedPtr set_hw_state_client_;

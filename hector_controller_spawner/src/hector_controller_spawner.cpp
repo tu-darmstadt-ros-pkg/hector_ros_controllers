@@ -20,23 +20,25 @@ void MultiSpawner::initialize()
   retry_delay_ = this->declare_parameter<double>( "retry_delay", 5.0 );
   estop_topic_ = this->declare_parameter<std::string>( "estop_topic", "" );
 
-  // output parameters for debugging
-  std::stringstream ss;
-  ss << "Parameters:\n";
-  ss << "  hardware_interfaces: " << hw_interfaces_.size() << "\n";
-  for ( const auto &hw : hw_interfaces_ ) { ss << "    - " << hw << "\n"; }
-  ss << "  controllers: " << controllers_.size() << "\n";
-  for ( const auto &ctrl : controllers_ ) { ss << "    - " << ctrl << "\n"; }
-  ss << "  retry_delay: " << retry_delay_ << " seconds\n";
-  ss << "  estop_topic: '" << estop_topic_ << "'\n";
-  RCLCPP_INFO( get_logger(), "%s", ss.str().c_str() );
-
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
     cfg.activate = this->declare_parameter<bool>( ctrl + ".activate", true );
     cfg.retry_on_failure = this->declare_parameter<bool>( ctrl + ".retry_on_failure", false );
     controller_cfg_[ctrl] = cfg;
   }
+
+  // output parameters for debugging
+  std::stringstream ss;
+  ss << "Parameters:\n";
+  ss << "  hardware_interfaces: " << hw_interfaces_.size() << "\n";
+  for ( const auto &hw : hw_interfaces_ ) { ss << "    - " << hw << "\n"; }
+  ss << "  controllers: " << controllers_.size() << "\n";
+  for ( const auto &ctrl : controllers_ ) {
+    ss << "    - " << ctrl << " (activate: " << controller_cfg_.at( ctrl ).activate << ")\n";
+  }
+  ss << "  retry_delay: " << retry_delay_ << " seconds\n";
+  ss << "  estop_topic: '" << estop_topic_ << "'\n";
+  RCLCPP_INFO( get_logger(), "%s", ss.str().c_str() );
 
   // 2) Create service clients
   set_hw_state_client_ = this->create_client<controller_manager_msgs::srv::SetHardwareComponentState>(
@@ -188,7 +190,7 @@ void MultiSpawner::start_sequence()
 
   // ===== Done =============================================================
   RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete – shutting down." );
-  rclcpp::shutdown();
+  done_.store( true );
 }
 
 bool MultiSpawner::loadAndActivateHardware( const std::string &name )
@@ -199,7 +201,8 @@ bool MultiSpawner::loadAndActivateHardware( const std::string &name )
     return false;
   }
   // 2) Activate
-  auto act_req = std::make_shared<controller_manager_msgs::srv::SetHardwareComponentState::Request>();
+  const auto act_req =
+      std::make_shared<controller_manager_msgs::srv::SetHardwareComponentState::Request>();
   act_req->name = name;
   act_req->target_state.id = lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
   act_req->target_state.label = "active";
@@ -228,8 +231,17 @@ bool MultiSpawner::loadControllerOnly( const std::string &name )
 int main( int argc, char **argv )
 {
   rclcpp::init( argc, argv );
-  const auto node = std::make_shared<hector_controller_spawner::MultiSpawner>();
+
+  auto node = std::make_shared<hector_controller_spawner::MultiSpawner>();
   node->initialize();
-  rclcpp::spin( node );
+
+  using namespace std::chrono_literals;
+  while ( rclcpp::ok() && !node->is_finished() ) {
+    rclcpp::spin_some( node );
+    std::this_thread::sleep_for( 50ms );
+  }
+
+  node.reset();
+  rclcpp::shutdown();
   return 0;
 }
