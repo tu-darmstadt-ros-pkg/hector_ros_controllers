@@ -1,16 +1,13 @@
 #ifndef HECTOR_CONTROLLER_SPAWNER_HECTOR_CONTROLLER_SPAWNER_HPP
 #define HECTOR_CONTROLLER_SPAWNER_HECTOR_CONTROLLER_SPAWNER_HPP
 
-#include <chrono>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include <lifecycle_msgs/msg/state.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 
-#include <controller_manager_msgs/msg/hardware_component_state.hpp>
 #include <controller_manager_msgs/srv/configure_controller.hpp>
 #include <controller_manager_msgs/srv/list_controllers.hpp>
 #include <controller_manager_msgs/srv/load_controller.hpp>
@@ -46,7 +43,6 @@ private:
   bool loadAndActivateHardware( const std::string &name );
   bool loadController( const std::string &name );
   bool configureController( const std::string &name );
-
   bool replicateParamsToCM();
   void verifyFinalStates();
 

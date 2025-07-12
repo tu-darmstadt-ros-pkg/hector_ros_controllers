@@ -1,14 +1,11 @@
 #include "hector_controller_spawner/hector_controller_spawner.hpp"
 #include <functional>
 
-#include <hector_controller_spawner/hector_controller_spawner.hpp>
-
 namespace hector_controller_spawner
 {
 
 using namespace std::chrono_literals;
 
-// --------------------------------------------------------------
 MultiSpawner::MultiSpawner() : Node( "multi_controller_spawner" ) { }
 void MultiSpawner::initialize()
 {
@@ -38,7 +35,7 @@ void MultiSpawner::initialize()
   }
   ss << "  retry_delay: " << retry_delay_ << " seconds\n";
   ss << "  estop_topic: '" << estop_topic_ << "'\n";
-  RCLCPP_INFO( get_logger(), "%s", ss.str().c_str() );
+  RCLCPP_DEBUG( get_logger(), "%s", ss.str().c_str() );
 
   // 2) Create service clients
   set_hw_state_client_ = this->create_client<controller_manager_msgs::srv::SetHardwareComponentState>(
@@ -66,7 +63,6 @@ void MultiSpawner::initialize()
   }
 }
 
-// --------------------------------------------------------------
 void MultiSpawner::estopCb( const std_msgs::msg::Bool::SharedPtr msg )
 {
   if ( !started_ && !msg->data ) {
@@ -75,7 +71,6 @@ void MultiSpawner::estopCb( const std_msgs::msg::Bool::SharedPtr msg )
   }
 }
 
-// --------------------------------------------------------------
 void MultiSpawner::start_sequence()
 {
   started_ = true;
@@ -130,7 +125,7 @@ void MultiSpawner::start_sequence()
     const auto it = current_state.find( name );
 
     const bool present = ( it != current_state.end() );
-    const bool active = present && ( it->second == "active" || it->second == "ACTIVE" );
+    const bool active = present && ( it->second == "active" );
 
     if ( !present )
       to_load.push_back( name );
@@ -147,7 +142,7 @@ void MultiSpawner::start_sequence()
 
   // b) Pass 2 – any other active controllers that should be shut down?
   for ( const auto &[name, state] : current_state ) {
-    if ( state == "active" || state == "ACTIVE" ) {
+    if ( state == "active" ) {
       // if not in our list *or* listed but with activate=false we already handled
       if ( std::find( controllers_.begin(), controllers_.end(), name ) == controllers_.end() )
         to_deactivate.push_back( name );
@@ -308,19 +303,18 @@ void MultiSpawner::verifyFinalStates()
   }
 
   std::unordered_map<std::string, std::string> state;
-  auto resp = fut.get();
+  const auto resp = fut.get();
   for ( const auto &c : resp->controller ) state[c.name] = c.state;
 
   size_t ok_cnt = 0, fail_cnt = 0;
   std::stringstream report;
-  report << "Final controller states:\n";
+  report << "\nFinal controller states:\n";
 
   for ( const auto &name : controllers_ ) {
     std::string current = state.count( name ) ? state.at( name ) : "missing";
     bool should_be_active = controller_cfg_[name].activate;
-    bool success = ( should_be_active && ( current == "active" || current == "ACTIVE" ) ) ||
-                   ( !should_be_active &&
-                     ( current == "inactive" || current == "configured" || current == "INACTIVE" ) );
+    bool success = ( should_be_active && ( current == "active" ) ) ||
+                   ( !should_be_active && ( current == "inactive" || current == "configured" ) );
 
     if ( success ) {
       ++ok_cnt;
@@ -330,8 +324,8 @@ void MultiSpawner::verifyFinalStates()
       report << "  " << RED << "✘ " << name << " → " << current << RESET << "\n";
     }
   }
-
-  report << "Summary: " << ok_cnt << " OK / " << fail_cnt << " failed.";
+  report << ( ( fail_cnt > 0 ) ? RED : GREEN ) << "Summary: " << ok_cnt << " OK / " << fail_cnt
+         << " failed." << RESET;
   if ( fail_cnt == 0 )
     RCLCPP_INFO( get_logger(), "%s", report.str().c_str() );
   else
