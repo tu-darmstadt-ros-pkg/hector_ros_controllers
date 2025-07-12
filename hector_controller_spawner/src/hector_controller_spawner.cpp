@@ -53,7 +53,7 @@ void MultiSpawner::initialize()
 
   // 3) Handle e‑stop logic
   if ( estop_topic_.empty() ) {
-    start_sequence();
+    released_ = true;
   } else {
     estop_sub_ = this->create_subscription<std_msgs::msg::Bool>(
         estop_topic_, rclcpp::SensorDataQoS(),
@@ -67,7 +67,7 @@ void MultiSpawner::estopCb( const std_msgs::msg::Bool::SharedPtr msg )
 {
   if ( !started_ && !msg->data ) {
     RCLCPP_INFO( get_logger(), "E‑stop released — commencing startup sequence." );
-    start_sequence();
+    released_ = true;
   }
 }
 
@@ -343,6 +343,8 @@ int main( int argc, char **argv )
   using namespace std::chrono_literals;
   while ( rclcpp::ok() && !node->is_finished() ) {
     rclcpp::spin_some( node );
+    if ( node->estop_released_and_not_started() )
+      node->start_sequence(); // safe – not inside another callback
     std::this_thread::sleep_for( 50ms );
   }
 

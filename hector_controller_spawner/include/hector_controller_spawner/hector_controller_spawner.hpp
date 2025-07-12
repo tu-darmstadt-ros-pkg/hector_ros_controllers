@@ -27,6 +27,8 @@ public:
   explicit MultiSpawner();
   void initialize();
   bool is_finished() const noexcept { return done_; }
+  bool estop_released_and_not_started() const noexcept { return released_ && !started_; }
+  void start_sequence();
 
 private:
   // ----- helper structs -----
@@ -37,7 +39,6 @@ private:
 
   // ----- callbacks -----
   void estopCb( const std_msgs::msg::Bool::SharedPtr msg );
-  void start_sequence();
 
   // ----- helpers -----
   bool loadAndActivateHardware( const std::string &name );
@@ -54,6 +55,7 @@ private:
   std::string estop_topic_;
   bool started_{ false };
   std::atomic<bool> done_{ false };
+  std::atomic<bool> released_{ false };
 
   // ----- service clients -----
   rclcpp::Client<controller_manager_msgs::srv::SetHardwareComponentState>::SharedPtr set_hw_state_client_;
