@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hector_controller_spawner</name>
+  <version>0.0.0</version>
+  <description>Robust hardware interface and controller spawning</description>
+
+  <maintainer email="aljoscha.schmidt@tu-darmstadt.de">Aljoscha Schmidt</maintainer>
+  <license>TODO</license>
+  <author email="aljoscha.schmidt@tu-darmstadt.de">Aljoscha Schmidt</author>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>controller_manager_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
