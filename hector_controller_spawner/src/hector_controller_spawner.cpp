@@ -49,6 +49,10 @@ void MultiSpawner::initialize()
       "controller_manager/switch_controller" );
   list_ctrl_client_ = this->create_client<controller_manager_msgs::srv::ListControllers>(
       "controller_manager/list_controllers" );
+  configure_ctrl_client_ = this->create_client<controller_manager_msgs::srv::ConfigureController>(
+      "controller_manager/configure_controller" );
+  cm_param_client_ =
+      std::make_shared<rclcpp::AsyncParametersClient>( shared_from_this(), "controller_manager" );
 
   // 3) Handle e‑stop logic
   if ( estop_topic_.empty() ) {
@@ -83,6 +87,9 @@ void MultiSpawner::start_sequence()
   while ( rclcpp::ok() && !list_ctrl_client_->wait_for_service( sleep_ns ) ) {
     RCLCPP_WARN( get_logger(), "Controller Manager is not yet available %.1fs", retry_delay_ );
   }
+
+  // ===== Copy Parameters =================================
+  // replicateParamsToCM();
 
   // ===== Hardware =========================================================
   for ( const auto &hw : hw_interfaces_ ) {
@@ -150,11 +157,24 @@ void MultiSpawner::start_sequence()
   // 2) Load missing controllers (one service call per controller) ----------
   for ( const auto &name : to_load ) {
     while ( rclcpp::ok() ) {
-      if ( loadControllerOnly( name ) ) {
+      if ( loadController( name ) ) {
         RCLCPP_INFO( get_logger(), "Controller '%s' loaded.", name.c_str() );
         break;
       }
       RCLCPP_WARN( get_logger(), "Failed to load '%s' – retrying in %.1fs", name.c_str(),
+                   retry_delay_ );
+      rclcpp::sleep_for( sleep_ns );
+    }
+  }
+
+  // 2.5) Configure missing controllers
+  for ( const auto &name : to_load ) {
+    while ( rclcpp::ok() ) {
+      if ( configureController( name ) ) {
+        RCLCPP_INFO( get_logger(), "Controller '%s' configured.", name.c_str() );
+        break;
+      }
+      RCLCPP_WARN( get_logger(), "Failed to configure '%s' – retrying in %.1fs", name.c_str(),
                    retry_delay_ );
       rclcpp::sleep_for( sleep_ns );
     }
@@ -214,7 +234,7 @@ bool MultiSpawner::loadAndActivateHardware( const std::string &name )
   return act_future.get()->ok;
 }
 
-bool MultiSpawner::loadControllerOnly( const std::string &name )
+bool MultiSpawner::loadController( const std::string &name )
 {
   if ( !load_ctrl_client_->wait_for_service( 2s ) )
     return false;
@@ -226,6 +246,46 @@ bool MultiSpawner::loadControllerOnly( const std::string &name )
              rclcpp::FutureReturnCode::SUCCESS &&
          fut.get()->ok;
 }
+
+bool MultiSpawner::configureController( const std::string &name )
+{
+  if ( !configure_ctrl_client_->wait_for_service( 2s ) )
+    return false;
+  const auto req = std::make_shared<controller_manager_msgs::srv::ConfigureController::Request>();
+  req->name = name;
+  auto fut = configure_ctrl_client_->async_send_request( req );
+  return rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
+             rclcpp::FutureReturnCode::SUCCESS &&
+         fut.get()->ok;
+}
+
+/*bool MultiSpawner::replicateParamsToCM()
+{
+  // gather *all* current parameters of this node
+  const auto names = this->list_parameters( {}, 10 ).names;
+  std::vector<rclcpp::Parameter> params;
+  params.reserve( names.size() );
+  for ( const auto &n : names ) {
+    if ( n.find( "qos_overrides" ) == std::string::npos ) {
+      params.push_back( this->get_parameter( n ) );
+      RCLCPP_INFO( get_logger(), "[MultiControllerSpawner] Adding Parameter %s.", n.c_str() );
+    }
+  }
+
+  // single atomic set_parameters call
+  auto fut = cm_param_client_->set_parameters_atomically( params );
+  if ( rclcpp::spin_until_future_complete( shared_from_this(), fut ) !=
+       rclcpp::FutureReturnCode::SUCCESS )
+    return false;
+
+  const auto result = fut.get();
+  if ( !result.successful ) {
+    RCLCPP_ERROR( get_logger(), "Atomic parameter set failed: %s", result.reason.c_str() );
+  } else {
+    RCLCPP_INFO( get_logger(), "Atomic parameter set successful." );
+  }
+  return result.successful;
+}*/
 } // namespace hector_controller_spawner
 
 int main( int argc, char **argv )
