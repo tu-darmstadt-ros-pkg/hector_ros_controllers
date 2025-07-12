@@ -48,6 +48,7 @@ private:
   bool configureController( const std::string &name );
 
   bool replicateParamsToCM();
+  void verifyFinalStates();
 
   // ----- parameters -----
   std::vector<std::string> hw_interfaces_;

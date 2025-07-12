@@ -209,6 +209,7 @@ void MultiSpawner::start_sequence()
   }
 
   // ===== Done =============================================================
+  verifyFinalStates();
   RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete – shutting down." );
   done_.store( true );
 }
@@ -286,6 +287,56 @@ bool MultiSpawner::configureController( const std::string &name )
   }
   return result.successful;
 }*/
+void MultiSpawner::verifyFinalStates()
+{
+  static const char *GREEN = "\033[32m";
+  static const char *RED = "\033[31m";
+  static const char *RESET = "\033[0m";
+
+  if ( !list_ctrl_client_->wait_for_service( 2s ) ) {
+    RCLCPP_WARN( get_logger(),
+                 "Cannot verify final controller states – list_controllers unavailable." );
+    return;
+  }
+
+  auto req = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
+  auto fut = list_ctrl_client_->async_send_request( req );
+  if ( rclcpp::spin_until_future_complete( shared_from_this(), fut ) !=
+       rclcpp::FutureReturnCode::SUCCESS ) {
+    RCLCPP_WARN( get_logger(), "Failed to query controller states for final verification." );
+    return;
+  }
+
+  std::unordered_map<std::string, std::string> state;
+  auto resp = fut.get();
+  for ( const auto &c : resp->controller ) state[c.name] = c.state;
+
+  size_t ok_cnt = 0, fail_cnt = 0;
+  std::stringstream report;
+  report << "Final controller states:\n";
+
+  for ( const auto &name : controllers_ ) {
+    std::string current = state.count( name ) ? state.at( name ) : "missing";
+    bool should_be_active = controller_cfg_[name].activate;
+    bool success = ( should_be_active && ( current == "active" || current == "ACTIVE" ) ) ||
+                   ( !should_be_active &&
+                     ( current == "inactive" || current == "configured" || current == "INACTIVE" ) );
+
+    if ( success ) {
+      ++ok_cnt;
+      report << "  " << GREEN << "✔ " << name << " → " << current << RESET << "\n";
+    } else {
+      ++fail_cnt;
+      report << "  " << RED << "✘ " << name << " → " << current << RESET << "\n";
+    }
+  }
+
+  report << "Summary: " << ok_cnt << " OK / " << fail_cnt << " failed.";
+  if ( fail_cnt == 0 )
+    RCLCPP_INFO( get_logger(), "%s", report.str().c_str() );
+  else
+    RCLCPP_WARN( get_logger(), "%s", report.str().c_str() );
+}
 } // namespace hector_controller_spawner
 
 int main( int argc, char **argv )
