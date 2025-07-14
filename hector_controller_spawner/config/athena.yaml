@@ -1,4 +1,5 @@
 /**:
+  # Example configuration !!
   ros__parameters:
     # Optional emergency‑stop topic.  Empty → start immediately.
     estop_topic: ""
@@ -8,8 +9,8 @@
 
     # ---------- hardware interfaces (activate = always) ----------
     hardware_interfaces:
-      - "athena_flipper_interface" # TODO: athena_flipper_hardware_interface on real robot
-      - "athena_arm_interface" # TODO: athena_arm_hardware_interface on real robot
+      - "athena_flipper_interface"
+      - "athena_arm_interface"
 
     # ---------- controllers, in deterministic order -------------
     controllers:
@@ -24,28 +25,23 @@
     # Per‑controller options
     joint_state_broadcaster:
       activate: true
-      retry_on_failure: true
 
     flipper_trajectory_controller:
       activate: false
-      retry_on_failure: false
 
     self_collision_avoidance_controller:
-      activate: true          # part of --activate‑as‑group
-      retry_on_failure: false
+      activate: true
+      activate_as_group: ["flipper_velocity_controller"]
 
     flipper_velocity_controller:
-      activate: true          # part of --activate‑as‑group
-      retry_on_failure: false
+      activate: true
+      activate_as_group: ["self_collision_avoidance_controller"]
 
     gripper_trajectory_controller:
       activate: true
-      retry_on_failure: false
 
     arm_trajectory_controller:
       activate: true
-      retry_on_failure: false
 
     moveit_twist_controller:
       activate: false
-      retry_on_failure: false

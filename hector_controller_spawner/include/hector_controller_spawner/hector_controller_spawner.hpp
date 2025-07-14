@@ -34,7 +34,7 @@ private:
   // ----- helper structs -----
   struct ControllerCfg {
     bool activate{ true };
-    bool retry_on_failure{ false };
+    std::vector<std::string> activate_as_group;
   };
 
   // ----- callbacks -----

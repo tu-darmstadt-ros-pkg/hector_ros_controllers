@@ -20,7 +20,8 @@ void MultiSpawner::initialize()
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
     cfg.activate = this->declare_parameter<bool>( ctrl + ".activate", true );
-    cfg.retry_on_failure = this->declare_parameter<bool>( ctrl + ".retry_on_failure", false );
+    cfg.activate_as_group = this->declare_parameter<std::vector<std::string>>(
+        ctrl + ".activate_as_group", std::vector<std::string>() );
     controller_cfg_[ctrl] = cfg;
   }
 
@@ -56,7 +57,7 @@ void MultiSpawner::initialize()
     released_ = true;
   } else {
     estop_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        estop_topic_, rclcpp::SensorDataQoS(),
+        estop_topic_, rclcpp::QoS( 1 ).transient_local(),
         std::bind( &MultiSpawner::estopCb, this, std::placeholders::_1 ) );
     RCLCPP_INFO( get_logger(), "Waiting for e‑stop topic '%s' to become false…",
                  estop_topic_.c_str() );
@@ -175,32 +176,87 @@ void MultiSpawner::start_sequence()
     }
   }
 
-  // 3) Single switch_controller call --------------------------------------
-  if ( !to_activate.empty() || !to_deactivate.empty() ) {
+  // 3) Group switch_controller calls --------------------------------------
+  auto switch_controllers = [&]( const std::vector<std::string> &activate,
+                                 const std::vector<std::string> &deactivate ) -> bool {
     if ( !switch_ctrl_client_->wait_for_service( 2s ) ) {
-      RCLCPP_ERROR( get_logger(),
-                    "switch_controller service unavailable – cannot activate/deactivate batch" );
-    } else {
-      const auto sw_req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-      sw_req->activate_controllers = to_activate;
-      sw_req->deactivate_controllers = to_deactivate;
-      sw_req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
-      sw_req->timeout = rclcpp::Duration::from_seconds( 5.0 );
+      RCLCPP_ERROR( get_logger(), "switch_controller service unavailable" );
+      return false;
+    }
+    auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+    req->activate_controllers = activate;
+    req->deactivate_controllers = deactivate;
+    req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+    req->timeout = rclcpp::Duration::from_seconds( 5.0 );
 
-      auto sw_future = switch_ctrl_client_->async_send_request( sw_req );
-      if ( rclcpp::spin_until_future_complete( shared_from_this(), sw_future ) !=
-               rclcpp::FutureReturnCode::SUCCESS ||
-           !sw_future.get()->ok ) {
+    auto fut = switch_ctrl_client_->async_send_request( req );
+    return rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
+               rclcpp::FutureReturnCode::SUCCESS &&
+           fut.get()->ok;
+  };
+
+  // deactivate controllers that are active but not requested
+  if ( !to_deactivate.empty() ) {
+    std::stringstream ss;
+    for ( size_t i = 0; i < to_deactivate.size(); ++i ) {
+      ss << to_deactivate[i] << ( i + 1 < to_deactivate.size() ? ", " : "" );
+    }
+    if ( !switch_controllers( {}, to_deactivate ) ) {
+      RCLCPP_ERROR( get_logger(), "Failed to deactivate controllers: %s", ss.str().c_str() );
+    } else {
+      RCLCPP_INFO( get_logger(), "Deactivated controllers: %s", ss.str().c_str() );
+    }
+  }
+
+  std::unordered_set<std::string> processed;
+  for ( const auto &name : controllers_ ) {
+    if ( processed.count( name ) ) {
+      continue; // already handled as part of a group
+    }
+
+    const auto &cfg = controller_cfg_.at( name );
+    std::vector<std::string> group;
+    group.push_back( name );
+    group.insert( group.end(), cfg.activate_as_group.begin(), cfg.activate_as_group.end() );
+    processed.insert( group.begin(), group.end() );
+
+    /* Determine whether at least one controller in this group should be active. */
+    bool group_requested_active = false;
+    for ( const auto &m : group ) { group_requested_active |= controller_cfg_.at( m ).activate; }
+    if ( !group_requested_active ) {
+      continue; // whole group requested inactive
+    }
+
+    /* Force any “false” members in the same group to active and warn once. */
+    for ( const auto &m : group ) {
+      if ( !controller_cfg_.at( m ).activate ) {
         RCLCPP_WARN( get_logger(),
-                     "Batch switch_controller call failed – controllers may be in mixed states" );
-      } else {
-        RCLCPP_INFO( get_logger(), "Batch activation/deactivation complete (A:%zu, D:%zu).",
-                     to_activate.size(), to_deactivate.size() );
+                     "Controller '%s' is in activate_as_group with '%s' → overriding to ACTIVE.",
+                     m.c_str(), name.c_str() );
       }
     }
-  } else {
-    RCLCPP_INFO( get_logger(), "All required controllers are loaded and in the desired state. No "
-                               "further activation necessary." );
+
+    /* Skip activation if entire group is already active. */
+    bool already_active = true;
+    for ( const auto &m : group ) {
+      auto it = current_state.find( m );
+      already_active &= ( it != current_state.end() && it->second == "active" );
+    }
+    if ( already_active ) {
+      continue;
+    }
+
+    /* Issue one switch_controller call for this group. */
+    if ( !switch_controllers( group, /*deactivate*/ {} ) ) {
+      RCLCPP_ERROR( get_logger(), "Failed to activate controller group containing '%s'",
+                    name.c_str() );
+    } else {
+      std::stringstream ss;
+      for ( size_t i = 0; i < group.size(); ++i ) {
+        ss << group[i] << ( i + 1 < group.size() ? ", " : "" );
+      }
+      RCLCPP_INFO( get_logger(), "Activated controller group: %s", ss.str().c_str() );
+    }
   }
 
   // ===== Done =============================================================
