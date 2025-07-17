@@ -22,12 +22,13 @@
 #include <urdf_parser/urdf_parser.h>
 #include <vector>
 
+#include "controller_interface/chainable_controller_interface.hpp"
 #include "controller_interface/controller_interface.hpp"
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
-#include "velocity_to_position_command_controller/visibility_control.h"
 
 namespace velocity_to_position_command_controller
 {
@@ -41,39 +42,32 @@ using CmdType = std_msgs::msg::Float64MultiArray;
  * Subscribes to:
  * - \b commands (std_msgs::msg::Float64) : The commands to apply.
  */
-class VelocityToPositionControllersBase : public controller_interface::ControllerInterface
+class VelocityToPositionControllersBase : public controller_interface::ChainableControllerInterface
 {
 public:
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   VelocityToPositionControllersBase();
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   ~VelocityToPositionControllersBase() = default;
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::InterfaceConfiguration command_interface_configuration() const override;
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::InterfaceConfiguration state_interface_configuration() const override;
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn on_init() override;
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn
   on_configure( const rclcpp_lifecycle::State &previous_state ) override;
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn
   on_activate( const rclcpp_lifecycle::State &previous_state ) override;
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
   controller_interface::CallbackReturn
   on_deactivate( const rclcpp_lifecycle::State &previous_state ) override;
 
-  VELOCITY_TO_POSITION_COMMAND_CONTROLLER_PUBLIC
-  controller_interface::return_type update( const rclcpp::Time &time,
-                                            const rclcpp::Duration &period ) override;
+  controller_interface::return_type
+  update_and_write_commands( const rclcpp::Time &time, const rclcpp::Duration &period ) override;
+
+  bool on_set_chained_mode( bool chained_mode ) override;
 
 protected:
   /**
@@ -94,16 +88,28 @@ protected:
    */
   virtual controller_interface::CallbackReturn read_parameters() = 0;
 
+  std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
+
+  controller_interface::return_type
+  update_reference_from_subscribers( const rclcpp::Time &time,
+                                     const rclcpp::Duration &period ) override;
+
   std::vector<std::string> joints_;
+  std::vector<std::string> reference_interface_names_;
   std::vector<std::shared_ptr<urdf::JointLimits>> joint_limits_;
 
   std::vector<std::string> command_interface_types_;
   std::vector<std::string> state_interface_types_;
 
   std::vector<double> last_positions_;
+  std::vector<bool> stopping_;
 
-  realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;
-  rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
+  std::string e_stop_topic_;
+  bool e_stop_active_;
+
+  realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;
+  // rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hard_estop_sub_;
 };
 
 } // namespace velocity_to_position_command_controller

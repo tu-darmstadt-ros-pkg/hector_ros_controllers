@@ -57,12 +57,18 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     state_interface_types_.push_back( joint + "/" + "position" );
     // joint_limits_.push_back(*(urdf->getJoint(joint)->limits));
 
+    reference_interface_names_.push_back( joint + "/" + "velocity" );
     // if(urdf->getJoint(joint)->limits){
     //   RCLCPP_INFO(get_node()->get_logger(), "Got limit for joint %s", joint.c_str());
     //   joint_limits_.insert({joint, urdf->getJoint(joint)->limits});
-    joint_limits_.push_back( urdf->getJoint( joint )->limits );
-    last_positions_.push_back( -1 );
+    // joint_limits_.push_back( urdf->getJoint( joint )->limits );
+    last_positions_.push_back( 0.0 );
   }
+
+  reference_interfaces_.resize( reference_interface_names_.size() );
+  stopping_.resize( reference_interface_names_.size(), false );
+
+  e_stop_topic_ = params_.e_stop_topic;
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -72,4 +78,4 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
 #include "pluginlib/class_list_macros.hpp"
 
 PLUGINLIB_EXPORT_CLASS( velocity_to_position_command_controller::VelocityToPositionCommandController,
-                        controller_interface::ControllerInterface )
+                        controller_interface::ChainableControllerInterface )

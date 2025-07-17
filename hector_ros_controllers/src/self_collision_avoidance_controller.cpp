@@ -120,6 +120,12 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  if ( params_.passthrough_controller.empty() ) {
+    passthrough_controller_ = "";
+  } else {
+    passthrough_controller_ = params_.passthrough_controller + "/";
+  }
+
   velocity_look_ahead_factor_ = (int)params_.velocity_look_ahead_factor;
 
   if ( params_.joint_groups.empty() ) {
@@ -160,7 +166,7 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
       return controller_interface::CallbackReturn::ERROR;
     }
 
-    command_interface_names_.push_back( controlled_joints_[i] + "/" +
+    command_interface_names_.push_back( passthrough_controller_ + controlled_joints_[i] + "/" +
                                         params_.joint_interface_types[i] );
     interface_types_.push_back( params_.joint_interface_types[i] );
   }
