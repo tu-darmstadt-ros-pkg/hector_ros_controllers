@@ -28,6 +28,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     rclcpp_lifecycle
     realtime_tools
     std_msgs
+    std_srvs
     fcl
     ad_kinematics)
 
@@ -48,6 +49,10 @@ generate_parameter_library(
 generate_parameter_library(safety_forward_controller_parameters
                            params/safety_forward_controller_parameters.yaml)
 
+generate_parameter_library(
+  apply_current_limit_controller_parameters
+  params/apply_current_limit_controller_parameters.yaml)
+
 # Add controllers here Define Controllers as Shared Libraries
 
 add_library(
@@ -55,7 +60,8 @@ add_library(
   src/velocity_to_position_controllers_base.cpp
   src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
-  src/self_collision_avoidance_controller.cpp)
+  src/self_collision_avoidance_controller.cpp
+  src/apply_current_limit_controller.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
 
@@ -65,9 +71,11 @@ target_include_directories(
 
 target_link_libraries(
   controllers
-  PUBLIC fcl velocity_to_position_command_controller_parameters
+  PUBLIC fcl
+         velocity_to_position_command_controller_parameters
          self_collision_avoidance_controller_parameters
-         safety_forward_controller_parameters)
+         safety_forward_controller_parameters
+         apply_current_limit_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -82,9 +90,11 @@ pluginlib_export_plugin_description_file(controller_interface
 
 install(DIRECTORY include/ DESTINATION include/)
 install(
-  TARGETS controllers velocity_to_position_command_controller_parameters
+  TARGETS controllers
+          velocity_to_position_command_controller_parameters
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters
+          apply_current_limit_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib

@@ -1,0 +1,17 @@
+apply_current_limit_controller:
+  arm_joints:
+    type: string_array
+    default_value: ["arm_joint_1", "arm_joint_2", "arm_joint_3", "arm_joint_4", "arm_joint_5", "arm_joint_6"]
+    description: "List of joint names in the group."
+    read_only: true
+
+  current_limits:
+    __map_arm_joints:
+      compliant_limit:
+        type: double
+        description: "Compliant Current limits for each joint in the group in Ampere. 'request_current_interface' must be true."
+        read_only: true
+      stiff_limit:
+        type: double
+        description: "Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off."
+        read_only: true
