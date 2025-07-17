@@ -162,8 +162,10 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
     stopping_[index] = false;
   }
 
+  auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
+  qos.transient_local();
   hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
-      e_stop_topic_, rclcpp::SystemDefaultsQoS(), [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
+      e_stop_topic_, qos, [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
         if ( msg->data ) {
           RCLCPP_WARN(
               get_node()->get_logger(),
