@@ -62,7 +62,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     //   RCLCPP_INFO(get_node()->get_logger(), "Got limit for joint %s", joint.c_str());
     //   joint_limits_.insert({joint, urdf->getJoint(joint)->limits});
     // joint_limits_.push_back( urdf->getJoint( joint )->limits );
-    last_positions_.push_back( 0.0 );
+    last_positions_.push_back( std::numeric_limits<double>::quiet_NaN() );
   }
 
   reference_interfaces_.resize( reference_interface_names_.size() );

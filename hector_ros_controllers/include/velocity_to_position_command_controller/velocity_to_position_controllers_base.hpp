@@ -105,7 +105,7 @@ protected:
   std::vector<bool> stopping_;
 
   std::string e_stop_topic_;
-  bool e_stop_active_;
+  bool e_stop_active_{};
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;
   // rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;

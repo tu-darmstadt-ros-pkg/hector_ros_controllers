@@ -12,7 +12,8 @@
 namespace velocity_to_position_command_controller
 {
 VelocityToPositionControllersBase::VelocityToPositionControllersBase()
-    : controller_interface::ChainableControllerInterface(), rt_buffer_ptr_( nullptr )
+    : controller_interface::ChainableControllerInterface(), e_stop_active_( false ),
+      rt_buffer_ptr_( nullptr )
 {
 }
 
@@ -73,8 +74,8 @@ VelocityToPositionControllersBase::on_export_reference_interfaces()
   for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
     RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interface %s",
                  reference_interface_names_[i].c_str() );
-    reference_interfaces.push_back( hardware_interface::CommandInterface(
-        get_node()->get_name(), reference_interface_names_[i], &reference_interfaces_[i] ) );
+    reference_interfaces.emplace_back( get_node()->get_name(), reference_interface_names_[i],
+                                       &reference_interfaces_[i] );
   }
 
   return reference_interfaces;
@@ -123,7 +124,14 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   for ( auto index = 0ul; index < command_interfaces_.size(); ++index ) {
-    last_positions_[index] = state_interfaces_[index].get_value();
+    const auto &state = state_interfaces_[index].get_optional();
+    if ( state.has_value() && !std::isnan( state.value() ) ) {
+      // If we have a valid state, we set the last position to the current state
+      last_positions_[index] = state.value();
+    } else {
+      // If we don't have a valid state, we set it to NaN
+      last_positions_[index] = std::numeric_limits<double>::quiet_NaN();
+    }
     stopping_[index] = false;
   }
 
@@ -162,8 +170,11 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
 
   if ( e_stop_active_ ) {
     for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
-      last_positions_[index] = state_interfaces_[index].get_value();
-      successful = command_interfaces_[index].set_value( last_positions_[index] );
+      const auto &state = state_interfaces_[index].get_optional();
+      if ( state.has_value() && !std::isnan( state.value() ) ) {
+        last_positions_[index] = state.value();
+        successful = command_interfaces_[index].set_value( last_positions_[index] );
+      }
     }
   } else {
     // Set commands for joints
@@ -190,10 +201,13 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
         // Going from movement to stop at current position
         if ( vel_command == 0.0 ) {
           stopping_[index] = true;
-          last_positions_[index] = state_interfaces_[index].get_value();
-          successful = command_interfaces_[index].set_value( last_positions_[index] );
+          const auto &state = state_interfaces_[index].get_optional();
+          if ( state.has_value() && !std::isnan( state.value() ) ) {
+            last_positions_[index] = state.value();
+            successful = command_interfaces_[index].set_value( last_positions_[index] );
+          }
         }
-        // Continous movement
+        // Continuous movement
         else {
           successful = command_interfaces_[index].set_value( new_position );
           last_positions_[index] = new_position;
