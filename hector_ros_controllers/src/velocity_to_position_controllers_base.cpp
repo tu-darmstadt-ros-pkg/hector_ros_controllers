@@ -171,7 +171,15 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
 {
   bool successful = true;
 
-  if ( e_stop_active_ ) {
+  // is last_position is NaN, we try to set it to the current state
+  bool invalid_state = false;
+  for ( auto &position : last_positions_ ) {
+    if ( std::isnan( position ) )
+      position = std::numeric_limits<double>::quiet_NaN();
+    invalid_state |= std::isnan( position );
+  }
+
+  if ( e_stop_active_ || invalid_state ) {
     for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
       const auto &state = state_interfaces_[index].get_optional();
       if ( state.has_value() && !std::isnan( state.value() ) ) {
@@ -187,7 +195,7 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
       if ( std::isnan( reference_interfaces_[index] ) )
         continue;
 
-      double vel_command = reference_interfaces_[index];
+      const double vel_command = reference_interfaces_[index];
 
       double new_position = last_positions_[index] + vel_command * p.seconds();
       if ( stopping_[index] ) {
