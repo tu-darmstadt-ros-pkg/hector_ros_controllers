@@ -113,6 +113,9 @@ protected:
   std::vector<std::string> interface_types_;
   std::map<std::string, std::string> joint_groups_;
   std::map<std::string, std::vector<size_t>> group_joints_;
+
+  std::string passthrough_controller_;
+
   double safety_margin_ = 0.01;
   double velocity_look_ahead_factor_ = 1.0;
 

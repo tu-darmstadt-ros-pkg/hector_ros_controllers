@@ -1,12 +1,6 @@
 velocity_to_position_command_controller:
-  joints: {
-    type: string_array,
-    default_value: [],
-    description: "Name of the joints to control",
-  }
+  joints: { type: string_array, default_value: [], description: "Name of the joints to control" }
 
-  passthrough_controller: {
-    type: string,
-    default_value: "",
-    description: "Name of passthrough controller which exposes command interfaces for the specified joints"
-  }
+  passthrough_controller: { type: string, default_value: "", description: "Name of passthrough controller which exposes command interfaces for the specified joints" }
+
+  e_stop_topic: { type: string, default_value: "estop_board/hard_estop", description: "Topic to subscribe to for emergency stop messages. If set, the controller will stop all commands when an emergency stop message is received." }
