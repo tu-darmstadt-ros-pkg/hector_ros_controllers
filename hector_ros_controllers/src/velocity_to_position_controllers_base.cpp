@@ -143,6 +143,9 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
               get_node()->get_logger(),
               "Hard E-Stop activated, stopping all joints && enable continous target pos update" );
           e_stop_active_ = true;
+          // invalidate last positions
+          for ( auto &position : last_positions_ )
+            position = std::numeric_limits<double>::quiet_NaN();
         } else {
           e_stop_active_ = false;
         }
