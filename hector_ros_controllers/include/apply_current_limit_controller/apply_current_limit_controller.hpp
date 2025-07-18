@@ -53,32 +53,35 @@ public:
   update_and_write_commands( const rclcpp::Time &time, const rclcpp::Duration &period ) override;
 
 protected:
-  rcl_interfaces::msg::SetParametersResult setParamCb( const rclcpp::Parameter &p );
+  controller_interface::CallbackReturn process_params();
 
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
+  std::vector<hardware_interface::StateInterface> on_export_state_interfaces() override;
 
   controller_interface::return_type
   update_reference_from_subscribers( const rclcpp::Time &time,
                                      const rclcpp::Duration &period ) override;
 
   std::vector<std::string> joints_;
-
   std::vector<std::string> command_interface_types_;
   std::vector<std::string> state_interface_types_;
-
+  std::vector<std::string> command_interface_names_;
+  std::vector<std::string> exposed_state_interface_names_;
   std::vector<std::string> reference_interface_names_;
-  std::string interface_type_;
+
+  std::vector<double> compliant_limits_;
+  std::vector<double> stiff_limits_;
+  std::atomic<bool> compliance_enabled_;
+
+  std::atomic<bool> e_stop_active_{ false };
+
   realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>> rt_buffer_ptr_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_estop_sub_;
-  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr enable_compliant_limits_client_;
+
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enable_compliant_limits_srv_;
 
   std::shared_ptr<ParamListener> param_listener_;
   Params params_;
-  std::atomic<bool> e_stop_active_{ false };
-  std::atomic<bool> compliant_limits_{ false };
-
-  // std::shared_ptr<ParamListener> param_listener_;
-  // Params params_;
 };
 
 } // namespace apply_current_limit_controller
