@@ -12,12 +12,8 @@
 namespace velocity_to_position_command_controller
 {
 VelocityToPositionControllersBase::VelocityToPositionControllersBase()
-<<<<<<< HEAD
     : controller_interface::ChainableControllerInterface(), e_stop_active_( false ),
       rt_buffer_ptr_( nullptr )
-=======
-    : controller_interface::ChainableControllerInterface(), rt_buffer_ptr_( nullptr )
->>>>>>> 8ae6efb (Make vel to pos controller chainable and add e_stop security. Add passthrough controller param for self_collision_avoidance controller)
 {
 }
 
@@ -78,15 +74,9 @@ VelocityToPositionControllersBase::on_export_reference_interfaces()
   for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
     RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interface %s",
                  reference_interface_names_[i].c_str() );
-<<<<<<< HEAD
     reference_interfaces.emplace_back( get_node()->get_name(), reference_interface_names_[i],
                                        &reference_interfaces_[i] );
-=======
-    reference_interfaces.push_back( hardware_interface::CommandInterface(
-        get_node()->get_name(), reference_interface_names_[i], &reference_interfaces_[i] ) );
->>>>>>> 8ae6efb (Make vel to pos controller chainable and add e_stop security. Add passthrough controller param for self_collision_avoidance controller)
   }
-
   return reference_interfaces;
 }
 
@@ -133,7 +123,6 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   for ( auto index = 0ul; index < command_interfaces_.size(); ++index ) {
-<<<<<<< HEAD
     const auto &state = state_interfaces_[index].get_optional();
     if ( state.has_value() && !std::isnan( state.value() ) ) {
       // If we have a valid state, we set the last position to the current state
@@ -152,26 +141,8 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
         if ( msg->data ) {
           RCLCPP_WARN(
               get_node()->get_logger(),
-              "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
-          e_stop_active_ = true;
-          // invalidate last positions
-          for ( auto &position : last_positions_ )
-            position = std::numeric_limits<double>::quiet_NaN();
-=======
-    last_positions_[index] = state_interfaces_[index].get_value();
-    stopping_[index] = false;
-  }
-
-  auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
-  qos.transient_local();
-  hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
-      e_stop_topic_, qos, [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
-        if ( msg->data ) {
-          RCLCPP_WARN(
-              get_node()->get_logger(),
               "Hard E-Stop activated, stopping all joints && enable continous target pos update" );
           e_stop_active_ = true;
->>>>>>> 8ae6efb (Make vel to pos controller chainable and add e_stop security. Add passthrough controller param for self_collision_avoidance controller)
         } else {
           e_stop_active_ = false;
         }
@@ -195,20 +166,8 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
                                                               const rclcpp::Duration &p /*period*/ )
 {
   bool successful = true;
-<<<<<<< HEAD
 
-  // is last_position is NaN, we try to set it to the current state
-  bool invalid_state = false;
-  for ( size_t index = 0; index < command_interfaces_.size(); ++index ) {
-    if ( std::isnan( last_positions_[index] ) ) {
-      const auto &state = state_interfaces_[index].get_optional();
-      if ( state.has_value() )
-        last_positions_[index] = state.value();
-    }
-    invalid_state |= std::isnan( last_positions_[index] );
-  }
-
-  if ( e_stop_active_ || invalid_state ) {
+  if ( e_stop_active_ ) {
     for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
       const auto &state = state_interfaces_[index].get_optional();
       if ( state.has_value() && !std::isnan( state.value() ) ) {
@@ -224,26 +183,8 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
       if ( std::isnan( reference_interfaces_[index] ) )
         continue;
 
-      const double vel_command = reference_interfaces_[index];
-
-=======
-
-  if ( e_stop_active_ ) {
-    for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
-      last_positions_[index] = state_interfaces_[index].get_value();
-      successful = command_interfaces_[index].set_value( last_positions_[index] );
-    }
-  } else {
-    // Set commands for joints
-    for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
-
-      // skip if no command received from high level controller
-      if ( std::isnan( reference_interfaces_[index] ) )
-        continue;
-
       double vel_command = reference_interfaces_[index];
 
->>>>>>> 8ae6efb (Make vel to pos controller chainable and add e_stop security. Add passthrough controller param for self_collision_avoidance controller)
       double new_position = last_positions_[index] + vel_command * p.seconds();
       if ( stopping_[index] ) {
         // If we were stopped, but now we have a velocity command, we set the new position
@@ -259,7 +200,6 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
         // Going from movement to stop at current position
         if ( vel_command == 0.0 ) {
           stopping_[index] = true;
-<<<<<<< HEAD
           const auto &state = state_interfaces_[index].get_optional();
           if ( state.has_value() && !std::isnan( state.value() ) ) {
             last_positions_[index] = state.value();
@@ -267,12 +207,6 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
           }
         }
         // Continuous movement
-=======
-          last_positions_[index] = state_interfaces_[index].get_value();
-          successful = command_interfaces_[index].set_value( last_positions_[index] );
-        }
-        // Continous movement
->>>>>>> 8ae6efb (Make vel to pos controller chainable and add e_stop security. Add passthrough controller param for self_collision_avoidance controller)
         else {
           successful = command_interfaces_[index].set_value( new_position );
           last_positions_[index] = new_position;
