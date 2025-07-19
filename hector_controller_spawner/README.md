@@ -1,11 +1,12 @@
 # Hector Controller Spawner - Multispawner – ROS2 Hardware & Controller Launcher
 
-Multispawner is a lightweight ROS2 node that boots an entire *ros2\_control* setup in a single shot. It resolves the tedium of juggling multiple **spawner** processes by batching every step:
+Multi-spawner is a lightweight ROS2 node that boots an entire *ros2\_control* setup in a single shot. It resolves the tedium of juggling multiple **spawner** processes by batching most step:
 
 * **Wait‑for‑safety/Wait-for-Hardware:** Optionally blocks on an emergency‑stop (`std_msgs/Bool`) topic before doing anything. The motors may be impossible to activate while the e‑stop is engaged.
 * **Hardware first:** Ensures every listed hardware interface is *loaded* **and** *active* (with automatic retries).
 * **Smart loading:** Loads only the controllers that are missing (skips those already present).
 * **Reduced overhead:** No per‑controller spawner nodes required, just one multispawner node.
+* **Restarts after e-stop deactivation**: Restarts the hardware/controller setup after the e-stop is deactivated, if an e-stop topic is specified.
 
 ---
 
