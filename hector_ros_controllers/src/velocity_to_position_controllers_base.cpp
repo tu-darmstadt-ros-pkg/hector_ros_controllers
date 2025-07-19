@@ -104,6 +104,63 @@ bool VelocityToPositionControllersBase::on_set_chained_mode( bool /*chained_mode
   return true;
 }
 
+bool is_valid( const std::optional<double> &v_opt )
+{
+  return v_opt.has_value() && !std::isnan( v_opt.value() );
+}
+
+void VelocityToPositionControllersBase::update_joint_states_if_valid()
+{
+  bool all_joints_valid = true;
+  for ( size_t i = 0ul; i < joints_.size(); ++i ) {
+    const auto &pos_state = state_interfaces_[2 * i].get_optional();
+    const auto &vel_state = state_interfaces_[2 * i + 1].get_optional();
+
+    bool states_valid = is_valid( pos_state ) && is_valid( vel_state );
+    all_joints_valid &= states_valid;
+    if ( states_valid ) {
+      // If we have a valid state, we set the last position to the current state
+      joint_position_states_[i] = pos_state.value();
+      joint_prev_vel_states_[i] =
+          std::isnan( joint_velocity_states_[i] ) ? vel_state.value() : joint_velocity_states_[i];
+      joint_velocity_states_[i] = vel_state.value();
+
+    } else {
+      // If we don't have a valid state, we set it to NaN
+      joint_position_states_[i] = std::numeric_limits<double>::quiet_NaN();
+      joint_velocity_states_[i] = std::numeric_limits<double>::quiet_NaN();
+      joint_prev_vel_states_[i] = std::numeric_limits<double>::quiet_NaN();
+    }
+  }
+
+  interfaces_valid_ = all_joints_valid;
+}
+
+void VelocityToPositionControllersBase::update_move_state( const double &vel_command,
+                                                           const size_t &joint_idx )
+{
+  switch ( move_states_[joint_idx] ) {
+  case MOVING:
+    if ( vel_command == 0.0 )
+      move_states_[joint_idx] = STOPPING;
+    break;
+
+  case STOPPING:
+    if ( vel_command != 0.0 )
+      move_states_[joint_idx] = MOVING;
+    else {
+      if ( std::abs( joint_velocity_states_[joint_idx] ) <= 0.005 )
+        move_states_[joint_idx] = STOPPED;
+    }
+    break;
+
+  case STOPPED:
+    if ( vel_command != 0.0 )
+      move_states_[joint_idx] = MOVING;
+    break;
+  }
+}
+
 controller_interface::CallbackReturn
 VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
@@ -122,17 +179,6 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
-  for ( auto index = 0ul; index < command_interfaces_.size(); ++index ) {
-    const auto &state = state_interfaces_[index].get_optional();
-    if ( state.has_value() && !std::isnan( state.value() ) ) {
-      // If we have a valid state, we set the last position to the current state
-      last_positions_[index] = state.value();
-    } else {
-      // If we don't have a valid state, we set it to NaN
-      last_positions_[index] = std::numeric_limits<double>::quiet_NaN();
-    }
-    stopping_[index] = false;
-  }
 
   auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
   qos.transient_local();
@@ -144,12 +190,24 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
               "Hard E-Stop activated, stopping all joints && enable continous target pos update" );
           e_stop_active_ = true;
           // invalidate last positions
-          for ( auto &position : last_positions_ )
+          for ( auto &position : joint_position_states_ )
             position = std::numeric_limits<double>::quiet_NaN();
         } else {
           e_stop_active_ = false;
         }
       } );
+
+  update_joint_states_if_valid();
+
+  for ( size_t i = 0; i < joints_.size(); i++ ) {
+    move_states_[i] = STOPPED;
+
+    if ( interfaces_valid_ )
+      hold_positions_[i] = joint_position_states_[i];
+    else {
+      hold_positions_[i] = std::numeric_limits<double>::quiet_NaN();
+    }
+  }
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -168,38 +226,64 @@ controller_interface::return_type
 VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time & /*time*/,
                                                               const rclcpp::Duration &p /*period*/ )
 {
+  update_joint_states_if_valid();
+  if ( !interfaces_valid_ )
+    return controller_interface::return_type::ERROR;
+
   bool successful = true;
-
-  // is last_position is NaN, we try to set it to the current state
-  bool invalid_state = false;
-  for ( size_t index = 0; index < command_interfaces_.size(); ++index ) {
-    if ( std::isnan( last_positions_[index] ) ) {
-      const auto &state = state_interfaces_[index].get_optional();
-      if ( state.has_value() )
-        last_positions_[index] = state.value();
-    }
-    invalid_state |= std::isnan( last_positions_[index] );
-  }
-
-  if ( e_stop_active_ || invalid_state ) {
+  if ( e_stop_active_ ) {
     for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
-      const auto &state = state_interfaces_[index].get_optional();
-      if ( state.has_value() && !std::isnan( state.value() ) ) {
-        last_positions_[index] = state.value();
-        successful = command_interfaces_[index].set_value( last_positions_[index] );
-      }
+      if ( !std::isnan( joint_position_states_[index] ) )
+        successful = command_interfaces_[index].set_value( joint_position_states_[index] );
     }
   } else {
     // Set commands for joints
-    for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
+    for ( size_t index = 0ul; index < command_interfaces_.size(); index++ ) {
 
       // skip if no command received from high level controller
       if ( std::isnan( reference_interfaces_[index] ) )
         continue;
 
-      const double vel_command = reference_interfaces_[index];
+      const double &vel_command = reference_interfaces_[index];
 
-      double new_position = last_positions_[index] + vel_command * p.seconds();
+      update_move_state( vel_command, index );
+
+      double new_position = std::numeric_limits<double>::quiet_NaN();
+      std::string move_state;
+      switch ( move_states_[index] ) {
+
+      case MOVING:
+        new_position = joint_position_states_[index] + vel_command * p.seconds() +
+                       p_gain_ * ( vel_command - joint_velocity_states_[index] ) * p.seconds() -
+                       d_gain_ * ( joint_velocity_states_[index] - joint_prev_vel_states_[index] ) *
+                           ( p.seconds() * p.seconds() );
+        move_state = "MOVING";
+        break;
+      case STOPPING:
+        new_position = joint_position_states_[index] + vel_command * p.seconds() +
+                       p_gain_ * ( vel_command - joint_velocity_states_[index] ) * p.seconds() -
+                       d_gain_ * ( joint_velocity_states_[index] - joint_prev_vel_states_[index] ) *
+                           ( p.seconds() * p.seconds() );
+        hold_positions_[index] = joint_position_states_[index];
+        move_state = "STOPPING";
+        break;
+      case STOPPED:
+        new_position = hold_positions_[index];
+        move_state = "STOPPED";
+        break;
+      default:
+        continue;
+      }
+
+      if ( index == 0 )
+        RCLCPP_INFO(
+            get_node()->get_logger(), "Joint {%s}: Pos {%f}, Vel {%f}. New pos {%f}. Command vel {%f}, Hold position {%f}. Move state %s",
+            joints_[index].c_str(), joint_position_states_[index], joint_velocity_states_[index],
+            new_position, vel_command, hold_positions_[index], move_state.c_str() );
+
+      successful &= command_interfaces_[index].set_value( new_position );
+
+      /*double new_position = last_positions_[index] + vel_command * p.seconds();
       if ( stopping_[index] ) {
         // If we were stopped, but now we have a velocity command, we set the new position
         if ( vel_command != 0.0 ) {
@@ -225,7 +309,7 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
           successful = command_interfaces_[index].set_value( new_position );
           last_positions_[index] = new_position;
         }
-      }
+      }*/
     }
   }
 

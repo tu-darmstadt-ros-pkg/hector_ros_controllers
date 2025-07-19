@@ -53,20 +53,20 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     interface_prefix = params_.passthrough_controller + "/";
 
   for ( const auto &joint : params_.joints ) {
+    joints_.push_back( joint );
     command_interface_types_.push_back( interface_prefix + joint + "/position" );
     state_interface_types_.push_back( joint + "/" + "position" );
-    // joint_limits_.push_back(*(urdf->getJoint(joint)->limits));
-
+    state_interface_types_.push_back( joint + "/" + "velocity" );
     reference_interface_names_.push_back( joint + "/" + "velocity" );
-    // if(urdf->getJoint(joint)->limits){
-    //   RCLCPP_INFO(get_node()->get_logger(), "Got limit for joint %s", joint.c_str());
-    //   joint_limits_.insert({joint, urdf->getJoint(joint)->limits});
-    // joint_limits_.push_back( urdf->getJoint( joint )->limits );
-    last_positions_.push_back( std::numeric_limits<double>::quiet_NaN() );
+
+    joint_position_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
+    joint_velocity_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
+    joint_prev_vel_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
   }
 
   reference_interfaces_.resize( reference_interface_names_.size() );
-  stopping_.resize( reference_interface_names_.size(), false );
+  hold_positions_.resize( reference_interface_names_.size() );
+  move_states_.resize( reference_interface_names_.size() );
 
   e_stop_topic_ = params_.e_stop_topic;
 

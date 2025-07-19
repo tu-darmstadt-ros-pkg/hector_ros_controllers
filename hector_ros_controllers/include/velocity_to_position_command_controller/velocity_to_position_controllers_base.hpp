@@ -34,6 +34,12 @@ namespace velocity_to_position_command_controller
 {
 using CmdType = std_msgs::msg::Float64MultiArray;
 
+enum MoveState {
+  MOVING,
+  STOPPING,
+  STOPPED,
+};
+
 /**
  * \brief Forward command controller for a set of joints and interfaces.
  *
@@ -94,6 +100,10 @@ protected:
   update_reference_from_subscribers( const rclcpp::Time &time,
                                      const rclcpp::Duration &period ) override;
 
+  void update_joint_states_if_valid();
+
+  void update_move_state( const double &vel_command, const size_t &joint_idx );
+
   std::vector<std::string> joints_;
   std::vector<std::string> reference_interface_names_;
   std::vector<std::shared_ptr<urdf::JointLimits>> joint_limits_;
@@ -101,11 +111,18 @@ protected:
   std::vector<std::string> command_interface_types_;
   std::vector<std::string> state_interface_types_;
 
-  std::vector<double> last_positions_;
-  std::vector<bool> stopping_;
+  std::vector<double> joint_position_states_;
+  std::vector<double> joint_velocity_states_;
+  std::vector<double> joint_prev_vel_states_;
+  std::vector<double> hold_positions_;
+  std::vector<MoveState> move_states_;
 
   std::string e_stop_topic_;
   bool e_stop_active_{};
+  bool interfaces_valid_;
+
+  double p_gain_ = 5;
+  double d_gain_ = 0.001;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;
   // rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
