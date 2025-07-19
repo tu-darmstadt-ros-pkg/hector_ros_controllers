@@ -16,6 +16,8 @@ void MultiSpawner::initialize()
       this->declare_parameter<std::vector<std::string>>( "controllers", std::vector<std::string>() );
   retry_delay_ = this->declare_parameter<double>( "retry_delay", 5.0 );
   estop_topic_ = this->declare_parameter<std::string>( "estop_topic", "" );
+  restart_after_estop_deactivation_ =
+      this->declare_parameter<bool>( "restart_after_estop_deactivation", true );
 
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
@@ -436,7 +438,7 @@ int main( int argc, char **argv )
     rclcpp::spin_some( node );
     if ( node->estop_released_and_not_in_progress() ) {
       node->start_sequence( initial_init ); // safe – not inside another callback
-      if ( !node->is_tracking_estop() )
+      if ( !node->is_tracking_estop() || !node->restart_after_estop_deactivation() )
         break;
       initial_init = false;
     }

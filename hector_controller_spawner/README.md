@@ -12,14 +12,15 @@ Multi-spawner is a lightweight ROS2 node that boots an entire *ros2\_control* se
 
 ## Key Parameters
 
-| Name                      | Type       | Default | Purpose                                                             |
-| ------------------------- | ---------- | ------- |---------------------------------------------------------------------|
-| `hardware_interfaces`     | `string[]` | —       | Ordered list of hardware interface names to activate.               |
-| `controllers`             | `string[]` | —       | Ordered list of controller names under management.                  |
-| `<ctrl>.activate`         | `bool`     | `true`  | Activate this controller after loading?                             |
-| `<ctrl>.activate_as_group`| `string[]` | —       | Controller groups that are activated togehter.                      |
-| `retry_delay`             | `double`   | `5.0`   | Seconds between retry attempts.                                     |
-| `estop_topic`             | `string`   | ""      | Topic to wait on (false ⇒ proceed). Empty string disables the gate. |
+| Name                               | Type       | Default | Purpose                                                             |
+|------------------------------------| ---------- | ------- |---------------------------------------------------------------------|
+| `hardware_interfaces`              | `string[]` | —       | Ordered list of hardware interface names to activate.               |
+| `controllers`                      | `string[]` | —       | Ordered list of controller names under management.                  |
+| `<ctrl>.activate`                  | `bool`     | `true`  | Activate this controller after loading?                             |
+| `<ctrl>.activate_as_group`         | `string[]` | —       | Controller groups that are activated togehter.                      |
+| `retry_delay`                      | `double`   | `5.0`   | Seconds between retry attempts.                                     |
+| `estop_topic`                      | `string`   | ""      | Topic to wait on (false ⇒ proceed). Empty string disables the gate. |
+| `restart_after_estop_deactivation` |  `bool`    | `true`  | Restart hardware and controllers after e-stop deactivation          |
 
 See **athena.yaml** for a full example.
 

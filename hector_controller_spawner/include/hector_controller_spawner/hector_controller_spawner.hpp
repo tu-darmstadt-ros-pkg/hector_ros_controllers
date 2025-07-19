@@ -22,17 +22,21 @@ namespace hector_controller_spawner
  *  @brief  Multispawner waits for an (optional) e‑stop, then loads & activates
  *          hardware interfaces followed by controllers .
  */
-class MultiSpawner : public rclcpp::Node
+class MultiSpawner final : public rclcpp::Node
 {
 public:
   explicit MultiSpawner();
   void initialize();
+  void start_sequence( bool initial_init );
   bool is_tracking_estop() const noexcept { return !estop_topic_.empty(); }
   bool estop_released_and_not_in_progress() const noexcept
   {
     return released_ && !in_progress_ && !done_;
   }
-  void start_sequence( bool initial_init );
+  bool restart_after_estop_deactivation() const noexcept
+  {
+    return restart_after_estop_deactivation_;
+  }
 
 private:
   // ----- helper structs -----
@@ -57,6 +61,8 @@ private:
   std::unordered_map<std::string, ControllerCfg> controller_cfg_;
   double retry_delay_{ 5.0 };
   std::string estop_topic_;
+  bool restart_after_estop_deactivation_{ false };
+
   std::atomic<bool> in_progress_{ false };
   std::atomic<bool> done_{ false };
   std::atomic<bool> released_{ false };
