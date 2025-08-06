@@ -31,11 +31,9 @@
 
     self_collision_avoidance_controller:
       activate: true
-      activate_as_group: ["flipper_velocity_controller"]
 
     flipper_velocity_controller:
       activate: true
-      activate_as_group: ["self_collision_avoidance_controller"]
 
     gripper_trajectory_controller:
       activate: true
