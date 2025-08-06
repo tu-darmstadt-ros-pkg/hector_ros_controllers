@@ -155,8 +155,6 @@ void MultiSpawner::start_sequence( bool initial_init )
           // undirected edge between c.name and conn.name
           controller_cfg_[conn.name].activate_as_group.push_back( c.name );
           controller_cfg_[c.name].activate_as_group.push_back( conn.name );
-          RCLCPP_INFO( get_logger(), "Added group connection between '%s' and '%s'.",
-                       c.name.c_str(), conn.name.c_str() );
         }
       }
     }
