@@ -12,7 +12,7 @@
       - "athena_flipper_interface"
       - "athena_arm_interface"
 
-    # ---------- controllers, in deterministic order -------------
+    # ---------- controllers --------------------------------------
     controllers:
       - joint_state_broadcaster
       - flipper_trajectory_controller
