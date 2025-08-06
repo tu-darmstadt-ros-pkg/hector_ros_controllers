@@ -1,32 +1,50 @@
-# Hector Controller Spawner - Multispawner – ROS2 Hardware & Controller Launcher
+# Hector Controller Spawner – **Multispawner**
 
-Multispawner is a lightweight ROS2 node that boots an entire *ros2\_control* setup in a single shot. It resolves the tedium of juggling multiple **spawner** processes by batching every step:
+**ROS2 Hardware & Controller Launcher for `ros2_control`**
 
-* **Wait‑for‑safety/Wait-for-Hardware:** Optionally blocks on an emergency‑stop (`std_msgs/Bool`) topic before doing anything. The motors may be impossible to activate while the e‑stop is engaged.
-* **Hardware first:** Ensures every listed hardware interface is *loaded* **and** *active* (with automatic retries).
-* **Smart loading:** Loads only the controllers that are missing (skips those already present).
-* **Reduced overhead:** No per‑controller spawner nodes required, just one multispawner node.
-
----
-
-## Key Parameters
-
-| Name                      | Type       | Default | Purpose                                                             |
-| ------------------------- | ---------- | ------- |---------------------------------------------------------------------|
-| `hardware_interfaces`     | `string[]` | —       | Ordered list of hardware interface names to activate.               |
-| `controllers`             | `string[]` | —       | Ordered list of controller names under management.                  |
-| `<ctrl>.activate`         | `bool`     | `true`  | Activate this controller after loading?                             |
-| `<ctrl>.activate_as_group`| `string[]` | —       | Controller groups that are activated togehter.                      |
-| `retry_delay`             | `double`   | `5.0`   | Seconds between retry attempts.                                     |
-| `estop_topic`             | `string`   | ""      | Topic to wait on (false ⇒ proceed). Empty string disables the gate. |
-
-See **athena.yaml** for a full example.
+**Multispawner** is a minimal ROS2 node that launches an entire `ros2_control` setup in a single coordinated pass.
+It robustly manages hardware interfaces and controllers, ensuring everything is loaded, activated (if required), and
+ready to go with minimal configuration.
 
 ---
 
-## Typical Usage
+## 🚀 Features
+
+* **Wait-for-safety (e-stop):** Optionally blocks on an `std_msgs/Bool` topic (e.g., emergency stop) before starting.
+  Useful when motors can't be activated while safety is engaged.
+* **Re-activation:** Automatically reactivates hardware interfaces and controllers after releasing the e-stop (if they
+  became inactive).
+* **Controller Manager Synchronization:** Waits for the controller manager to become available before proceeding.
+* **Hardware-first strategy:** Ensures all listed hardware interfaces are both *loaded* and *activated* (with automatic
+  retries on failure).
+* **Intelligent controller loading:** Skips controllers already present - only loads and activates what’s missing.
+* **Automatic chaining:** Automatically detects and starts *chained controllers* together - no additional config
+  required.
+* **Single-node simplicity:** No need to spawn one spawner per controller - Multispawner handles everything.
+* **Robust retry logic:** Retries failed hardware/controller activations with configurable delays.
+
+---
+
+## 🔧 Key Parameters
+
+| Name                  | Type       | Default | Description                                                               |
+|-----------------------|------------|---------|---------------------------------------------------------------------------|
+| `hardware_interfaces` | `string[]` | -       | Ordered list of hardware interface names to activate.                     |
+| `controllers`         | `string[]` | -       | Ordered list of controller names to load and manage.                      |
+| `<ctrl>.activate`     | `bool`     | `true`  | Should the controller be activated after loading?                         |
+| `retry_delay`         | `double`   | `5.0`   | Delay (in seconds) between retry attempts.                                |
+| `estop_topic`         | `string`   | `""`    | Topic to wait on (false ⇒ proceed). Leave empty to disable e-stop gating. |
+
+📄 See [`athena.yaml`](config/athena.yaml) for a complete configuration example.
+
+---
+
+## 🧪 Example Usage
 
 ```bash
 ros2 launch hector_controller_spawner hector_controller_spawner_launch.yml
 ```
-Add it to a launch file exactly once—no per‑controller spawner nodes required.
+
+* Include **only once** in your launch setup.
+* No need for individual `spawner` calls per controller.
+

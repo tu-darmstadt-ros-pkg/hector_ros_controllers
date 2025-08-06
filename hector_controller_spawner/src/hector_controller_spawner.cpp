@@ -20,8 +20,8 @@ void MultiSpawner::initialize()
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
     cfg.activate = this->declare_parameter<bool>( ctrl + ".activate", true );
-    cfg.activate_as_group = this->declare_parameter<std::vector<std::string>>(
-        ctrl + ".activate_as_group", std::vector<std::string>() );
+    // cfg.activate_as_group = this->declare_parameter<std::vector<std::string>>(
+    //     ctrl + ".activate_as_group", std::vector<std::string>() );
     controller_cfg_[ctrl] = cfg;
   }
 
@@ -110,8 +110,19 @@ void MultiSpawner::start_sequence()
     if ( rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
          rclcpp::FutureReturnCode::SUCCESS ) {
       auto resp = fut.get();
-      for ( const auto &c : resp->controller )
-        current_state[c.name] = c.state; // ACTIVE / inactive / etc.
+      // save snapshot of states
+      for ( const auto &c : resp->controller ) { current_state[c.name] = c.state; }
+
+      // —— auto-detect chained controllers and build groups ——
+      for ( const auto &c : resp->controller ) {
+        for ( const auto &conn : c.chain_connections ) {
+          // undirected edge between c.name and conn.name
+          controller_cfg_[conn.name].activate_as_group.push_back( c.name );
+          controller_cfg_[c.name].activate_as_group.push_back( conn.name );
+          RCLCPP_INFO( get_logger(), "Added group connection between '%s' and '%s'.",
+                       c.name.c_str(), conn.name.c_str() );
+        }
+      }
     }
   }
 
