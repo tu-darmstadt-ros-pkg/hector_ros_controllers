@@ -48,6 +48,7 @@ private:
   // ----- helper structs -----
   struct ControllerCfg {
     bool activate{ true };
+    bool specified{ false }; // true if the controller was specified in the parameters
   };
 
   // ----- callbacks -----
