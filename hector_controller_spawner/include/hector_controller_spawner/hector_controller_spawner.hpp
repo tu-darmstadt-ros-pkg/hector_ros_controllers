@@ -61,6 +61,10 @@ private:
   void verifyFinalStates();
   void parseControllerInfo( const controller_manager_msgs::srv::ListControllers_Response &resp,
                             std::unordered_map<std::string, std::string> &current_state );
+  bool ensureControllerState( bool desired_state,
+                              const std::unordered_map<std::string, std::string> &current_state );
+  bool switchControllersRequest( const std::vector<std::string> &to_activate,
+                                 const std::vector<std::string> &to_deactivate );
 
   // ----- parameters -----
   std::vector<std::string> hw_interfaces_;
