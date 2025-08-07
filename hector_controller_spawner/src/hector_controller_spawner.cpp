@@ -22,8 +22,6 @@ void MultiSpawner::initialize()
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
     cfg.activate = this->declare_parameter<bool>( ctrl + ".activate", true );
-    // cfg.activate_as_group = this->declare_parameter<std::vector<std::string>>(
-    //     ctrl + ".activate_as_group", std::vector<std::string>() );
     controller_cfg_[ctrl] = cfg;
   }
 
