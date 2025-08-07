@@ -18,6 +18,18 @@
 namespace hector_controller_spawner
 {
 
+inline std::string vecToString( const std::vector<std::string> &vec )
+{
+  std::string result;
+  for ( const auto &s : vec ) {
+    if ( !result.empty() )
+      result += ", ";
+    result += s;
+  }
+  result += " (size: " + std::to_string( vec.size() ) + ")";
+  return result;
+}
+
 /**
  *  @brief  Multispawner waits for an (optional) e‑stop, then loads & activates
  *          hardware interfaces followed by controllers .
@@ -25,6 +37,8 @@ namespace hector_controller_spawner
 class MultiSpawner final : public rclcpp::Node
 {
 public:
+  using ControllerGroup = std::vector<std::string>; // group of controllers to activate together
+
   explicit MultiSpawner();
   void initialize();
   void start_sequence( bool initial_init );
@@ -42,7 +56,6 @@ private:
   // ----- helper structs -----
   struct ControllerCfg {
     bool activate{ true };
-    std::vector<std::string> activate_as_group;
   };
 
   // ----- callbacks -----
@@ -54,11 +67,14 @@ private:
   bool configureController( const std::string &name );
   bool replicateParamsToCM();
   void verifyFinalStates();
+  void parseControllerInfo( const controller_manager_msgs::srv::ListControllers_Response &resp,
+                            std::unordered_map<std::string, std::string> &current_state );
 
   // ----- parameters -----
   std::vector<std::string> hw_interfaces_;
   std::vector<std::string> controllers_;
   std::unordered_map<std::string, ControllerCfg> controller_cfg_;
+  std::vector<ControllerGroup> controller_groups_;
   double retry_delay_{ 5.0 };
   std::string estop_topic_;
   bool restart_after_estop_deactivation_{ false };
