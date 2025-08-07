@@ -221,46 +221,23 @@ void MultiSpawner::start_sequence( bool initial_init )
     }
   }
 
-  // 3) Group switch_controller calls --------------------------------------
-  auto switch_controllers = [&]( const std::vector<std::string> &activate,
-                                 const std::vector<std::string> &deactivate ) -> bool {
-    if ( !switch_ctrl_client_->wait_for_service( 2s ) ) {
-      RCLCPP_ERROR( get_logger(), "switch_controller service unavailable" );
-      return false;
-    }
-    auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-    req->activate_controllers = activate;
-    req->deactivate_controllers = deactivate;
-    req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
-    req->timeout = rclcpp::Duration::from_seconds( 5.0 );
-
-    auto fut = switch_ctrl_client_->async_send_request( req );
-    return rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
-               rclcpp::FutureReturnCode::SUCCESS &&
-           fut.get()->ok;
-  };
-
+  // 4) Activate / deactivate controllers in groups ------------------------
   // deactivate controllers that are active but not requested
-  if ( !to_deactivate.empty() ) {
-    std::stringstream ss;
-    for ( size_t i = 0; i < to_deactivate.size(); ++i ) {
-      ss << to_deactivate[i] << ( i + 1 < to_deactivate.size() ? ", " : "" );
-    }
-    if ( !switch_controllers( {}, to_deactivate ) ) {
-      RCLCPP_ERROR( get_logger(), "Failed to deactivate controllers: %s", ss.str().c_str() );
-    } else {
-      RCLCPP_INFO( get_logger(), "Deactivated controllers: %s", ss.str().c_str() );
-    }
-  }
-  // print controller configuration
-  std::stringstream ss;
-  for ( const auto &[name, cfg] : controller_cfg_ ) {
-    ss << "Controller '" << name << "' is "
-       << ( controller_cfg_.at( name ).activate ? "ACTIVE" : "INACTIVE" ) << "\n";
-  }
-  RCLCPP_INFO( get_logger(), "%s", ss.str().c_str() );
-  for ( const auto &group : controller_groups_ ) {
+  ensureControllerState( false, current_state );
+  // activate controllers that are requested
+  ensureControllerState( true, current_state );
+  // ===== Done =============================================================
+  verifyFinalStates();
+  RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete – shutting down." );
+  done_.store( true );
+  in_progress_ = false;
+}
 
+bool MultiSpawner::ensureControllerState(
+    bool desired_state, const std::unordered_map<std::string, std::string> &current_state )
+{
+  bool success = true;
+  for ( const auto &group : controller_groups_ ) {
     /* Determine whether at least one controller in this group should be active. */
     bool group_requested_active = false;
     for ( const auto &m : group ) {
@@ -268,8 +245,9 @@ void MultiSpawner::start_sequence( bool initial_init )
                    vecToString( group ).c_str() );
       group_requested_active |= controller_cfg_.at( m ).activate;
     }
-    if ( !group_requested_active ) {
-      continue; // whole group requested inactive
+
+    if ( group_requested_active != desired_state ) {
+      continue;
     }
 
     /* Force any “false” members in the same group to active and warn once. */
@@ -280,31 +258,52 @@ void MultiSpawner::start_sequence( bool initial_init )
       }
     }
 
-    /* Skip activation if entire group is already active. */
-    bool already_active = true;
+    /* Check if the group is already in the desired state. */
+    bool active = true;
+    bool inactive = true;
     for ( const auto &m : group ) {
       auto it = current_state.find( m );
-      already_active &= ( it != current_state.end() && it->second == "active" );
+      active &= ( it != current_state.end() && it->second == "active" );
+      inactive &= ( it != current_state.end() && it->second == "inactive" );
     }
-    if ( already_active ) {
+    if ( ( active && group_requested_active ) || ( !inactive && !group_requested_active ) ) {
       continue;
     }
 
     /* Issue one switch_controller call for this group. */
-    if ( !switch_controllers( group, /*deactivate*/ {} ) ) {
-      RCLCPP_ERROR( get_logger(), "Failed to activate controller group containing '%s'",
+    if ( ( group_requested_active && !switchControllersRequest( group, /*deactivate*/ {} ) ) ||
+         ( !group_requested_active && !switchControllersRequest( {}, group ) ) ) {
+      RCLCPP_ERROR( get_logger(), "Failed to %s controller group containing '%s'",
+                    group_requested_active ? "activate" : "deactivate",
                     vecToString( group ).c_str() );
+      success = false;
     } else {
 
-      RCLCPP_INFO( get_logger(), "Activated controller group: %s", vecToString( group ).c_str() );
+      RCLCPP_INFO( get_logger(), "%s controller group: %s",
+                   group_requested_active ? "Activated" : "Deactivated",
+                   vecToString( group ).c_str() );
     }
   }
+  return success;
+}
 
-  // ===== Done =============================================================
-  verifyFinalStates();
-  RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete !" );
-  done_.store( true );
-  in_progress_ = false;
+bool MultiSpawner::switchControllersRequest( const std::vector<std::string> &to_activate,
+                                             const std::vector<std::string> &to_deactivate )
+{
+  if ( !switch_ctrl_client_->wait_for_service( 2s ) ) {
+    RCLCPP_ERROR( get_logger(), "switch_controller service unavailable" );
+    return false;
+  }
+  auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+  req->activate_controllers = to_activate;
+  req->deactivate_controllers = to_deactivate;
+  req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+  req->timeout = rclcpp::Duration::from_seconds( 5.0 );
+
+  auto fut = switch_ctrl_client_->async_send_request( req );
+  return rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
+             rclcpp::FutureReturnCode::SUCCESS &&
+         fut.get()->ok;
 }
 
 void MultiSpawner::parseControllerInfo(
