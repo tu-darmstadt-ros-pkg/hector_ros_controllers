@@ -126,7 +126,7 @@ void MultiSpawner::start_sequence( bool initial_init )
   for ( const auto &hw : hw_interfaces_ ) {
     while ( rclcpp::ok() ) {
       if ( loadAndActivateHardware( hw ) ) {
-        RCLCPP_INFO( get_logger(), "Hardware '%s' is active.", hw.c_str() );
+        RCLCPP_DEBUG( get_logger(), "Hardware '%s' is active.", hw.c_str() );
         break;
       }
       RCLCPP_WARN( get_logger(), "Hardware '%s' failed – retrying in %.1fs", hw.c_str(),
@@ -224,10 +224,8 @@ void MultiSpawner::start_sequence( bool initial_init )
 
   // 4) Activate / deactivate controllers in groups ------------------------
   // deactivate controllers that are active but not requested
-  RCLCPP_WARN( get_logger(), "DEACTIVATING CONTROLLERS" );
   ensureControllerState( false, current_state );
   // activate controllers that are requested
-  RCLCPP_WARN( get_logger(), "ACTIVATING CONTROLLERS" );
   ensureControllerState( true, current_state );
   // ===== Done =============================================================
   verifyFinalStates();
@@ -243,24 +241,20 @@ bool MultiSpawner::ensureControllerState(
   for ( const auto &group : controller_groups_ ) {
     /* Determine whether at least one controller in this group should be active. */
     bool group_requested_active = false; // if any controller in the group should be active
-    for ( const auto &m : group ) {
-      RCLCPP_INFO( get_logger(), "Controller '%s' in group: %s", m.c_str(),
-                   vecToString( group ).c_str() );
-      group_requested_active |= controller_cfg_.at( m ).activate;
-    }
+    for ( const auto &m : group ) { group_requested_active |= controller_cfg_.at( m ).activate; }
 
     // skip if the group is not requested to be in the desired state
     if ( group_requested_active != desired_state ) {
-      RCLCPP_INFO( get_logger(), "Group %s should not be %s", vecToString( group ).c_str(),
-                   desired_state ? "activated" : "deactivated" );
+      RCLCPP_DEBUG( get_logger(), "Group %s should not be %s", vecToString( group ).c_str(),
+                    desired_state ? "activated" : "deactivated" );
       continue;
     }
 
     /* Force any “false” members in the same group to active and warn once. */
     for ( const auto &m : group ) {
       if ( controller_cfg_.at( m ).activate != group_requested_active ) {
-        RCLCPP_WARN( get_logger(), "Controller '%s' is in group with ['%s'] → overriding to ACTIVE.",
-                     m.c_str(), vecToString( group ).c_str() );
+        RCLCPP_DEBUG( get_logger(), "Controller '%s' is in group with ['%s'] → overriding to ACTIVE.",
+                      m.c_str(), vecToString( group ).c_str() );
       }
     }
 
@@ -273,8 +267,8 @@ bool MultiSpawner::ensureControllerState(
       inactive &= ( it != current_state.end() && it->second != "active" );
     }
     if ( ( active && group_requested_active ) || ( inactive && !group_requested_active ) ) {
-      RCLCPP_INFO( get_logger(), "The group %s is already in the desired state %s",
-                   vecToString( group ).c_str(), desired_state ? "ACTIVE" : "INACTIVE" );
+      RCLCPP_DEBUG( get_logger(), "The group %s is already in the desired state %s",
+                    vecToString( group ).c_str(), desired_state ? "ACTIVE" : "INACTIVE" );
       continue;
     }
 
@@ -287,9 +281,9 @@ bool MultiSpawner::ensureControllerState(
       success = false;
     } else {
 
-      RCLCPP_INFO( get_logger(), "%s controller group: %s",
-                   group_requested_active ? "Activated" : "Deactivated",
-                   vecToString( group ).c_str() );
+      RCLCPP_DEBUG( get_logger(), "%s controller group: %s",
+                    group_requested_active ? "Activated" : "Deactivated",
+                    vecToString( group ).c_str() );
     }
   }
   return success;
@@ -318,8 +312,6 @@ void MultiSpawner::parseControllerInfo(
     const controller_manager_msgs::srv::ListControllers_Response &resp,
     std::unordered_map<std::string, std::string> &current_state )
 {
-  RCLCPP_WARN( get_logger(), "Received %zu controllers from list_controllers service.",
-               resp.controller.size() );
   // save snapshot of states
   for ( const auto &c : resp.controller ) { current_state[c.name] = c.state; }
 
