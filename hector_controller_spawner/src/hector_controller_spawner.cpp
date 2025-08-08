@@ -16,6 +16,8 @@ void MultiSpawner::initialize()
       this->declare_parameter<std::vector<std::string>>( "controllers", std::vector<std::string>() );
   retry_delay_ = this->declare_parameter<double>( "retry_delay", 5.0 );
   estop_topic_ = this->declare_parameter<std::string>( "estop_topic", "" );
+  restart_after_estop_deactivation_ =
+      this->declare_parameter<bool>( "restart_after_estop_deactivation", true );
 
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
@@ -49,6 +51,9 @@ void MultiSpawner::initialize()
       "controller_manager/list_controllers" );
   configure_ctrl_client_ = this->create_client<controller_manager_msgs::srv::ConfigureController>(
       "controller_manager/configure_controller" );
+  list_hardware_ctrl_client_ =
+      this->create_client<controller_manager_msgs::srv::ListHardwareComponents>(
+          "controller_manager/list_hardware_components" );
   cm_param_client_ =
       std::make_shared<rclcpp::AsyncParametersClient>( shared_from_this(), "controller_manager" );
 
@@ -66,15 +71,16 @@ void MultiSpawner::initialize()
 
 void MultiSpawner::estopCb( const std_msgs::msg::Bool::SharedPtr msg )
 {
-  if ( !started_ && !msg->data ) {
+  if ( !in_progress_ && !msg->data ) {
     RCLCPP_INFO( get_logger(), "E‑stop released — commencing startup sequence." );
-    released_ = true;
+    done_ = false;
   }
+  released_ = !msg->data;
 }
 
-void MultiSpawner::start_sequence()
+void MultiSpawner::start_sequence( bool initial_init )
 {
-  started_ = true;
+  in_progress_ = true;
 
   const auto sleep_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>( retry_delay_ ) );
@@ -84,8 +90,38 @@ void MultiSpawner::start_sequence()
     RCLCPP_WARN( get_logger(), "Controller Manager is not yet available %.1fs", retry_delay_ );
   }
 
-  // ===== Copy Parameters =================================
-  // replicateParamsToCM();
+  if ( initial_init ) {
+    // ===== Copy Parameters ==================================================
+    // replicateParamsToCM();
+
+  } else {
+    // ===== Restart Necessary ?  ==============================================
+    // test if hardware interfaces are available -> if not redo start sequence
+    auto list_hw_fut = list_hardware_ctrl_client_->async_send_request(
+        std::make_shared<controller_manager_msgs::srv::ListHardwareComponents::Request>() );
+    if ( rclcpp::spin_until_future_complete( shared_from_this(), list_hw_fut ) !=
+         rclcpp::FutureReturnCode::SUCCESS ) {
+      RCLCPP_WARN( get_logger(), "Failed to list hardware components" );
+    }
+    auto list_hw_resp = list_hw_fut.get();
+    size_t active_hw_interfaces = 0;
+    for ( const auto &hw : list_hw_resp->component ) {
+      if ( hw.state.id == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE &&
+           std::find( hw_interfaces_.begin(), hw_interfaces_.end(), hw.name ) !=
+               hw_interfaces_.end() ) {
+        active_hw_interfaces++;
+      }
+    }
+    if ( active_hw_interfaces == hw_interfaces_.size() ) {
+      RCLCPP_INFO( get_logger(),
+                   "Hardware interfaces are still available after e-stop deactivation. No need to "
+                   "redo hw interface and controller start sequence." );
+      in_progress_ = false;
+      done_ = true;
+      return;
+    }
+    RCLCPP_INFO( get_logger(), "Hardware Interface must be reactivated after estop deactivation" );
+  }
 
   // ===== Hardware =========================================================
   for ( const auto &hw : hw_interfaces_ ) {
@@ -261,8 +297,9 @@ void MultiSpawner::start_sequence()
 
   // ===== Done =============================================================
   verifyFinalStates();
-  RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete – shutting down." );
+  RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete !" );
   done_.store( true );
+  in_progress_ = false;
 }
 
 bool MultiSpawner::loadAndActivateHardware( const std::string &name )
@@ -395,12 +432,16 @@ int main( int argc, char **argv )
 
   auto node = std::make_shared<hector_controller_spawner::MultiSpawner>();
   node->initialize();
-
+  bool initial_init = true;
   using namespace std::chrono_literals;
-  while ( rclcpp::ok() && !node->is_finished() ) {
+  while ( rclcpp::ok() ) {
     rclcpp::spin_some( node );
-    if ( node->estop_released_and_not_started() )
-      node->start_sequence(); // safe – not inside another callback
+    if ( node->estop_released_and_not_in_progress() ) {
+      node->start_sequence( initial_init ); // safe – not inside another callback
+      if ( !node->is_tracking_estop() || !node->restart_after_estop_deactivation() )
+        break;
+      initial_init = false;
+    }
     std::this_thread::sleep_for( 50ms );
   }
 
