@@ -1,8 +1,7 @@
 /**:
-  # Example configuration !!
   ros__parameters:
     # Optional emergency‑stop topic.  Empty → start immediately.
-    estop_topic: ""
+    #estop_topic: "estop_board/hard_estop"
 
     # How long to wait between retry attempts (HW + controllers).
     retry_delay: 5.0
@@ -16,23 +15,22 @@
     controllers:
       - joint_state_broadcaster
       - flipper_trajectory_controller
-      - self_collision_avoidance_controller
       - flipper_velocity_controller
       - gripper_trajectory_controller
       - arm_trajectory_controller
-      - moveit_twist_controller
+      - vel_to_pos_controller
 
-    # Per‑controller options
+    # ---------- Per‑controller options ---------------------------
     joint_state_broadcaster:
       activate: true
 
     flipper_trajectory_controller:
       activate: false
 
-    self_collision_avoidance_controller:
+    flipper_velocity_controller:
       activate: true
 
-    flipper_velocity_controller:
+    vel_to_pos_controller:
       activate: true
 
     gripper_trajectory_controller:
@@ -40,6 +38,3 @@
 
     arm_trajectory_controller:
       activate: true
-
-    moveit_twist_controller:
-      activate: false

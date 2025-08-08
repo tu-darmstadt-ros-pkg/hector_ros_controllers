@@ -142,7 +142,7 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
         if ( msg->data ) {
           RCLCPP_WARN(
               get_node()->get_logger(),
-              "Hard E-Stop activated, stopping all joints && enable continous target pos update" );
+              "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
           e_stop_active_ = true;
           // invalidate last positions
           for ( auto &position : last_positions_ )

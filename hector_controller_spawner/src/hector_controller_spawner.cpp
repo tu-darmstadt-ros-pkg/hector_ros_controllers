@@ -22,8 +22,7 @@ void MultiSpawner::initialize()
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
     cfg.activate = this->declare_parameter<bool>( ctrl + ".activate", true );
-    cfg.activate_as_group = this->declare_parameter<std::vector<std::string>>(
-        ctrl + ".activate_as_group", std::vector<std::string>() );
+    cfg.specified = true;
     controller_cfg_[ctrl] = cfg;
   }
 
@@ -127,7 +126,7 @@ void MultiSpawner::start_sequence( bool initial_init )
   for ( const auto &hw : hw_interfaces_ ) {
     while ( rclcpp::ok() ) {
       if ( loadAndActivateHardware( hw ) ) {
-        RCLCPP_INFO( get_logger(), "Hardware '%s' is active.", hw.c_str() );
+        RCLCPP_DEBUG( get_logger(), "Hardware '%s' is active.", hw.c_str() );
         break;
       }
       RCLCPP_WARN( get_logger(), "Hardware '%s' failed – retrying in %.1fs", hw.c_str(),
@@ -146,8 +145,7 @@ void MultiSpawner::start_sequence( bool initial_init )
     if ( rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
          rclcpp::FutureReturnCode::SUCCESS ) {
       auto resp = fut.get();
-      for ( const auto &c : resp->controller )
-        current_state[c.name] = c.state; // ACTIVE / inactive / etc.
+      parseControllerInfo( *resp, current_state );
     }
   }
 
@@ -212,94 +210,161 @@ void MultiSpawner::start_sequence( bool initial_init )
     }
   }
 
-  // 3) Group switch_controller calls --------------------------------------
-  auto switch_controllers = [&]( const std::vector<std::string> &activate,
-                                 const std::vector<std::string> &deactivate ) -> bool {
-    if ( !switch_ctrl_client_->wait_for_service( 2s ) ) {
-      RCLCPP_ERROR( get_logger(), "switch_controller service unavailable" );
-      return false;
-    }
-    auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
-    req->activate_controllers = activate;
-    req->deactivate_controllers = deactivate;
-    req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
-    req->timeout = rclcpp::Duration::from_seconds( 5.0 );
-
-    auto fut = switch_ctrl_client_->async_send_request( req );
-    return rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
-               rclcpp::FutureReturnCode::SUCCESS &&
-           fut.get()->ok;
-  };
-
-  // deactivate controllers that are active but not requested
-  if ( !to_deactivate.empty() ) {
-    std::stringstream ss;
-    for ( size_t i = 0; i < to_deactivate.size(); ++i ) {
-      ss << to_deactivate[i] << ( i + 1 < to_deactivate.size() ? ", " : "" );
-    }
-    if ( !switch_controllers( {}, to_deactivate ) ) {
-      RCLCPP_ERROR( get_logger(), "Failed to deactivate controllers: %s", ss.str().c_str() );
-    } else {
-      RCLCPP_INFO( get_logger(), "Deactivated controllers: %s", ss.str().c_str() );
+  // 2.5) Re-request current state -> chained info only after configuring available----------------
+  if ( !to_load.empty() && list_ctrl_client_->wait_for_service( 2s ) ) {
+    current_state.clear();
+    auto req = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
+    auto fut = list_ctrl_client_->async_send_request( req );
+    if ( rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
+         rclcpp::FutureReturnCode::SUCCESS ) {
+      auto resp = fut.get();
+      parseControllerInfo( *resp, current_state );
     }
   }
 
-  std::unordered_set<std::string> processed;
-  for ( const auto &name : controllers_ ) {
-    if ( processed.count( name ) ) {
-      continue; // already handled as part of a group
-    }
+  // 4) Activate / deactivate controllers in groups ------------------------
+  // deactivate controllers that are active but not requested
+  ensureControllerState( false, current_state );
+  // activate controllers that are requested
+  ensureControllerState( true, current_state );
+  // ===== Done =============================================================
+  verifyFinalStates();
+  RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete – shutting down." );
+  done_.store( true );
+  in_progress_ = false;
+}
 
-    const auto &cfg = controller_cfg_.at( name );
-    std::vector<std::string> group;
-    group.push_back( name );
-    group.insert( group.end(), cfg.activate_as_group.begin(), cfg.activate_as_group.end() );
-    processed.insert( group.begin(), group.end() );
-
+bool MultiSpawner::ensureControllerState(
+    const bool desired_state, const std::unordered_map<std::string, std::string> &current_state )
+{
+  bool success = true;
+  for ( const auto &group : controller_groups_ ) {
     /* Determine whether at least one controller in this group should be active. */
-    bool group_requested_active = false;
+    bool group_requested_active = false; // if any controller in the group should be active
     for ( const auto &m : group ) { group_requested_active |= controller_cfg_.at( m ).activate; }
-    if ( !group_requested_active ) {
-      continue; // whole group requested inactive
+
+    // skip if the group is not requested to be in the desired state
+    if ( group_requested_active != desired_state ) {
+      RCLCPP_DEBUG( get_logger(), "Group %s should not be %s", vecToString( group ).c_str(),
+                    desired_state ? "activated" : "deactivated" );
+      continue;
     }
 
     /* Force any “false” members in the same group to active and warn once. */
     for ( const auto &m : group ) {
-      if ( !controller_cfg_.at( m ).activate ) {
-        RCLCPP_WARN( get_logger(),
-                     "Controller '%s' is in activate_as_group with '%s' → overriding to ACTIVE.",
-                     m.c_str(), name.c_str() );
+      if ( controller_cfg_.at( m ).activate != group_requested_active ) {
+        RCLCPP_DEBUG( get_logger(), "Controller '%s' is in group with ['%s'] → overriding to ACTIVE.",
+                      m.c_str(), vecToString( group ).c_str() );
       }
     }
 
-    /* Skip activation if entire group is already active. */
-    bool already_active = true;
+    /* Check if the group is already in the desired state. */
+    bool active = true;
+    bool inactive = true;
     for ( const auto &m : group ) {
       auto it = current_state.find( m );
-      already_active &= ( it != current_state.end() && it->second == "active" );
+      active &= ( it != current_state.end() && it->second == "active" );
+      inactive &= ( it != current_state.end() && it->second != "active" );
     }
-    if ( already_active ) {
+    if ( ( active && group_requested_active ) || ( inactive && !group_requested_active ) ) {
+      RCLCPP_DEBUG( get_logger(), "The group %s is already in the desired state %s",
+                    vecToString( group ).c_str(), desired_state ? "ACTIVE" : "INACTIVE" );
       continue;
     }
 
     /* Issue one switch_controller call for this group. */
-    if ( !switch_controllers( group, /*deactivate*/ {} ) ) {
-      RCLCPP_ERROR( get_logger(), "Failed to activate controller group containing '%s'",
-                    name.c_str() );
+    if ( ( group_requested_active && !switchControllersRequest( group, /*deactivate*/ {} ) ) ||
+         ( !group_requested_active && !switchControllersRequest( {}, group ) ) ) {
+      RCLCPP_ERROR( get_logger(), "Failed to %s controller group containing '%s'",
+                    group_requested_active ? "activate" : "deactivate",
+                    vecToString( group ).c_str() );
+      success = false;
     } else {
-      std::stringstream ss;
-      for ( size_t i = 0; i < group.size(); ++i ) {
-        ss << group[i] << ( i + 1 < group.size() ? ", " : "" );
-      }
-      RCLCPP_INFO( get_logger(), "Activated controller group: %s", ss.str().c_str() );
+
+      RCLCPP_DEBUG( get_logger(), "%s controller group: %s",
+                    group_requested_active ? "Activated" : "Deactivated",
+                    vecToString( group ).c_str() );
     }
   }
+  return success;
+}
 
-  // ===== Done =============================================================
-  verifyFinalStates();
-  RCLCPP_INFO( get_logger(), " Multi Controller Spawner complete !" );
-  done_.store( true );
-  in_progress_ = false;
+bool MultiSpawner::switchControllersRequest( const std::vector<std::string> &to_activate,
+                                             const std::vector<std::string> &to_deactivate )
+{
+  if ( !switch_ctrl_client_->wait_for_service( 2s ) ) {
+    RCLCPP_ERROR( get_logger(), "switch_controller service unavailable" );
+    return false;
+  }
+  auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+  req->activate_controllers = to_activate;
+  req->deactivate_controllers = to_deactivate;
+  req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+  req->timeout = rclcpp::Duration::from_seconds( 5.0 );
+
+  auto fut = switch_ctrl_client_->async_send_request( req );
+  return rclcpp::spin_until_future_complete( shared_from_this(), fut ) ==
+             rclcpp::FutureReturnCode::SUCCESS &&
+         fut.get()->ok;
+}
+
+void MultiSpawner::parseControllerInfo(
+    const controller_manager_msgs::srv::ListControllers_Response &resp,
+    std::unordered_map<std::string, std::string> &current_state )
+{
+  // save snapshot of states
+  for ( const auto &c : resp.controller ) { current_state[c.name] = c.state; }
+
+  // —— auto-detect chained controllers groups ——
+  for ( const auto &c : resp.controller ) {
+    for ( const auto &conn : c.chain_connections ) {
+      // check if there is a ControllerGroup that includes name or conn.name
+      bool found = false;
+      for ( auto &group : controller_groups_ ) {
+        if ( std::find( group.begin(), group.end(), c.name ) != group.end() ||
+             std::find( group.begin(), group.end(), conn.name ) != group.end() ) {
+          found = true;
+          if ( std::find( group.begin(), group.end(), c.name ) == group.end() ) {
+            group.push_back( c.name );
+          } else if ( std::find( group.begin(), group.end(), conn.name ) == group.end() ) {
+            group.push_back( conn.name );
+          }
+          break;
+        }
+      }
+      if ( !found ) {
+        // create a new group with both names
+        controller_groups_.emplace_back( std::vector{ c.name, conn.name } );
+      }
+      RCLCPP_DEBUG( get_logger(), "Controller Group Member: '%s' <-> '%s'", c.name.c_str(),
+                    conn.name.c_str() );
+    }
+  }
+  // add remaining controllers as their own groups
+  for ( const auto &c : resp.controller ) {
+    bool in_group = false;
+    for ( auto &group : controller_groups_ ) {
+      if ( std::find( group.begin(), group.end(), c.name ) != group.end() ) {
+        in_group = true;
+        break;
+      }
+    }
+    if ( !in_group ) {
+      controller_groups_.emplace_back( std::vector<std::string>{ c.name } );
+      RCLCPP_DEBUG( get_logger(), "Controller Group Member: '%s' (single)", c.name.c_str() );
+    }
+  }
+  // check if all controllers have a controller cfg, if not add them with current state
+  for ( const auto &c : resp.controller ) {
+    if ( controller_cfg_.find( c.name ) == controller_cfg_.end() ) {
+      ControllerCfg cfg;
+      cfg.activate = ( c.state == "active" );
+      controller_cfg_[c.name] = cfg;
+      controllers_.push_back( c.name );
+      RCLCPP_DEBUG( get_logger(), "Adding controller '%s' with state '%s' to config.",
+                    c.name.c_str(), c.state.c_str() );
+    }
+  }
 }
 
 bool MultiSpawner::loadAndActivateHardware( const std::string &name )
@@ -405,13 +470,18 @@ void MultiSpawner::verifyFinalStates()
 
   for ( const auto &name : controllers_ ) {
     std::string current = state.count( name ) ? state.at( name ) : "missing";
-    bool should_be_active = controller_cfg_[name].activate;
-    bool success = ( should_be_active && ( current == "active" ) ) ||
-                   ( !should_be_active && ( current == "inactive" || current == "configured" ) );
+    const bool should_be_active = controller_cfg_[name].activate;
+    const bool success =
+        ( should_be_active && ( current == "active" ) ) ||
+        ( !should_be_active && ( current == "inactive" || current == "configured" ) );
 
     if ( success ) {
       ++ok_cnt;
       report << "  " << GREEN << "✔ " << name << " → " << current << RESET << "\n";
+    } else if ( !controller_cfg_[name].specified ) {
+      ++ok_cnt;
+      report << "  " << GREEN << "(✔) " << name << " → " << current
+             << " (desired state unspecified in config)" << RESET << "\n";
     } else {
       ++fail_cnt;
       report << "  " << RED << "✘ " << name << " → " << current << RESET << "\n";

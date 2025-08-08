@@ -35,7 +35,7 @@ foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${dependency} REQUIRED)
 endforeach()
 
-# Add parameter_libaries here
+# Add parameter_libraries here
 
 generate_parameter_library(
   velocity_to_position_command_controller_parameters

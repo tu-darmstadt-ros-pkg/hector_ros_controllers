@@ -1,0 +1,95 @@
+# THIS PARAMETERS ARE ONLY USED IN THE SIMULATION !!!
+# SEE athena_driver_launch/athena_driver_launch_config/configs/controllers.yaml FOR THE REAL ROBOT CONFIGURATION
+/**:
+  gz_ros_control:
+    ros__parameters:
+      use_sim_time: true
+
+  controller_manager:
+    ros__parameters:
+      update_rate: 50 # Hz
+      hardware_components_initial_state:
+        - unconfigured: [ athena_flipper_interface, athena_arm_interface ]
+
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+
+      flipper_velocity_controller:
+        type: safety_forward_controller/SafetyForwardController
+
+      flipper_trajectory_controller:
+        type: joint_trajectory_controller/JointTrajectoryController
+
+      arm_trajectory_controller:
+        type: joint_trajectory_controller/JointTrajectoryController
+
+      gripper_trajectory_controller:
+        type: joint_trajectory_controller/JointTrajectoryController
+
+
+      vel_to_pos_controller:
+        type: velocity_to_position_command_controller/VelocityToPositionCommandController
+
+
+  vel_to_pos_controller:
+    ros__parameters:
+      joints:
+        - flipper_fl_joint
+        - flipper_fr_joint
+        - flipper_bl_joint
+        - flipper_br_joint
+
+      e_stop_topic: estop_board/hard_estop
+
+  flipper_velocity_controller:
+    ros__parameters:
+      joints:
+        - flipper_fl_joint
+        - flipper_fr_joint
+        - flipper_bl_joint
+        - flipper_br_joint
+
+      passthrough_controller: vel_to_pos_controller
+
+      interface_type: velocity
+
+  flipper_trajectory_controller:
+    ros__parameters:
+      joints:
+        - flipper_fl_joint
+        - flipper_fr_joint
+        - flipper_bl_joint
+        - flipper_br_joint
+
+      command_interfaces:
+        - position
+      state_interfaces:
+        - position
+        - velocity
+
+  arm_trajectory_controller:
+    ros__parameters:
+      joints:
+        - arm_joint_1
+        - arm_joint_2
+        - arm_joint_3
+        - arm_joint_4
+        - arm_joint_5
+        - arm_joint_6
+
+      command_interfaces:
+        - position
+      state_interfaces:
+        - position
+        - velocity
+
+  gripper_trajectory_controller:
+    ros__parameters:
+      joints:
+        - gripper_servo_joint
+
+      command_interfaces:
+        - position
+      state_interfaces:
+        - position
+        - velocity
