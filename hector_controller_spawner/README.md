@@ -34,7 +34,7 @@ ready to go with minimal configuration.
 | `<ctrl>.activate`     | `bool`     | `true`  | Should the controller be activated after loading?                         |
 | `retry_delay`         | `double`   | `5.0`   | Delay (in seconds) between retry attempts.                                |
 | `estop_topic`         | `string`   | `""`    | Topic to wait on (false ⇒ proceed). Leave empty to disable e-stop gating. |
-
+| `restart_after_estop_deactivation` |  `bool`    | `true`  | Restart hardware and controllers after e-stop deactivation          |
 📄 See [`athena.yaml`](config/athena.yaml) for a complete configuration example.
 
 ---
