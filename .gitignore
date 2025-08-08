@@ -3,3 +3,5 @@ cmake-build-*
 .vscode
 CMakeLists.txt.user
 .vscode
+__pycache__/
+**/__pycache__/
