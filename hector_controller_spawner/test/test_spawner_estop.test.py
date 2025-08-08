@@ -17,6 +17,7 @@ from controller_manager_msgs.srv import (
     SwitchController,
     SetHardwareComponentState,
 )
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
 
 def generate_test_description():
@@ -80,7 +81,13 @@ class TestEStopFunctionality(unittest.TestCase):
         cls.node = Node("test_estop_functionality")
 
         # Create e-stop publisher
-        cls.estop_pub = cls.node.create_publisher(Bool, "estop_board/hard_estop", 10)
+        estop_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,  # Match spawner's QoS
+        )
+        cls.estop_pub = cls.node.create_publisher(
+            Bool, "estop_board/hard_estop", estop_qos
+        )
 
     @classmethod
     def tearDownClass(cls):
