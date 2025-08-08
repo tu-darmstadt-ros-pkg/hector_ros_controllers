@@ -11,9 +11,6 @@
       hardware_components_initial_state:
         - unconfigured: [ athena_flipper_interface, athena_arm_interface ]
 
-
-
-
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster
 

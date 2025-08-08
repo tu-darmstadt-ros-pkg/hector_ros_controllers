@@ -17,6 +17,9 @@
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>controller_manager</test_depend>
+  <test_depend>hector_ros_controllers</test_depend>
+  <test_depend>joint_state_broadcaster</test_depend>
+  <test_depend>joint_trajectory_controller</test_depend>
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
   <test_depend>robot_state_publisher</test_depend>
