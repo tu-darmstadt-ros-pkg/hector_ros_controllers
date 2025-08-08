@@ -35,9 +35,17 @@ if(BUILD_TESTING)
   # for ROS 2 launch‐testing
   find_package(launch_testing_ament_cmake REQUIRED)
   # This will install and run your test/controller_spawner_launch.py
+  #add_launch_test(
+  #        test/test_spawner_basic.test.py
+  #        TIMEOUT   360
+  #)
+  #add_launch_test(
+  #        test/test_spawner_twice.test.py
+  #        TIMEOUT   360
+  #)
   add_launch_test(
-          test/test_spawner_basic.test.py   # path to your test script
-          TIMEOUT   360                         # optional: max seconds per test
+          test/test_spawner_estop.test.py
+          TIMEOUT   360
   )
   #ament_add_test(
   #        test_spawner_basic
