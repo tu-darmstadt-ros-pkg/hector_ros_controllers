@@ -38,4 +38,3 @@
 
     arm_trajectory_controller:
       activate: true
-

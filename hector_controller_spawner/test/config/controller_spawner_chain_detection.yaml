@@ -31,7 +31,7 @@
       activate: true
 
     vel_to_pos_controller:
-      activate: true
+      activate: false # In test must be activated
 
     gripper_trajectory_controller:
       activate: true

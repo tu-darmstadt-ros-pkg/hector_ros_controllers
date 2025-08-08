@@ -52,7 +52,7 @@ controller_interface::CallbackReturn SafetyForwardController::read_parameters()
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  safty_timer_period_ms_ = (int)params_.safety_timer_duration;
+  safety_timer_period_ms_ = (int)params_.safety_timer_duration;
 
   urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
   for ( const auto &joint : params_.joints ) {
@@ -92,7 +92,7 @@ SafetyForwardController::on_configure( const rclcpp_lifecycle::State & /*previou
       } );
 
   safety_timer_ =
-      get_node()->create_wall_timer( std::chrono::milliseconds( safty_timer_period_ms_ ), [this]() {
+      get_node()->create_wall_timer( std::chrono::milliseconds( safety_timer_period_ms_ ), [this]() {
         if ( !safety_engaged_ ) {
           safety_engaged_ = true;
           RCLCPP_WARN( get_node()->get_logger(), "Safety engaged, stopping all commands" );

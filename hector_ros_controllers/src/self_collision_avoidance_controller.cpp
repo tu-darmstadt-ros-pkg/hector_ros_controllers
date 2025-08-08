@@ -116,7 +116,7 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
   controlled_joints_ = params_.joints;
 
   if ( params_.joint_interface_types.size() != params_.joints.size() ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "Need to specifiy an interface type for each joint" );
+    RCLCPP_ERROR( get_node()->get_logger(), "Need to specify an interface type for each joint" );
     return controller_interface::CallbackReturn::ERROR;
   }
 
@@ -133,7 +133,7 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
     // No joint groups
   } else if ( params_.joint_groups.size() != params_.joints.size() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
-                  "Need to specifiy a joint group for each joint or none" );
+                  "Need to specify a joint group for each joint or none" );
     return controller_interface::CallbackReturn::ERROR;
   } else {
 

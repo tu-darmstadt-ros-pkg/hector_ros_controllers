@@ -47,4 +47,3 @@ ros2 launch hector_controller_spawner hector_controller_spawner_launch.yml
 
 * Include **only once** in your launch setup.
 * No need for individual `spawner` calls per controller.
-

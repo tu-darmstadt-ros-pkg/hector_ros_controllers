@@ -25,9 +25,6 @@ target_include_directories(
 ament_target_dependencies(hector_controller_spawner rclcpp std_msgs
                           controller_manager_msgs)
 
-
-
-
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
@@ -35,23 +32,10 @@ if(BUILD_TESTING)
   # for ROS 2 launch‐testing
   find_package(launch_testing_ament_cmake REQUIRED)
   # This will install and run your test/controller_spawner_launch.py
-  #add_launch_test(
-  #        test/test_spawner_basic.test.py
-  #        TIMEOUT   360
-  #)
-  #add_launch_test(
-  #        test/test_spawner_twice.test.py
-  #        TIMEOUT   360
-  #)
-  add_launch_test(
-          test/test_spawner_estop.test.py
-          TIMEOUT   360
-  )
-  #ament_add_test(
-  #        test_spawner_basic
-  #        COMMAND launch_test test/test_spawner_basic.py
-  #        TIMEOUT 90
-  #)
+  add_launch_test(test/test_spawner_basic.test.py TIMEOUT 360)
+  add_launch_test(test/test_spawner_twice.test.py TIMEOUT 360)
+  add_launch_test(test/test_spawner_estop.test.py TIMEOUT 360)
+  add_launch_test(test/test_spawner_chain_detection.test.py TIMEOUT 360)
 endif()
 
 install(TARGETS hector_controller_spawner DESTINATION lib/${PROJECT_NAME})

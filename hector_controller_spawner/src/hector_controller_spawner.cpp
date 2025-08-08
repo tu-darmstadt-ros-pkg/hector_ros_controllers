@@ -367,7 +367,6 @@ void MultiSpawner::parseControllerInfo(
   }
 }
 
-
 bool MultiSpawner::loadAndActivateHardware( const std::string &name )
 {
   if ( !set_hw_state_client_->wait_for_service( std::chrono::seconds( 3 ) ) ) {

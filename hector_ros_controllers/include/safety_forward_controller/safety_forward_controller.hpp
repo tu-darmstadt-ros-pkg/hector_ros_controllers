@@ -59,7 +59,7 @@ protected:
   std::string interface_type_;
 
   bool safety_engaged_ = false;
-  int safty_timer_period_ms_;
+  int safety_timer_period_ms_;
   rclcpp::TimerBase::SharedPtr safety_timer_;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;

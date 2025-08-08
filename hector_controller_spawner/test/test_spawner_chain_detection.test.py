@@ -17,7 +17,7 @@ def generate_test_description():
 
     controller_config = os.path.join(pkg_share, "test", "config", "controllers.yaml")
     spawner_config = os.path.join(
-        pkg_share, "test", "config", "controller_spawner.yaml"
+        pkg_share, "test", "config", "controller_spawner_chain_detection.yaml"
     )
     robot_description_file = os.path.join(pkg_share, "test", "config", "athena.urdf")
 
