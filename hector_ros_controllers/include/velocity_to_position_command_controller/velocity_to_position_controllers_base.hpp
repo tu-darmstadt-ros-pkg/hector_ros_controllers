@@ -102,7 +102,19 @@ protected:
 
   void update_joint_states_if_valid();
 
-  void update_move_state( const double &vel_command, const size_t &joint_idx );
+  void update_move_states( const double &vel_command, const size_t &joint_idx );
+
+  void update_sync_states( const std::vector<double> &vel_commands );
+
+  void update_sync_offsets();
+
+  double sync_p_control( const size_t &joint_idx );
+
+  double pos_pd_control( const size_t &joint_idx, const double &vel_command,
+                         const rclcpp::Duration &p );
+
+  double position_control( const size_t &joint_idx, const double &vel_command,
+                           const rclcpp::Duration &p );
 
   std::vector<std::string> joints_;
   std::vector<std::string> reference_interface_names_;
@@ -115,17 +127,32 @@ protected:
   std::vector<double> joint_velocity_states_;
   std::vector<double> joint_prev_vel_states_;
   std::vector<double> hold_positions_;
+
   std::vector<MoveState> move_states_;
+  double stopping_vel_threshold_;
+
+  // Target offsets to other joints in synchronous group
+  std::vector<std::vector<double>> sync_offsets_;
+
+  // Whether each joint is supposed to be synchronized during the current update cycle
+  std::vector<bool> sync_states_;
+
+  // List of all synchronous groups
+  std::vector<std::string> joint_groups_;
+  // Collects joint indices for each synchronous group
+  std::unordered_map<std::string, std::vector<size_t>> groups_;
+  // Maps joint idx to its synchrononized joint indices
+  std::vector<std::vector<size_t>> synced_joints_;
 
   std::string e_stop_topic_;
   bool e_stop_active_{};
   bool interfaces_valid_;
 
-  double p_gain_ = 5;
-  double d_gain_ = 0.001;
+  double kp_sync_;
+  double kp_;
+  double kd_;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;
-  // rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hard_estop_sub_;
 };
 

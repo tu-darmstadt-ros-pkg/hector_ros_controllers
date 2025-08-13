@@ -37,12 +37,7 @@ VelocityToPositionControllersBase::on_configure( const rclcpp_lifecycle::State &
     return ret;
   }
 
-  /*joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
-      "~/commands", rclcpp::SystemDefaultsQoS(),
-      [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );*/
-
   RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
-
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -136,8 +131,8 @@ void VelocityToPositionControllersBase::update_joint_states_if_valid()
   interfaces_valid_ = all_joints_valid;
 }
 
-void VelocityToPositionControllersBase::update_move_state( const double &vel_command,
-                                                           const size_t &joint_idx )
+void VelocityToPositionControllersBase::update_move_states( const double &vel_command,
+                                                            const size_t &joint_idx )
 {
   switch ( move_states_[joint_idx] ) {
   case MOVING:
@@ -149,7 +144,7 @@ void VelocityToPositionControllersBase::update_move_state( const double &vel_com
     if ( vel_command != 0.0 )
       move_states_[joint_idx] = MOVING;
     else {
-      if ( std::abs( joint_velocity_states_[joint_idx] ) <= 0.005 )
+      if ( std::abs( joint_velocity_states_[joint_idx] ) <= stopping_vel_threshold_ )
         move_states_[joint_idx] = STOPPED;
     }
     break;
@@ -178,8 +173,6 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
   // reset command buffer if a command came through callback when controller was inactive
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
 
-  RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
-
   auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
   qos.transient_local();
   hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
@@ -207,8 +200,13 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
     else {
       hold_positions_[i] = std::numeric_limits<double>::quiet_NaN();
     }
-  }
 
+    // Set synchronization states to false to reset target offsets to current positions
+    sync_states_[i] = false;
+  }
+  update_sync_offsets();
+
+  RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -220,6 +218,73 @@ VelocityToPositionControllersBase::on_deactivate( const rclcpp_lifecycle::State 
 
   hard_estop_sub_.reset();
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+void VelocityToPositionControllersBase::update_sync_states( const std::vector<double> &vel_commands )
+{
+  for ( auto &group : groups_ ) {
+    const std::vector<size_t> &group_indices = group.second;
+
+    if ( group_indices.size() == 1 ) {
+      sync_states_[group_indices[0]] = false;
+      continue;
+    }
+
+    bool group_is_synchronized = true;
+    const double &common_vel_command = vel_commands[group_indices[0]];
+    for ( size_t i = 1; i < group_indices.size(); i++ ) {
+      group_is_synchronized &= common_vel_command == vel_commands[group_indices[i]];
+    }
+
+    for ( size_t i = 0; i < group_indices.size(); i++ ) {
+      sync_states_[group_indices[i]] = group_is_synchronized;
+    }
+  }
+}
+
+void VelocityToPositionControllersBase::update_sync_offsets()
+{
+  for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
+    if ( !sync_states_[joint_idx] ) {
+      for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+        sync_offsets_[joint_idx][i] =
+            joint_position_states_[synced_joints_[joint_idx][i]] - joint_position_states_[joint_idx];
+      }
+    }
+  }
+}
+
+double VelocityToPositionControllersBase::sync_p_control( const size_t &joint_idx )
+{
+  double sync_pos_command = 0.0;
+  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+    sync_pos_command += ( joint_position_states_[synced_joints_[joint_idx][i]] -
+                          joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i] ) *
+                        kp_sync_;
+  }
+  return sync_pos_command / (double)synced_joints_[joint_idx].size();
+}
+
+double VelocityToPositionControllersBase::pos_pd_control( const size_t &joint_idx,
+                                                          const double &vel_command,
+                                                          const rclcpp::Duration &p )
+{
+  // FF + P + D
+  return joint_position_states_[joint_idx] + vel_command * p.seconds() +
+         kp_ * ( vel_command - joint_velocity_states_[joint_idx] ) * p.seconds() -
+         kd_ * ( joint_velocity_states_[joint_idx] - joint_prev_vel_states_[joint_idx] ) *
+             ( p.seconds() * p.seconds() );
+}
+
+double VelocityToPositionControllersBase::position_control( const size_t &joint_idx,
+                                                            const double &vel_command,
+                                                            const rclcpp::Duration &p )
+{
+  double next_position = pos_pd_control( joint_idx, vel_command, p );
+  if ( sync_states_[joint_idx] )
+    next_position += sync_p_control( joint_idx );
+
+  return next_position;
 }
 
 controller_interface::return_type
@@ -235,81 +300,50 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
     for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
       if ( !std::isnan( joint_position_states_[index] ) )
         successful = command_interfaces_[index].set_value( joint_position_states_[index] );
+      hold_positions_[index] = joint_position_states_[index];
     }
   } else {
+
+    update_sync_states( reference_interfaces_ );
+    update_sync_offsets();
+
     // Set commands for joints
-    for ( size_t index = 0ul; index < command_interfaces_.size(); index++ ) {
+    for ( size_t joint_idx = 0ul; joint_idx < command_interfaces_.size(); joint_idx++ ) {
 
       // skip if no command received from high level controller
-      if ( std::isnan( reference_interfaces_[index] ) )
+      if ( std::isnan( reference_interfaces_[joint_idx] ) )
         continue;
 
-      const double &vel_command = reference_interfaces_[index];
+      const double &vel_command = reference_interfaces_[joint_idx];
 
-      update_move_state( vel_command, index );
+      update_move_states( vel_command, joint_idx );
 
-      double new_position = std::numeric_limits<double>::quiet_NaN();
-      std::string move_state;
-      switch ( move_states_[index] ) {
-
-      case MOVING:
-        new_position = joint_position_states_[index] + vel_command * p.seconds() +
-                       p_gain_ * ( vel_command - joint_velocity_states_[index] ) * p.seconds() -
-                       d_gain_ * ( joint_velocity_states_[index] - joint_prev_vel_states_[index] ) *
-                           ( p.seconds() * p.seconds() );
-        move_state = "MOVING";
-        break;
-      case STOPPING:
-        new_position = joint_position_states_[index] + vel_command * p.seconds() +
-                       p_gain_ * ( vel_command - joint_velocity_states_[index] ) * p.seconds() -
-                       d_gain_ * ( joint_velocity_states_[index] - joint_prev_vel_states_[index] ) *
-                           ( p.seconds() * p.seconds() );
-        hold_positions_[index] = joint_position_states_[index];
-        move_state = "STOPPING";
-        break;
+      double pos_command = std::numeric_limits<double>::quiet_NaN();
+      std::string move_state = "MOVING";
+      switch ( move_states_[joint_idx] ) {
       case STOPPED:
-        new_position = hold_positions_[index];
+        pos_command = hold_positions_[joint_idx];
         move_state = "STOPPED";
         break;
+
+      // Position command calculation is the same for MOVING and STOPPING states
       default:
-        continue;
+        pos_command = position_control( joint_idx, vel_command, p );
+        // Set to most recent position during movement to avoid drift when stopped
+        hold_positions_[joint_idx] = joint_position_states_[joint_idx];
       }
 
-      if ( index == 0 )
+      if ( joint_idx == 0 )
         RCLCPP_INFO(
             get_node()->get_logger(), "Joint {%s}: Pos {%f}, Vel {%f}. New pos {%f}. Command vel {%f}, Hold position {%f}. Move state %s",
-            joints_[index].c_str(), joint_position_states_[index], joint_velocity_states_[index],
-            new_position, vel_command, hold_positions_[index], move_state.c_str() );
+            joints_[joint_idx].c_str(), joint_position_states_[joint_idx],
+            joint_velocity_states_[joint_idx], pos_command, vel_command, hold_positions_[joint_idx],
+            move_state.c_str() );
 
-      successful &= command_interfaces_[index].set_value( new_position );
+      if ( std::isnan( pos_command ) )
+        continue;
 
-      /*double new_position = last_positions_[index] + vel_command * p.seconds();
-      if ( stopping_[index] ) {
-        // If we were stopped, but now we have a velocity command, we set the new position
-        if ( vel_command != 0.0 ) {
-          stopping_[index] = false;
-          successful = command_interfaces_[index].set_value( new_position );
-          last_positions_[index] = new_position;
-          // Stopping without velocity input, holding initial position
-        } else {
-          successful = command_interfaces_[index].set_value( last_positions_[index] );
-        }
-      } else {
-        // Going from movement to stop at current position
-        if ( vel_command == 0.0 ) {
-          stopping_[index] = true;
-          const auto &state = state_interfaces_[index].get_optional();
-          if ( state.has_value() && !std::isnan( state.value() ) ) {
-            last_positions_[index] = state.value();
-            successful = command_interfaces_[index].set_value( last_positions_[index] );
-          }
-        }
-        // Continuous movement
-        else {
-          successful = command_interfaces_[index].set_value( new_position );
-          last_positions_[index] = new_position;
-        }
-      }*/
+      successful &= command_interfaces_[joint_idx].set_value( pos_command );
     }
   }
 
