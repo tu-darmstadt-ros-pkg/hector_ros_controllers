@@ -20,6 +20,8 @@ controller_interface::CallbackReturn ApplyCurrentLimitController::on_init()
   return process_params();
 }
 
+bool ApplyCurrentLimitController::on_set_chained_mode( bool /*chained_mode*/ ) { return true; }
+
 controller_interface::CallbackReturn ApplyCurrentLimitController::process_params()
 {
 
