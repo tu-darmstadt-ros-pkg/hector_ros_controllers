@@ -212,3 +212,7 @@ ApplyCurrentLimitController::update_and_write_commands( const rclcpp::Time & /*t
 }
 
 } // namespace apply_current_limit_controller
+
+#include "pluginlib/class_list_macros.hpp"
+PLUGINLIB_EXPORT_CLASS( apply_current_limit_controller::ApplyCurrentLimitController,
+                        controller_interface::ChainableControllerInterface )

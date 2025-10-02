@@ -20,4 +20,11 @@
     A high-level forward controller ensuring that all command interfaces are stopped after receiving now commands for a specified time, i.e. disconnect to operator station.
     </description>
   </class>
+  <class name="apply_current_limit_controller/ApplyCurrentLimitController"
+         type="apply_current_limit_controller::ApplyCurrentLimitController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>
+      Chainable controller that allows toggling of current limit enforcement for position control. This results in pseudo compliancy.
+    </description>
+  </class>
 </library>
