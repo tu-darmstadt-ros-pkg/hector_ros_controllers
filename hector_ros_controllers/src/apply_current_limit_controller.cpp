@@ -50,10 +50,10 @@ controller_interface::CallbackReturn ApplyCurrentLimitController::process_params
   for ( size_t i = 0ul; i < joints_.size(); i++ ) {
 
     for ( size_t j = 0ul; j < command_interface_types_.size(); j++ )
-      command_interface_names_.push_back( joints_[i] + "/" + command_interface_types_[i] );
+      command_interface_names_.push_back( joints_[i] + "/" + command_interface_types_[j] );
 
     for ( size_t j = 0ul; j < command_interface_types_.size(); j++ )
-      exported_state_interface_names_.push_back( joints_[i] + "/" + state_interface_types_[i] );
+      exported_state_interface_names_.push_back( joints_[i] + "/" + state_interface_types_[j] );
 
     compliant_limits_.push_back( params_.current_limits.joints_map.at( joints_[i] ).compliant_limit );
     stiff_limits_.push_back( params_.current_limits.joints_map.at( joints_[i] ).stiff_limit );
