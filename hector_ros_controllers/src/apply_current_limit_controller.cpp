@@ -6,6 +6,12 @@
 
 namespace apply_current_limit_controller
 {
+
+ApplyCurrentLimitController::ApplyCurrentLimitController()
+    : controller_interface::ChainableControllerInterface()
+{
+}
+
 controller_interface::CallbackReturn ApplyCurrentLimitController::on_init()
 {
   try {
