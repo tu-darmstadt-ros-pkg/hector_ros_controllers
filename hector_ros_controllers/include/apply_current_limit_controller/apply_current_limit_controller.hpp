@@ -74,6 +74,7 @@ protected:
   std::atomic<bool> compliance_enabled_;
 
   std::atomic<bool> e_stop_active_{ false };
+  bool chained_mode_;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>> rt_buffer_ptr_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_estop_sub_;
