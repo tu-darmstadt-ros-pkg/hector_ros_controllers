@@ -107,7 +107,7 @@ controller_interface::CallbackReturn ApplyCurrentLimitController::process_params
   RCLCPP_INFO( get_node()->get_logger(), "Expose state interfaces : %s", state_interfaces.c_str() );
 
   std::string ref_interfaces = "";
-  for ( auto const &entry : exported_reference_interface_names_ ) { ref_interfaces += "|" + entry; }
+  for ( auto const &entry : reference_interface_names_ ) { ref_interfaces += "|" + entry; }
   RCLCPP_INFO( get_node()->get_logger(), "Expose ref interfaces : %s", ref_interfaces.c_str() );
 
   return controller_interface::CallbackReturn::SUCCESS;
