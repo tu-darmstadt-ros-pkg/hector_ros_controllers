@@ -125,6 +125,7 @@ ApplyCurrentLimitController::state_interface_configuration() const
 controller_interface::return_type ApplyCurrentLimitController::update_reference_from_subscribers(
     const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
 {
+  RCLCPP_INFO( this->get_node()->get_logger(), "Update ref commands" );
   // In chained mode the previous controller will feed our reference interfaces directly.
   // We still accept subscriber updates if present, but typically none will be published in that mode.
   auto joint_commands = rt_buffer_ptr_.readFromRT();
@@ -184,29 +185,37 @@ ApplyCurrentLimitController::on_configure( const rclcpp_lifecycle::State & /*pre
 controller_interface::CallbackReturn
 ApplyCurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
-  // Validate we have exactly one interface per (joint,type); use ordered views for checks
-  for ( const std::string &type : command_interface_types_ ) {
-    std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_cmd;
-    const bool ok = controller_interface::get_ordered_interfaces( command_interfaces_, joints_,
-                                                                  type, ordered_cmd );
-    if ( !ok || ordered_cmd.size() != joints_.size() ) {
-      RCLCPP_ERROR( this->get_node()->get_logger(),
-                    "Expected %zu command interfaces for type '%s', got %zu", joints_.size(),
-                    type.c_str(), ordered_cmd.size() );
-      return controller_interface::CallbackReturn::ERROR;
+  try {
+    // Validate we have exactly one interface per (joint,type); use ordered views for checks
+    for ( const std::string &type : command_interface_types_ ) {
+      std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_cmd;
+      const bool ok = controller_interface::get_ordered_interfaces( command_interfaces_, joints_,
+                                                                    type, ordered_cmd );
+      if ( !ok || ordered_cmd.size() != joints_.size() ) {
+        RCLCPP_ERROR( this->get_node()->get_logger(),
+                      "Expected %zu command interfaces for type '%s', got %zu", joints_.size(),
+                      type.c_str(), ordered_cmd.size() );
+        return controller_interface::CallbackReturn::ERROR;
+      }
     }
+
+    for ( const std::string &type : state_interface_types_ ) {
+      std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>> ordered_state;
+      const bool ok = controller_interface::get_ordered_interfaces( state_interfaces_, joints_,
+                                                                    type, ordered_state );
+      if ( !ok || ordered_state.size() != joints_.size() ) {
+        RCLCPP_ERROR( this->get_node()->get_logger(),
+                      "Expected %zu state interfaces for type '%s', got %zu", joints_.size(),
+                      type.c_str(), ordered_state.size() );
+        return controller_interface::CallbackReturn::ERROR;
+      }
+    }
+    /* code */
+    RCLCPP_INFO( this->get_node()->get_logger(), "Sanity checks completed" );
   }
 
-  for ( const std::string &type : state_interface_types_ ) {
-    std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>> ordered_state;
-    const bool ok = controller_interface::get_ordered_interfaces( state_interfaces_, joints_, type,
-                                                                  ordered_state );
-    if ( !ok || ordered_state.size() != joints_.size() ) {
-      RCLCPP_ERROR( this->get_node()->get_logger(),
-                    "Expected %zu state interfaces for type '%s', got %zu", joints_.size(),
-                    type.c_str(), ordered_state.size() );
-      return controller_interface::CallbackReturn::ERROR;
-    }
+  catch ( const std::exception &e ) {
+    std::cerr << e.what() << '\n';
   }
 
   // reset command buffer if a command came through callback when controller was inactive
@@ -233,6 +242,8 @@ ApplyCurrentLimitController::update_and_write_commands( const rclcpp::Time & /*t
   // If we are following another controller, we do not write to HW.
   if ( chained_mode_ )
     return controller_interface::return_type::OK;
+
+  RCLCPP_INFO( this->get_node()->get_logger(), "Run update cycle" );
 
   // Get ordered views every cycle to avoid relying on any internal ordering.
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> pos_cmd;
