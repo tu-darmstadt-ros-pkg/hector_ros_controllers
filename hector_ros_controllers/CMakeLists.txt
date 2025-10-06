@@ -30,6 +30,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     std_msgs
     std_srvs
     fcl
+    controller_manager_msgs
     ad_kinematics)
 
 foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -79,6 +80,12 @@ target_link_libraries(
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+
+add_executable(hardware_interface_logger src/hardware_interface_logger.cpp)
+install(TARGETS hardware_interface_logger DESTINATION lib/${PROJECT_NAME})
+
+ament_target_dependencies(hardware_interface_logger rclcpp
+                          controller_manager_msgs)
 
 # Causes the visibility macros to use dllexport rather than dllimport, which is
 # appropriate when building the dll but not consuming it.
