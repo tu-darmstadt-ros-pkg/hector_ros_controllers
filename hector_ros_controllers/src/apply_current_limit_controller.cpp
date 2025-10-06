@@ -98,6 +98,18 @@ controller_interface::CallbackReturn ApplyCurrentLimitController::process_params
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  std::string cmd_interfaces = "";
+  for ( auto const &entry : command_interface_names_ ) { cmd_interfaces += "|" + entry; }
+  RCLCPP_INFO( get_node()->get_logger(), "Claim cmd interfaces : %s", cmd_interfaces.c_str() );
+
+  std::string state_interfaces = "";
+  for ( auto const &entry : exported_state_interface_names_ ) { state_interfaces += "|" + entry; }
+  RCLCPP_INFO( get_node()->get_logger(), "Expose state interfaces : %s", state_interfaces.c_str() );
+
+  std::string ref_interfaces = "";
+  for ( auto const &entry : exported_reference_interface_names_ ) { ref_interfaces += "|" + entry; }
+  RCLCPP_INFO( get_node()->get_logger(), "Expose ref interfaces : %s", ref_interfaces.c_str() );
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -114,12 +126,11 @@ ApplyCurrentLimitController::command_interface_configuration() const
 controller_interface::InterfaceConfiguration
 ApplyCurrentLimitController::state_interface_configuration() const
 {
-  controller_interface::InterfaceConfiguration cfg;
-  cfg.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  controller_interface::InterfaceConfiguration state_interfaces_config;
+  state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  state_interfaces_config.names = exported_state_interface_names_;
 
-  // If we're following in a chain, don't claim HW state interfaces
-  cfg.names = chained_mode_ ? std::vector<std::string>{} : exported_state_interface_names_;
-  return cfg;
+  return state_interfaces_config;
 }
 
 controller_interface::return_type ApplyCurrentLimitController::update_reference_from_subscribers(
