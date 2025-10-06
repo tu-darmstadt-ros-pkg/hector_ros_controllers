@@ -54,6 +54,9 @@ generate_parameter_library(
   apply_current_limit_controller_parameters
   params/apply_current_limit_controller_parameters.yaml)
 
+generate_parameter_library(current_limit_controller_parameters
+                           params/current_limit_controller_parameters.yaml)
+
 # Add controllers here Define Controllers as Shared Libraries
 
 add_library(
@@ -62,7 +65,8 @@ add_library(
   src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
   src/self_collision_avoidance_controller.cpp
-  src/apply_current_limit_controller.cpp)
+  src/apply_current_limit_controller.cpp
+  src/current_limit_controller.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
 
@@ -76,7 +80,8 @@ target_link_libraries(
          velocity_to_position_command_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
-         apply_current_limit_controller_parameters)
+         apply_current_limit_controller_parameters
+         current_limit_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -102,6 +107,7 @@ install(
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters
           apply_current_limit_controller_parameters
+          current_limit_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib

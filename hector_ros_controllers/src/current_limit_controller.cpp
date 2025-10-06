@@ -1,45 +1,27 @@
-//
-// Created by aljoscha-schmidt on 7/17/25.
-//
-#include "apply_current_limit_controller/apply_current_limit_controller.hpp"
+#include "current_limit_controller/current_limit_controller.hpp"
 #include <controller_interface/helpers.hpp>
 #include <limits>
 
-namespace apply_current_limit_controller
+namespace current_limit_controller
 {
 
-ApplyCurrentLimitController::ApplyCurrentLimitController()
-    : controller_interface::ChainableControllerInterface(), compliance_enabled_( false ),
-      chained_mode_( false )
+CurrentLimitController::CurrentLimitController()
+    : controller_interface::ControllerInterface(), compliance_enabled_( false )
 {
 }
 
-controller_interface::CallbackReturn ApplyCurrentLimitController::on_init()
+controller_interface::CallbackReturn CurrentLimitController::on_init()
 {
-  try {
-    param_listener_ = std::make_shared<ParamListener>( get_node() );
-    params_ = param_listener_->get_params();
-  } catch ( const std::exception &e ) {
-    fprintf( stderr, "Exception thrown during init stage with message: %s \n", e.what() );
-    return controller_interface::CallbackReturn::ERROR;
-  }
+  param_listener_ = std::make_shared<ParamListener>( get_node() );
+  params_ = param_listener_->get_params();
 
-  return process_params();
+  return read_parameters();
 }
 
-bool ApplyCurrentLimitController::on_set_chained_mode( bool chained_mode )
-{
-  // Remember whether we are a "following" controller in a chain
-  chained_mode_ = chained_mode;
-  return true;
-}
-
-controller_interface::CallbackReturn ApplyCurrentLimitController::process_params()
+controller_interface::CallbackReturn CurrentLimitController::read_parameters()
 {
   // clear all in case of re-init / parameter change
   command_interface_names_.clear();
-  exported_state_interface_names_.clear();
-  reference_interface_names_.clear();
   compliant_limits_.clear();
   stiff_limits_.clear();
 
@@ -55,67 +37,28 @@ controller_interface::CallbackReturn ApplyCurrentLimitController::process_params
   joints_ = params_.joints;
 
   // Define types we want
-  command_interface_types_ = { "position", "current" };
-  state_interface_types_ = { "position", "velocity" };
 
-  command_interface_names_.reserve( command_interface_types_.size() * joints_.size() );
-  exported_state_interface_names_.reserve( state_interface_types_.size() * joints_.size() );
+  command_interface_names_.reserve( joints_.size() );
 
   for ( const auto &jn : joints_ ) {
-    for ( const auto &t : command_interface_types_ )
-      command_interface_names_.push_back( jn + "/" + t );
+    command_interface_names_.push_back( jn + "/current" );
 
-    for ( const auto &t : state_interface_types_ )
-      exported_state_interface_names_.push_back( jn + "/" + t );
-
-    // throws if missing – that’s good: fail-fast on misconfig
     const auto &jl = params_.current_limits.joints_map.at( jn );
     compliant_limits_.push_back( jl.compliant_limit );
     stiff_limits_.push_back( jl.stiff_limit );
   }
 
-  // Reference interfaces mirror the command interfaces (same ordering)
-  reference_interface_names_ = command_interface_names_;
-
-  // Backing storage
-  reference_interfaces_.assign( reference_interface_names_.size(),
-                                std::numeric_limits<double>::quiet_NaN() );
-  state_interfaces_values_.assign( exported_state_interface_names_.size(),
-                                   std::numeric_limits<double>::quiet_NaN() );
-
-  // Sanity
-  if ( reference_interface_names_.size() != command_interface_names_.size() ) {
-    RCLCPP_ERROR( get_node()->get_logger(),
-                  "reference_interface_names_ size (%zu) != command_interface_names_ size (%zu)",
-                  reference_interface_names_.size(), command_interface_names_.size() );
-    return controller_interface::CallbackReturn::ERROR;
-  }
-  if ( state_interfaces_values_.size() != exported_state_interface_names_.size() ) {
-    RCLCPP_ERROR(
-        get_node()->get_logger(),
-        "state_interfaces_values_ size (%zu) != exported_state_interface_names_ size (%zu)",
-        state_interfaces_values_.size(), exported_state_interface_names_.size() );
-    return controller_interface::CallbackReturn::ERROR;
-  }
+  command_interface_names_.shrink_to_fit();
 
   std::string cmd_interfaces = "";
   for ( auto const &entry : command_interface_names_ ) { cmd_interfaces += "|" + entry; }
   RCLCPP_INFO( get_node()->get_logger(), "Claim cmd interfaces : %s", cmd_interfaces.c_str() );
 
-  std::string state_interfaces = "";
-  for ( auto const &entry : exported_state_interface_names_ ) { state_interfaces += "|" + entry; }
-  RCLCPP_INFO( get_node()->get_logger(), "Expose state interfaces : %s", state_interfaces.c_str() );
-
-  std::string ref_interfaces = "";
-  for ( auto const &entry : reference_interface_names_ ) { ref_interfaces += "|" + entry; }
-  RCLCPP_INFO( get_node()->get_logger(), "Expose ref interfaces : %s", ref_interfaces.c_str() );
-
-  command_interface_names_.shrink_to_fit();
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::InterfaceConfiguration
-ApplyCurrentLimitController::command_interface_configuration() const
+CurrentLimitController::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration command_interfaces_config;
   command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -124,22 +67,19 @@ ApplyCurrentLimitController::command_interface_configuration() const
   return command_interfaces_config;
 }
 
-controller_interface::InterfaceConfiguration
-ApplyCurrentLimitController::state_interface_configuration() const
+controller_interface::InterfaceConfiguration CurrentLimitController::state_interface_configuration() const
 {
+  // Empty
   controller_interface::InterfaceConfiguration state_interfaces_config;
   state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  state_interfaces_config.names = exported_state_interface_names_;
 
   return state_interfaces_config;
 }
 
-controller_interface::return_type ApplyCurrentLimitController::update_reference_from_subscribers(
-    const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
-{
-  RCLCPP_INFO( this->get_node()->get_logger(), "Update ref commands" );
-  // In chained mode the previous controller will feed our reference interfaces directly.
-  // We still accept subscriber updates if present, but typically none will be published in that mode.
+/*controller_interface::return_type CurrentLimitController::update_reference_from_subscribers(
+    const rclcpp::Time & /*time*///, const rclcpp::Duration & /*period*/ )
+/**{
+
   auto joint_commands = rt_buffer_ptr_.readFromRT();
   if ( !( !joint_commands || !( *joint_commands ) ) ) {
     if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
@@ -153,23 +93,10 @@ controller_interface::return_type ApplyCurrentLimitController::update_reference_
   }
 
   return controller_interface::return_type::OK;
-}
+}*/
 
-std::vector<hardware_interface::CommandInterface>
-ApplyCurrentLimitController::on_export_reference_interfaces()
-{
-  RCLCPP_INFO( this->get_node()->get_logger(), "Export ref interfaces" );
-  std::vector<hardware_interface::CommandInterface> refs;
-  refs.reserve( reference_interface_names_.size() );
-  for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
-    refs.emplace_back( get_node()->get_name(), reference_interface_names_[i],
-                       &reference_interfaces_[i] );
-  }
-  return refs;
-}
-
-std::vector<hardware_interface::StateInterface>
-ApplyCurrentLimitController::on_export_state_interfaces()
+/*std::vector<hardware_interface::StateInterface>
+CurrentLimitController::on_export_state_interfaces()
 {
   RCLCPP_INFO( this->get_node()->get_logger(), "State interfaces" );
   std::vector<hardware_interface::StateInterface> states;
@@ -179,10 +106,10 @@ ApplyCurrentLimitController::on_export_state_interfaces()
                          &state_interfaces_values_[i] );
   }
   return states;
-}
+}*/
 
 controller_interface::CallbackReturn
-ApplyCurrentLimitController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
+CurrentLimitController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   enable_compliant_limits_srv_ = get_node()->create_service<std_srvs::srv::SetBool>(
       "enable_compliance", [this]( std_srvs::srv::SetBool::Request::SharedPtr req,
@@ -197,7 +124,7 @@ ApplyCurrentLimitController::on_configure( const rclcpp_lifecycle::State & /*pre
 }
 
 controller_interface::CallbackReturn
-ApplyCurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
+CurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   RCLCPP_INFO( this->get_node()->get_logger(), "Start activation" );
   /*try {
@@ -234,33 +161,29 @@ ApplyCurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*prev
   */
 
   // reset command buffer if a command came through callback when controller was inactive
-  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
-  std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
-             std::numeric_limits<double>::quiet_NaN() );
+  // rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
+  // std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
+  //           std::numeric_limits<double>::quiet_NaN() );
 
   RCLCPP_INFO( this->get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn
-ApplyCurrentLimitController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
+CurrentLimitController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   // reset command buffer
-  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
+  // rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::return_type
-ApplyCurrentLimitController::update_and_write_commands( const rclcpp::Time & /*time*/,
-                                                        const rclcpp::Duration & /*period*/ )
+CurrentLimitController::update( const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
 {
-  // If we are following another controller, we do not write to HW.
-  if ( chained_mode_ )
-    return controller_interface::return_type::OK;
 
   RCLCPP_INFO( this->get_node()->get_logger(), "Run update cycle" );
 
-  // Get ordered views every cycle to avoid relying on any internal ordering.
+  /*// Get ordered views every cycle to avoid relying on any internal ordering.
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> pos_cmd;
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> cur_cmd;
   if ( !controller_interface::get_ordered_interfaces( command_interfaces_, joints_, "position",
@@ -274,22 +197,21 @@ ApplyCurrentLimitController::update_and_write_commands( const rclcpp::Time & /*t
 
   const auto &limits = compliance_enabled_ ? compliant_limits_ : stiff_limits_;
   if ( limits.size() != joints_.size() )
-    return controller_interface::return_type::ERROR;
+    return controller_interface::return_type::ERROR;*/
 
-  bool ok = true;
+  const std::vector<double> &limits_to_apply =
+      compliance_enabled_ ? compliant_limits_ : stiff_limits_;
+
+  bool success = true;
   for ( size_t i = 0; i < joints_.size(); ++i ) {
-    if ( std::isnan( reference_interfaces_[i] ) )
-      continue;
-
-    ok &= pos_cmd[i].get().set_value( reference_interfaces_[i] );
-    ok &= cur_cmd[i].get().set_value( limits[i] );
+    success = success && command_interfaces_[i].set_value( limits_to_apply[i] );
   }
 
-  return ok ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+  return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
 }
 
-} // namespace apply_current_limit_controller
+} // namespace current_limit_controller
 
 #include "pluginlib/class_list_macros.hpp"
-PLUGINLIB_EXPORT_CLASS( apply_current_limit_controller::ApplyCurrentLimitController,
-                        controller_interface::ChainableControllerInterface )
+PLUGINLIB_EXPORT_CLASS( current_limit_controller::CurrentLimitController,
+                        controller_interface::ControllerInterface )
