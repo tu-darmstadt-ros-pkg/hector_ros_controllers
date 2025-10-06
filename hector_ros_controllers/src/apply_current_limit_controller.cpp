@@ -157,6 +157,7 @@ controller_interface::return_type ApplyCurrentLimitController::update_reference_
 std::vector<hardware_interface::CommandInterface>
 ApplyCurrentLimitController::on_export_reference_interfaces()
 {
+  RCLCPP_INFO( this->get_node()->get_logger(), "Export ref interfaces" );
   std::vector<hardware_interface::CommandInterface> refs;
   refs.reserve( reference_interface_names_.size() );
   for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
@@ -169,6 +170,7 @@ ApplyCurrentLimitController::on_export_reference_interfaces()
 std::vector<hardware_interface::StateInterface>
 ApplyCurrentLimitController::on_export_state_interfaces()
 {
+  RCLCPP_INFO( this->get_node()->get_logger(), "State interfaces" );
   std::vector<hardware_interface::StateInterface> states;
   states.reserve( exported_state_interface_names_.size() );
   for ( size_t i = 0; i < exported_state_interface_names_.size(); ++i ) {
@@ -196,7 +198,8 @@ ApplyCurrentLimitController::on_configure( const rclcpp_lifecycle::State & /*pre
 controller_interface::CallbackReturn
 ApplyCurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
-  try {
+  RCLCPP_INFO( this->get_node()->get_logger(), "Start activation" );
+  /*try {
     // Validate we have exactly one interface per (joint,type); use ordered views for checks
     for ( const std::string &type : command_interface_types_ ) {
       std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_cmd;
@@ -221,13 +224,13 @@ ApplyCurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*prev
         return controller_interface::CallbackReturn::ERROR;
       }
     }
-    /* code */
     RCLCPP_INFO( this->get_node()->get_logger(), "Sanity checks completed" );
   }
 
   catch ( const std::exception &e ) {
     std::cerr << e.what() << '\n';
   }
+  */
 
   // reset command buffer if a command came through callback when controller was inactive
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
