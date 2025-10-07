@@ -36,8 +36,6 @@ controller_interface::CallbackReturn CurrentLimitController::read_parameters()
 
   joints_ = params_.joints;
 
-  // Define types we want
-
   command_interface_names_.reserve( joints_.size() );
 
   for ( const auto &jn : joints_ ) {
@@ -49,10 +47,6 @@ controller_interface::CallbackReturn CurrentLimitController::read_parameters()
   }
 
   command_interface_names_.shrink_to_fit();
-
-  std::string cmd_interfaces = "";
-  for ( auto const &entry : command_interface_names_ ) { cmd_interfaces += "|" + entry; }
-  RCLCPP_INFO( get_node()->get_logger(), "Claim cmd interfaces : %s", cmd_interfaces.c_str() );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -76,38 +70,6 @@ controller_interface::InterfaceConfiguration CurrentLimitController::state_inter
   return state_interfaces_config;
 }
 
-/*controller_interface::return_type CurrentLimitController::update_reference_from_subscribers(
-    const rclcpp::Time & /*time*///, const rclcpp::Duration & /*period*/ )
-/**{
-
-  auto joint_commands = rt_buffer_ptr_.readFromRT();
-  if ( !( !joint_commands || !( *joint_commands ) ) ) {
-    if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
-      RCLCPP_ERROR_THROTTLE(
-          get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
-          "command size (%zu) does not match number of reference interfaces (%zu)",
-          ( *joint_commands )->data.size(), reference_interfaces_.size() );
-      return controller_interface::return_type::ERROR;
-    }
-    reference_interfaces_ = ( *joint_commands )->data;
-  }
-
-  return controller_interface::return_type::OK;
-}*/
-
-/*std::vector<hardware_interface::StateInterface>
-CurrentLimitController::on_export_state_interfaces()
-{
-  RCLCPP_INFO( this->get_node()->get_logger(), "State interfaces" );
-  std::vector<hardware_interface::StateInterface> states;
-  states.reserve( exported_state_interface_names_.size() );
-  for ( size_t i = 0; i < exported_state_interface_names_.size(); ++i ) {
-    states.emplace_back( get_node()->get_name(), exported_state_interface_names_[i],
-                         &state_interfaces_values_[i] );
-  }
-  return states;
-}*/
-
 controller_interface::CallbackReturn
 CurrentLimitController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
@@ -126,45 +88,6 @@ CurrentLimitController::on_configure( const rclcpp_lifecycle::State & /*previous
 controller_interface::CallbackReturn
 CurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
-  RCLCPP_INFO( this->get_node()->get_logger(), "Start activation" );
-  /*try {
-    // Validate we have exactly one interface per (joint,type); use ordered views for checks
-    for ( const std::string &type : command_interface_types_ ) {
-      std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_cmd;
-      const bool ok = controller_interface::get_ordered_interfaces( command_interfaces_, joints_,
-                                                                    type, ordered_cmd );
-      if ( !ok || ordered_cmd.size() != joints_.size() ) {
-        RCLCPP_ERROR( this->get_node()->get_logger(),
-                      "Expected %zu command interfaces for type '%s', got %zu", joints_.size(),
-                      type.c_str(), ordered_cmd.size() );
-        return controller_interface::CallbackReturn::ERROR;
-      }
-    }
-
-    for ( const std::string &type : state_interface_types_ ) {
-      std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>> ordered_state;
-      const bool ok = controller_interface::get_ordered_interfaces( state_interfaces_, joints_,
-                                                                    type, ordered_state );
-      if ( !ok || ordered_state.size() != joints_.size() ) {
-        RCLCPP_ERROR( this->get_node()->get_logger(),
-                      "Expected %zu state interfaces for type '%s', got %zu", joints_.size(),
-                      type.c_str(), ordered_state.size() );
-        return controller_interface::CallbackReturn::ERROR;
-      }
-    }
-    RCLCPP_INFO( this->get_node()->get_logger(), "Sanity checks completed" );
-  }
-
-  catch ( const std::exception &e ) {
-    std::cerr << e.what() << '\n';
-  }
-  */
-
-  // reset command buffer if a command came through callback when controller was inactive
-  // rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
-  // std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
-  //           std::numeric_limits<double>::quiet_NaN() );
-
   RCLCPP_INFO( this->get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -172,33 +95,12 @@ CurrentLimitController::on_activate( const rclcpp_lifecycle::State & /*previous_
 controller_interface::CallbackReturn
 CurrentLimitController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
-  // reset command buffer
-  // rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::return_type
 CurrentLimitController::update( const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
 {
-
-  RCLCPP_INFO( this->get_node()->get_logger(), "Run update cycle" );
-
-  /*// Get ordered views every cycle to avoid relying on any internal ordering.
-  std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> pos_cmd;
-  std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> cur_cmd;
-  if ( !controller_interface::get_ordered_interfaces( command_interfaces_, joints_, "position",
-                                                      pos_cmd ) ||
-       pos_cmd.size() != joints_.size() )
-    return controller_interface::return_type::ERROR;
-  if ( !controller_interface::get_ordered_interfaces( command_interfaces_, joints_, "current",
-                                                      cur_cmd ) ||
-       cur_cmd.size() != joints_.size() )
-    return controller_interface::return_type::ERROR;
-
-  const auto &limits = compliance_enabled_ ? compliant_limits_ : stiff_limits_;
-  if ( limits.size() != joints_.size() )
-    return controller_interface::return_type::ERROR;*/
-
   const std::vector<double> &limits_to_apply =
       compliance_enabled_ ? compliant_limits_ : stiff_limits_;
 
