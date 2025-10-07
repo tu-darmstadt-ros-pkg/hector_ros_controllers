@@ -111,7 +111,7 @@ CurrentLimitController::update( const rclcpp::Time & /*time*/, const rclcpp::Dur
 
   bool success = true;
   for ( size_t i = 0; i < joints_.size(); ++i ) {
-    success = success && command_interfaces_[i].set_value( limits_to_apply[i] );
+    success &= command_interfaces_[i].set_value( limits_to_apply[i] );
   }
 
   return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
