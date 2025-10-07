@@ -52,14 +52,10 @@ protected:
 
   std::vector<std::string> joints_;
   std::vector<std::string> command_interface_names_;
-  // std::vector<std::string> state_interface_types_;
-  // std::string interface_type_;
 
   std::vector<double> compliant_limits_;
   std::vector<double> stiff_limits_;
   std::atomic<bool> compliance_enabled_;
-
-  // realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;
 
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enable_compliant_limits_srv_;
   std::shared_ptr<ParamListener> param_listener_;
@@ -67,5 +63,4 @@ protected:
 };
 
 } // namespace current_limit_controller
-
 #endif
