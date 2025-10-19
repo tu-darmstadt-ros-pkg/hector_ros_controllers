@@ -68,9 +68,11 @@ target_include_directories(
 
 target_link_libraries(
   controllers
-  PUBLIC fcl velocity_to_position_command_controller_parameters
+  PUBLIC fcl
+         velocity_to_position_command_controller_parameters
          self_collision_avoidance_controller_parameters
-         safety_forward_controller_parameters)
+         safety_forward_controller_parameters
+         safety_position_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
