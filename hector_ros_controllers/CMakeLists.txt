@@ -48,6 +48,8 @@ generate_parameter_library(
 generate_parameter_library(safety_forward_controller_parameters
                            params/safety_forward_controller_parameters.yaml)
 
+generate_parameter_library(safety_position_controller_parameters
+                           params/safety_position_controller_parameters.yaml)
 # Add controllers here Define Controllers as Shared Libraries
 
 add_library(
@@ -55,7 +57,8 @@ add_library(
   src/velocity_to_position_controllers_base.cpp
   src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
-  src/self_collision_avoidance_controller.cpp)
+  src/self_collision_avoidance_controller.cpp
+  src/safety_position_controller.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
 
@@ -82,9 +85,11 @@ pluginlib_export_plugin_description_file(controller_interface
 
 install(DIRECTORY include/ DESTINATION include/)
 install(
-  TARGETS controllers velocity_to_position_command_controller_parameters
+  TARGETS controllers
+          velocity_to_position_command_controller_parameters
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters
+          safety_position_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
