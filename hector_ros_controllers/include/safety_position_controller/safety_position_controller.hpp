@@ -1,6 +1,8 @@
 #pragma once
 
 #include <controller_interface/chainable_controller_interface.hpp>
+#include <safety_position_controller/collision_checker.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 #include <urdf_model/joint.h>
 
@@ -42,6 +44,7 @@ private:
   double clamp( size_t i, double value ) const;
   bool parse_urdf_and_fill_joint_info( const std::string &urdf_xml );
   bool gather_interface_indices();
+  bool wait_for_srdf();
 
   // ---- Variables ----
   bool is_chained_ = true;
@@ -55,14 +58,22 @@ private:
   std::vector<bool> has_limits_;
   std::vector<double> lower_limits_;
   std::vector<double> upper_limits_;
+  std::vector<double> cmd_positions_;
+  std::vector<double> current_positions_;
 
   // Params
   std::shared_ptr<ParamListener> param_listener_;
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
   Params params_;
 
+  // ---- Collision checker ----
+  std::unique_ptr<CollisionChecker> collision_checker_;
+  std::string srdf_;
+  bool srdf_received_ = false;
+
   // ros communication
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enforce_current_limits_service_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr semantic_description_sub_;
 };
 
 } // namespace safety_position_controller

@@ -15,6 +15,16 @@ safety_position_controller:
     default_value: true
     description: "If true, position commands are clamped to joint limits ±epsilon according to the URDF limits."
 
+  check_self_collisions:
+    type: bool
+    default_value: false
+    description: "If true, the controller checks for potential self-collisions at the target pose before applying position commands."
+
+  debug_visualize_collisions:
+    type: bool
+    default_value: false
+    description: "If true, the controller publishes visualization markers for potential self-collisions to help with debugging."
+
   set_current_limits:
     type: bool
     default_value: false

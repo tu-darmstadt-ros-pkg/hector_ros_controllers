@@ -24,6 +24,8 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     generate_parameter_library
     hardware_interface
     pluginlib
+    hpp-fcl
+    pinocchio
     rclcpp
     rclcpp_lifecycle
     realtime_tools
@@ -36,6 +38,8 @@ foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${dependency} REQUIRED)
 endforeach()
 
+set(DEFS PINOCCHIO_WITH_HPP_FCL PINOCCHIO_URDFDOM_TYPEDEF_SHARED_PTR
+         PINOCCHIO_URDFDOM_USE_STD_SHARED_PTR)
 # Add parameter_libraries here
 
 generate_parameter_library(
@@ -59,7 +63,8 @@ add_library(
   src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
   src/self_collision_avoidance_controller.cpp
-  src/safety_position_controller.cpp)
+  src/safety_position_controller.cpp
+  src/collision_checker.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
 
@@ -78,10 +83,7 @@ target_link_libraries(
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
-# Causes the visibility macros to use dllexport rather than dllimport, which is
-# appropriate when building the dll but not consuming it.
-target_compile_definitions(
-  controllers PRIVATE "VELOCITY_TO_POSITION_COMMAND_CONTROLLER_BUILDING_DLL")
+target_compile_definitions(controllers PUBLIC ${DEFS})
 
 pluginlib_export_plugin_description_file(controller_interface
                                          hector_ros_controller_plugin.xml)
