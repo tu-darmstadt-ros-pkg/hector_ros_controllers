@@ -3,21 +3,7 @@ safety_position_controller:
     type: string_array
     default_value: [ ]
     description: "Names of the joints to control. Must match the joints defined in the robot URDF."
-
-  command_interface:
-    type: string
-    default_value: "position"
-    description: "Command interface name used for forwarding commands (typically 'position')."
-
-  state_interface:
-    type: string
-    default_value: "position"
-    description: "State interface name used to read current joint positions."
-
-  robot_description:
-    type: string
-    default_value: "robot_description"
-    description: "Name of the ROS parameter containing the URDF XML string used to extract joint limits and types."
+    read_only: true
 
   unwrap_continuous_joints:
     type: bool
@@ -28,3 +14,20 @@ safety_position_controller:
     type: bool
     default_value: true
     description: "If true, position commands are clamped to joint limits ±epsilon according to the URDF limits."
+
+  set_current_limits:
+    type: bool
+    default_value: false
+    description: "If true, the controller additionally sets current limits see compliant and stiff limits"
+    read_only: true
+
+  current_limits:
+    __map_joints:
+      compliant_limit:
+        type: double
+        description: "Current limits for each joint in the group in Ampere. 'set_current_limits' must be true."
+        default_value: 3.0
+      stiff_limit:
+        type: double
+        default_value: 5.0
+        description: "Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off."
