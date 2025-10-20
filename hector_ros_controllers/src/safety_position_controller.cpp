@@ -109,6 +109,12 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
                   "Failed to gather state interface indices for joints." );
     return controller_interface::CallbackReturn::ERROR;
   }
+  param_listener_->try_update_params( params_ );
+  params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
+  for ( size_t n = 0; n < params_.joints.size(); ++n ) {
+    max_allowed_distance_per_cycle_[n] =
+        velocity_limits_[n] * 1 / get_update_rate() * params_.block_velocity_scaling;
+  }
 
   // check order of command interfaces
   // TODO: if this fails use command interface reordering function or indexing as for state interfaces
@@ -239,6 +245,26 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     }
   }
 
+  if ( params_.block_if_too_far ) {
+    // check if any joint is too far from the command
+    for ( size_t i = 0; i < n; ++i ) {
+      const double target_distance = std::abs( cmd_positions_[i] - current_positions_[i] );
+      if ( !isnan( velocity_limits_[i] ) ) {
+        if ( target_distance > max_allowed_distance_per_cycle_[i] ) {
+          RCLCPP_WARN_THROTTLE(
+              get_node()->get_logger(), *get_node()->get_clock(), 1000,
+              "Joint '%s' is too far from command (target_distance=%.3f > allowed=%.3f). "
+              "Reducing Target Position.",
+              params_.joints[i].c_str(), target_distance, max_allowed_distance_per_cycle_[i] );
+          // set command to current position to hold
+          cmd_positions_[i] = current_positions_[i] +
+                              ( ( cmd_positions_[i] > current_positions_[i] ) ? 1.0 : -1.0 ) *
+                                  max_allowed_distance_per_cycle_[i];
+        }
+      }
+    }
+  }
+
   // check collisions with the new commands
   if ( !params_.check_self_collisions || !collision_checker_ ) {
     for ( size_t i = 0; i < n; ++i ) {
@@ -263,6 +289,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
         if ( !std::isnan( current_positions_[i] ) )
           success &= command_interfaces_[i].set_value( current_positions_[i] );
       }
+      // success = false; // make sure parent controllers are unloaded
     }
   }
 
@@ -312,6 +339,8 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
   has_limits_.assign( n, false );
   lower_limits_.assign( n, 0.0 );
   upper_limits_.assign( n, 0.0 );
+  velocity_limits_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  max_allowed_distance_per_cycle_.assign( n, 0.0 );
 
   for ( size_t i = 0; i < n; ++i ) {
     const auto jn = params_.joints[i];
@@ -322,6 +351,7 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
     switch ( urdf_joint->type ) {
     case urdf::Joint::CONTINUOUS:
       kinds_[i] = JointType::CONTINUOUS;
+      velocity_limits_[i] = urdf_joint->limits->velocity;
       break;
     case urdf::Joint::REVOLUTE:
       kinds_[i] = JointType::REVOLUTE_BOUNDED;
@@ -329,6 +359,7 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
         has_limits_[i] = true;
         lower_limits_[i] = urdf_joint->limits->lower;
         upper_limits_[i] = urdf_joint->limits->upper;
+        velocity_limits_[i] = urdf_joint->limits->velocity;
       }
       break;
     case urdf::Joint::PRISMATIC:
@@ -337,6 +368,7 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
         has_limits_[i] = true;
         lower_limits_[i] = urdf_joint->limits->lower;
         upper_limits_[i] = urdf_joint->limits->upper;
+        velocity_limits_[i] = urdf_joint->limits->velocity;
       }
       break;
     case urdf::Joint::FIXED:
