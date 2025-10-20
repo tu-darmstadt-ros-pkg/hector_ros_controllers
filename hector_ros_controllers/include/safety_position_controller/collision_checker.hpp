@@ -33,8 +33,7 @@ public:
   std::vector<std::string> getJointNames() const;
 
   /// Check collision using joint names + joint positions (rad)
-  bool checkCollision( const std::vector<std::string> &joint_names,
-                       const std::vector<double> &joint_positions );
+  bool checkCollision( const std::unordered_map<std::string, double> &joint_positions );
 
   /// Check collision for a given q vector
   bool checkCollisionQ( const Eigen::VectorXd &q );

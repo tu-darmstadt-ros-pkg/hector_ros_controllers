@@ -128,38 +128,33 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
 std::vector<std::string> CollisionChecker::getJointNames() const
 {
   std::vector<std::string> out;
-  out.reserve( model_.joints.size() ? model_.joints.size() - 1 : 0 );
+  out.reserve( !model_.joints.empty() ? model_.joints.size() - 1 : 0 );
   for ( pinocchio::JointIndex jid = 1; jid < model_.joints.size(); ++jid )
     out.push_back( model_.names[jid] );
   return out;
 }
 
-bool CollisionChecker::checkCollision( const std::vector<std::string> &joint_names,
-                                       const std::vector<double> &joint_positions )
+bool CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
 {
-  if ( joint_names.size() != joint_positions.size() ) {
-    RCLCPP_ERROR( node_->get_logger(), "joint_names (%zu) != joint_positions (%zu)",
-                  joint_names.size(), joint_positions.size() );
-    return true;
-  }
+
   if ( model_.nq == 0 ) {
     RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
     return true;
   }
 
   Eigen::VectorXd q = q_default_;
-  for ( size_t i = 0; i < joint_names.size(); ++i ) {
-    const auto it = name_to_id_.find( joint_names[i] );
+  for ( const auto &[name, position] : joint_positions ) {
+    const auto it = name_to_id_.find( name );
     if ( it == name_to_id_.end() ) {
       RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
-                            "Unknown joint '%s' (ignored).", joint_names[i].c_str() );
+                            "Unknown joint '%s' (ignored).", name.c_str() );
       continue;
     }
     const pinocchio::JointIndex jid = it->second;
     const int nq_j = model_.joints[jid].nq();
     const int nv_j = model_.joints[jid].nv();
     const int iq = model_.idx_qs[jid];
-    const double alpha = joint_positions[i];
+    const double alpha = position;
 
     if ( nq_j == 1 ) {
       q[iq] = alpha;

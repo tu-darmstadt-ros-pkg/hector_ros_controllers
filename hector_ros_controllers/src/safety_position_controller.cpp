@@ -50,6 +50,11 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     collision_checker_ =
         std::make_unique<CollisionChecker>( node, params_.debug_visualize_collisions );
 
+  if ( !parse_urdf_and_fill_joint_info( this->get_robot_description() ) ) {
+    RCLCPP_ERROR( node->get_logger(), "Failed to parse URDF / joint limits." );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
   if ( params_.set_current_limits ) {
     enforce_current_limits_service_ = node->create_service<std_srvs::srv::SetBool>(
         "~/enforce_current_limits",
@@ -76,10 +81,6 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  if ( !parse_urdf_and_fill_joint_info( this->get_robot_description() ) ) {
-    RCLCPP_ERROR( node->get_logger(), "Failed to parse URDF / joint limits." );
-    return controller_interface::CallbackReturn::ERROR;
-  }
   if ( !wait_for_srdf() )
     return controller_interface::CallbackReturn::ERROR;
   collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints, false );
@@ -150,7 +151,7 @@ SafetyPositionController::state_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration conf;
   conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  for ( const auto &j : params_.joints ) conf.names.emplace_back( j + "/position" );
+  for ( const auto &j : all_joint_names_ ) conf.names.emplace_back( j + "/position" );
   return conf;
 }
 
@@ -239,19 +240,29 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
   }
 
   // check collisions with the new commands
-  if ( !params_.check_self_collisions || !collision_checker_ ||
-       !collision_checker_->checkCollision( params_.joints, cmd_positions_ ) ) {
-    // write commands if no collision detected
+  if ( !params_.check_self_collisions || !collision_checker_ ) {
     for ( size_t i = 0; i < n; ++i ) {
       success &= command_interfaces_[i].set_value( cmd_positions_[i] );
     }
   } else {
-    // write current positions to hold position in case of collision
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
-                          "Collision detected! Holding current positions." );
-    for ( size_t i = 0; i < n; ++i ) {
-      if ( !std::isnan( current_positions_[i] ) )
-        success &= command_interfaces_[i].set_value( current_positions_[i] );
+    // prepare collision checker input
+    for ( size_t i = 0; i < all_joint_names_.size(); i++ ) {
+      cc_positions_[all_joint_names_[i]] = state_interfaces_[i].get_value();
+    }
+    for ( size_t i = 0; i < n; i++ ) { cc_positions_[params_.joints[i]] = cmd_positions_[i]; }
+    if ( !collision_checker_->checkCollision( cc_positions_ ) ) {
+      // write commands if no collision detected
+      for ( size_t i = 0; i < n; ++i ) {
+        success &= command_interfaces_[i].set_value( cmd_positions_[i] );
+      }
+    } else {
+      // write current positions to hold position in case of collision
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                            "Collision detected! Holding current positions." );
+      for ( size_t i = 0; i < n; ++i ) {
+        if ( !std::isnan( current_positions_[i] ) )
+          success &= command_interfaces_[i].set_value( current_positions_[i] );
+      }
     }
   }
 
@@ -291,6 +302,10 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
   const auto model = urdf::parseURDF( urdf_xml );
   if ( !model )
     return false;
+  for ( const auto &[name, joint] : model->joints_ ) {
+    if ( joint->type != urdf::Joint::FIXED )
+      all_joint_names_.push_back( name );
+  }
 
   const size_t n = params_.joints.size();
   kinds_.assign( n, JointType::OTHER );
