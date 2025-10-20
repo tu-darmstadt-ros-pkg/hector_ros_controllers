@@ -1,24 +1,30 @@
 safety_position_controller:
   joints:
-    { type: string_array, default_value: [ ],
-      description: "Names of the joints to control. Must match the joints defined in the robot URDF." }
+    type: string_array
+    default_value: [ ]
+    description: "Names of the joints to control. Must match the joints defined in the robot URDF."
 
   command_interface:
-    { type: string, default_value: "position",
-      description: "Command interface name used for forwarding commands (typically 'position')." }
+    type: string
+    default_value: "position"
+    description: "Command interface name used for forwarding commands (typically 'position')."
 
   state_interface:
-    { type: string, default_value: "position",
-      description: "State interface name used to read current joint positions." }
+    type: string
+    default_value: "position"
+    description: "State interface name used to read current joint positions."
 
   robot_description:
-    { type: string, default_value: "robot_description",
-      description: "Name of the ROS parameter containing the URDF XML string used to extract joint limits and types." }
+    type: string
+    default_value: "robot_description"
+    description: "Name of the ROS parameter containing the URDF XML string used to extract joint limits and types."
 
   unwrap_continuous_joints:
-    { type: bool, default_value: true,
-      description: "If true, continuous joints are unwrapped to maintain continuity between consecutive commands." }
+    type: bool
+    default_value: true
+    description: "If true, continuous joints are unwrapped to maintain continuity between consecutive commands."
 
   enforce_position_limits:
-    { type: bool, default_value: true,
-      description: "If true, position commands are clamped to joint limits ±epsilon according to the URDF limits." }
+    type: bool
+    default_value: true
+    description: "If true, position commands are clamped to joint limits ±epsilon according to the URDF limits."
