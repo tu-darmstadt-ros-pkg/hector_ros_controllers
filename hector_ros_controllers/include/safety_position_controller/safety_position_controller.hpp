@@ -38,7 +38,7 @@ private:
   enum class JointType { CONTINUOUS, REVOLUTE_BOUNDED, PRISMATIC_BOUNDED, FIXED, OTHER };
 
   // Internal helpers
-  double unwrap_to_nearest( double current, double target );
+  static double unwrap_to_nearest( double current, double target );
   double clamp( size_t i, double value ) const;
   bool parse_urdf_and_fill_joint_info( const std::string &urdf_xml );
   bool gather_interface_indices();
