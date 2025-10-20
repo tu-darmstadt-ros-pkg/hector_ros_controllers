@@ -4,6 +4,7 @@
 #include <hardware_interface/loaned_state_interface.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <srdfdom/model.h>
 #include <urdf_parser/urdf_parser.h>
 
 namespace safety_position_controller
@@ -37,6 +38,17 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
                  e.what() );
     return controller_interface::CallbackReturn::ERROR;
   }
+  auto qos = rclcpp::QoS( 10 );
+  qos.transient_local();
+  semantic_description_sub_ = get_node()->create_subscription<std_msgs::msg::String>(
+      "robot_description_semantic", qos, [this]( const std_msgs::msg::String::SharedPtr msg ) {
+        srdf_ = msg->data;
+        srdf_received_ = true;
+      } );
+
+  if ( params_.check_self_collisions )
+    collision_checker_ =
+        std::make_unique<CollisionChecker>( node, params_.debug_visualize_collisions );
 
   if ( params_.set_current_limits ) {
     enforce_current_limits_service_ = node->create_service<std_srvs::srv::SetBool>(
@@ -68,10 +80,15 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
     RCLCPP_ERROR( node->get_logger(), "Failed to parse URDF / joint limits." );
     return controller_interface::CallbackReturn::ERROR;
   }
+  if ( !wait_for_srdf() )
+    return controller_interface::CallbackReturn::ERROR;
+  collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints, false );
 
   const size_t n = params_.joints.size();
   reference_interfaces_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   state_interface_index_.assign( n, -1 );
+  cmd_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -84,17 +101,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
         get_node()->get_logger(),
         "SafetyPositionController is CHAINED-ONLY. Enable chained_mode for this controller." );
     return controller_interface::CallbackReturn::SUCCESS;
-  }
-
-  const auto joints = params_.joints;
-  if ( param_listener_->try_update_params( params_ ) ) {
-    // make sure joints didn't change
-    if ( joints != params_.joints ) {
-      RCLCPP_ERROR(
-          get_node()->get_logger(),
-          "Joints parameter changed during runtime reconfiguration. This is not supported." );
-      return controller_interface::CallbackReturn::ERROR;
-    }
   }
 
   if ( !gather_interface_indices() ) {
@@ -182,11 +188,10 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
   const size_t n = params_.joints.size();
 
   for ( size_t i = 0; i < n; ++i ) {
-    double current;
     const auto &opt =
         state_interfaces_[static_cast<size_t>( state_interface_index_[i] )].get_optional();
     if ( opt.has_value() ) {
-      current = opt.value();
+      current_positions_[i] = opt.value();
     } else {
       RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
                              "Cannot get joint state for joint '%s'", params_.joints[i].c_str() );
@@ -202,10 +207,10 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     switch ( kinds_[i] ) {
     case JointType::CONTINUOUS:
       if ( params_.unwrap_continuous_joints )
-        commanded = unwrap_to_nearest( current, target_wrapped );
+        commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
       break;
     case JointType::REVOLUTE_BOUNDED:
-      commanded = unwrap_to_nearest( current, target_wrapped );
+      commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
       if ( params_.enforce_position_limits )
         commanded = clamp( i, commanded );
       break;
@@ -221,7 +226,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       break;
     }
 
-    success &= command_interfaces_[i].set_value( commanded );
+    cmd_positions_[i] = commanded;
 
     // set current limit if enabled and command interfaces are requested
     if ( params_.set_current_limits && command_interfaces_.size() > params_.joints.size() ) {
@@ -230,6 +235,23 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
                               ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
                               : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
       success &= command_interfaces_[i + params_.joints.size()].set_value( limit );
+    }
+  }
+
+  // check collisions with the new commands
+  if ( !params_.check_self_collisions || !collision_checker_ ||
+       !collision_checker_->checkCollision( params_.joints, cmd_positions_ ) ) {
+    // write commands if no collision detected
+    for ( size_t i = 0; i < n; ++i ) {
+      success &= command_interfaces_[i].set_value( cmd_positions_[i] );
+    }
+  } else {
+    // write current positions to hold position in case of collision
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                          "Collision detected! Holding current positions." );
+    for ( size_t i = 0; i < n; ++i ) {
+      if ( !std::isnan( current_positions_[i] ) )
+        success &= command_interfaces_[i].set_value( current_positions_[i] );
     }
   }
 
@@ -340,6 +362,22 @@ bool SafetyPositionController::gather_interface_indices()
     success &= ( state_interface_index_[i] >= 0 );
   }
   return success;
+}
+bool SafetyPositionController::wait_for_srdf()
+{
+  // wait for the semantic description message to be received
+  rclcpp::Rate rate( 3 );
+  int attempt = 0;
+  int max_attempts = 50;
+  while ( !srdf_received_ ) {
+    rate.sleep();
+    attempt++;
+    if ( attempt % 10 == 0 )
+      RCLCPP_INFO( get_node()->get_logger(), "Waiting for semantic robot description on topic " );
+    if ( attempt > max_attempts )
+      return false;
+  }
+  return true;
 }
 
 } // namespace safety_position_controller
