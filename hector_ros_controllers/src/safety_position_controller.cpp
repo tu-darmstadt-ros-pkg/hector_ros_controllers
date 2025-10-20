@@ -40,7 +40,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
 
   if ( params_.set_current_limits ) {
     enforce_current_limits_service_ = node->create_service<std_srvs::srv::SetBool>(
-        "enforce_current_limits",
+        "~/enforce_current_limits",
         [this]( const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                 std::shared_ptr<std_srvs::srv::SetBool::Response> response ) {
           in_compliant_mode_ = request->data;
@@ -225,6 +225,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 
     // set current limit if enabled and command interfaces are requested
     if ( params_.set_current_limits && command_interfaces_.size() > params_.joints.size() ) {
+
       const auto &limit = in_compliant_mode_
                               ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
                               : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
