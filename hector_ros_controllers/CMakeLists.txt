@@ -28,6 +28,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     rclcpp_lifecycle
     realtime_tools
     std_msgs
+    std_srvs
     fcl
     ad_kinematics)
 

@@ -14,7 +14,7 @@ SafetyPositionController::SafetyPositionController()
 {
 }
 
-bool SafetyPositionController::on_set_chained_mode( bool chained_mode )
+bool SafetyPositionController::on_set_chained_mode( const bool chained_mode )
 {
   is_chained_ = chained_mode;
   return true;
@@ -36,6 +36,19 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     RCLCPP_WARN( get_node()->get_logger(), "Exception thrown during init stage with message: %s \n",
                  e.what() );
     return controller_interface::CallbackReturn::ERROR;
+  }
+
+  if ( params_.set_current_limits ) {
+    enforce_current_limits_service_ = node->create_service<std_srvs::srv::SetBool>(
+        "enforce_current_limits",
+        [this]( const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+                std::shared_ptr<std_srvs::srv::SetBool::Response> response ) {
+          in_compliant_mode_ = request->data;
+          response->success = true;
+          response->message = std::string( "Set enforce_current_limits to " ) +
+                              ( in_compliant_mode_ ? "true" : "false" );
+          RCLCPP_INFO( get_node()->get_logger(), "%s", response->message.c_str() );
+        } );
   }
 
   return controller_interface::CallbackReturn::SUCCESS;
@@ -90,6 +103,21 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  // check order of command interfaces
+  // TODO: if this fails use command interface reordering function or indexing as for state interfaces
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    if ( command_interfaces_[i].get_name() != params_.joints[i] + "/position" ) {
+      RCLCPP_ERROR( get_node()->get_logger(), "Command interfaces are not in the expected order." );
+      return controller_interface::CallbackReturn::ERROR;
+    }
+    if ( params_.set_current_limits && command_interfaces_[i + params_.joints.size()].get_name() !=
+                                           params_.joints[i] + "/current" ) {
+      RCLCPP_ERROR( get_node()->get_logger(),
+                    "Current limit command interfaces are not in the expected order." );
+      return controller_interface::CallbackReturn::ERROR;
+    }
+  }
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -105,6 +133,9 @@ SafetyPositionController::command_interface_configuration() const
   controller_interface::InterfaceConfiguration conf;
   conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
   for ( const auto &j : params_.joints ) conf.names.emplace_back( j + "/position" );
+  if ( params_.set_current_limits ) {
+    for ( const auto &j : params_.joints ) conf.names.emplace_back( j + "/current" );
+  }
   return conf;
 }
 
@@ -191,6 +222,14 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     }
 
     success &= command_interfaces_[i].set_value( commanded );
+
+    // set current limit if enabled and command interfaces are requested
+    if ( params_.set_current_limits && command_interfaces_.size() > params_.joints.size() ) {
+      const auto &limit = in_compliant_mode_
+                              ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
+                              : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
+      success &= command_interfaces_[i + params_.joints.size()].set_value( limit );
+    }
   }
 
   return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
@@ -198,7 +237,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 
 // ===== Helpers =====
 
-double SafetyPositionController::unwrap_to_nearest( double current, double target )
+double SafetyPositionController::unwrap_to_nearest( const double current, const double target )
 {
   const double k = std::round( ( current - target ) / ( 2.0 * M_PI ) );
   return target + k * ( 2.0 * M_PI );
@@ -288,9 +327,6 @@ bool SafetyPositionController::gather_interface_indices()
     for ( size_t s = 0; s < state_interfaces_.size(); ++s ) {
       auto name = state_interfaces_[s].get_name();
       auto interface_name = state_interfaces_[s].get_interface_name();
-      RCLCPP_INFO_STREAM( get_node()->get_logger(),
-                          "Available state interface: " << name << ", interface_name"
-                                                        << interface_name );
       if ( state_interfaces_[s].get_name() == params_.joints[i] + "/position" &&
            state_interfaces_[s].get_interface_name() == "position" ) {
         state_interface_index_[i] = static_cast<int>( s );
