@@ -28,10 +28,15 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  node->declare_parameter<std::vector<std::string>>( "joints", std::vector<std::string>() );
-  node->declare_parameter<std::string>( "robot_description", robot_description_param_ );
-  node->declare_parameter<bool>( "unwrap_continuous_joints", unwrap_continuous_ );
-  node->declare_parameter<bool>( "enforce_position_limits", enforce_limits_ );
+  try {
+    param_listener_ = std::make_shared<ParamListener>( get_node() );
+    params_ = param_listener_->get_params();
+
+  } catch ( const std::exception &e ) {
+    RCLCPP_WARN( get_node()->get_logger(), "Exception thrown during init stage with message: %s \n",
+                 e.what() );
+    return controller_interface::CallbackReturn::ERROR;
+  }
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -41,32 +46,17 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 {
   const auto node = get_node();
 
-  joint_names_ = node->get_parameter( "joints" ).as_string_array();
-  robot_description_param_ = node->get_parameter( "robot_description" ).as_string();
-  unwrap_continuous_ = node->get_parameter( "unwrap_continuous_joints" ).as_bool();
-  enforce_limits_ = node->get_parameter( "enforce_position_limits" ).as_bool();
-
-  if ( joint_names_.empty() ) {
+  if ( params_.joints.empty() ) {
     RCLCPP_ERROR( node->get_logger(), "'joints' parameter must not be empty." );
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // Load URDF from parameter server
-  std::string urdf_xml = this->get_robot_description();
-  if ( urdf_xml.empty() ) {
-    RCLCPP_ERROR(
-        node->get_logger(),
-        "URDF is empty. Ensure parameter '%s' (or 'robot_description') is set on this node.",
-        robot_description_param_.c_str() );
-    return controller_interface::CallbackReturn::ERROR;
-  }
-
-  if ( !parse_urdf_and_fill_joint_info( urdf_xml ) ) {
+  if ( !parse_urdf_and_fill_joint_info( this->get_robot_description() ) ) {
     RCLCPP_ERROR( node->get_logger(), "Failed to parse URDF / joint limits." );
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  const size_t n = joint_names_.size();
+  const size_t n = params_.joints.size();
   reference_interfaces_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   state_interface_index_.assign( n, -1 );
 
@@ -81,6 +71,17 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
         get_node()->get_logger(),
         "SafetyPositionController is CHAINED-ONLY. Enable chained_mode for this controller." );
     return controller_interface::CallbackReturn::SUCCESS;
+  }
+
+  const auto joints = params_.joints;
+  if ( param_listener_->try_update_params( params_ ) ) {
+    // make sure joints didn't change
+    if ( joints != params_.joints ) {
+      RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "Joints parameter changed during runtime reconfiguration. This is not supported." );
+      return controller_interface::CallbackReturn::ERROR;
+    }
   }
 
   if ( !gather_interface_indices() ) {
@@ -103,7 +104,7 @@ SafetyPositionController::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration conf;
   conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  for ( const auto &j : joint_names_ ) conf.names.emplace_back( j + "/position" );
+  for ( const auto &j : params_.joints ) conf.names.emplace_back( j + "/position" );
   return conf;
 }
 
@@ -112,19 +113,19 @@ SafetyPositionController::state_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration conf;
   conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  for ( const auto &j : joint_names_ ) conf.names.emplace_back( j + "/position" );
+  for ( const auto &j : params_.joints ) conf.names.emplace_back( j + "/position" );
   return conf;
 }
 
 std::vector<hardware_interface::CommandInterface>
 SafetyPositionController::on_export_reference_interfaces()
 {
-  const size_t n = joint_names_.size();
+  const size_t n = params_.joints.size();
   std::vector<hardware_interface::CommandInterface> refs;
   refs.reserve( n );
 
   for ( size_t i = 0; i < n; ++i ) {
-    refs.emplace_back( get_node()->get_name(), joint_names_[i] + "/position",
+    refs.emplace_back( get_node()->get_name(), params_.joints[i] + "/position",
                        &reference_interfaces_[i] );
   }
   return refs;
@@ -147,7 +148,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
   }
 
   bool success = true;
-  const size_t n = joint_names_.size();
+  const size_t n = params_.joints.size();
 
   for ( size_t i = 0; i < n; ++i ) {
     double current;
@@ -157,7 +158,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       current = opt.value();
     } else {
       RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
-                             "Cannot get joint state for joint '%s'", joint_names_[i].c_str() );
+                             "Cannot get joint state for joint '%s'", params_.joints[i].c_str() );
       success = false;
       continue;
     }
@@ -169,22 +170,22 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     double commanded = target_wrapped;
     switch ( kinds_[i] ) {
     case JointType::CONTINUOUS:
-      if ( unwrap_continuous_ )
+      if ( params_.unwrap_continuous_joints )
         commanded = unwrap_to_nearest( current, target_wrapped );
       break;
     case JointType::REVOLUTE_BOUNDED:
       commanded = unwrap_to_nearest( current, target_wrapped );
-      if ( enforce_limits_ )
+      if ( params_.enforce_position_limits )
         commanded = clamp( i, commanded );
       break;
     case JointType::PRISMATIC_BOUNDED:
-      if ( enforce_limits_ )
+      if ( params_.enforce_position_limits )
         commanded = clamp( i, commanded );
       break;
     case JointType::FIXED:
     case JointType::OTHER:
     default:
-      if ( enforce_limits_ && has_limits_[i] )
+      if ( params_.enforce_position_limits && has_limits_[i] )
         commanded = clamp( i, commanded );
       break;
     }
@@ -212,12 +213,12 @@ double SafetyPositionController::clamp( size_t i, double value ) const
   const double hi = upper_limits_[i];
   if ( value < lo ) {
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
-                          "Clamping joint '%s' to lower limit %.3f", joint_names_[i].c_str(), lo );
+                          "Clamping joint '%s' to lower limit %.3f", params_.joints[i].c_str(), lo );
     return lo;
   }
   if ( value > hi ) {
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
-                          "Clamping joint '%s' to upper limit %.3f", joint_names_[i].c_str(), hi );
+                          "Clamping joint '%s' to upper limit %.3f", params_.joints[i].c_str(), hi );
     return hi;
   }
   return value;
@@ -229,14 +230,14 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
   if ( !model )
     return false;
 
-  const size_t n = joint_names_.size();
+  const size_t n = params_.joints.size();
   kinds_.assign( n, JointType::OTHER );
   has_limits_.assign( n, false );
   lower_limits_.assign( n, 0.0 );
   upper_limits_.assign( n, 0.0 );
 
   for ( size_t i = 0; i < n; ++i ) {
-    const auto jn = joint_names_[i];
+    const auto jn = params_.joints[i];
     auto urdf_joint = model->getJoint( jn );
     if ( !urdf_joint )
       continue;
@@ -282,7 +283,7 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
 bool SafetyPositionController::gather_interface_indices()
 {
   bool success = true;
-  for ( size_t i = 0; i < joint_names_.size(); ++i ) {
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     state_interface_index_[i] = -1;
     for ( size_t s = 0; s < state_interfaces_.size(); ++s ) {
       auto name = state_interfaces_[s].get_name();
@@ -290,7 +291,7 @@ bool SafetyPositionController::gather_interface_indices()
       RCLCPP_INFO_STREAM( get_node()->get_logger(),
                           "Available state interface: " << name << ", interface_name"
                                                         << interface_name );
-      if ( state_interfaces_[s].get_name() == joint_names_[i] + "/position" &&
+      if ( state_interfaces_[s].get_name() == params_.joints[i] + "/position" &&
            state_interfaces_[s].get_interface_name() == "position" ) {
         state_interface_index_[i] = static_cast<int>( s );
         break;
@@ -298,7 +299,7 @@ bool SafetyPositionController::gather_interface_indices()
     }
     if ( state_interface_index_[i] < 0 )
       RCLCPP_WARN( get_node()->get_logger(), "No state interface 'position' found for joint '%s'.",
-                   joint_names_[i].c_str() );
+                   params_.joints[i].c_str() );
     success &= ( state_interface_index_[i] >= 0 );
   }
   return success;
