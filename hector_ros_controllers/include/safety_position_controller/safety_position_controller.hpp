@@ -38,7 +38,7 @@ private:
   double unwrap_to_nearest( double current, double target );
   double clamp( size_t i, double value ) const;
   bool parse_urdf_and_fill_joint_info( const std::string &urdf_xml );
-  void gather_interface_indices();
+  bool gather_interface_indices();
 
   // ---- Parameters ----
   std::vector<std::string> joint_names_;
@@ -49,7 +49,6 @@ private:
 
   // ---- State ----
   std::vector<int> state_interface_index_;
-  std::vector<double> last_unwrapped_cmd_;
 
   // ---- URDF-based joint info ----
   std::vector<JointType> kinds_;
