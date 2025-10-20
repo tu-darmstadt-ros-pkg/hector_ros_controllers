@@ -301,7 +301,7 @@ void CollisionChecker::publishMarkers() const
       m.color.b = 0.7f;
       m.color.a = 0.6f;
     }
-    m.lifetime = rclcpp::Duration::from_seconds( 0.2 );
+    m.lifetime = rclcpp::Duration::from_seconds( 0 );
     arr.markers.push_back( std::move( m ) );
   }
 

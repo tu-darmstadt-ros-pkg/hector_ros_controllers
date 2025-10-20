@@ -54,10 +54,12 @@ private:
   std::vector<int> state_interface_index_;
 
   // ---- URDF-based joint info ----
-  std::vector<JointType> kinds_;     // in order of params_.joints
-  std::vector<bool> has_limits_;     // in order of params_.joints
-  std::vector<double> lower_limits_; // in order of params_.joints
-  std::vector<double> upper_limits_; // in order of params_.joints
+  std::vector<JointType> kinds_;                       // in order of params_.joints
+  std::vector<bool> has_limits_;                       // in order of params_.joints
+  std::vector<double> lower_limits_;                   // in order of params_.joints
+  std::vector<double> upper_limits_;                   // in order of params_.joints
+  std::vector<double> velocity_limits_;                // in order of params_.joints
+  std::vector<double> max_allowed_distance_per_cycle_; // in order of params_.joints
 
   std::vector<std::string> all_joint_names_;
   std::unordered_map<std::string, double> cc_positions_; // for collision checker
