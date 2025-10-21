@@ -61,11 +61,17 @@ private:
   std::vector<double> velocity_limits_;                // in order of params_.joints
   std::vector<double> max_allowed_distance_per_cycle_; // in order of params_.joints
 
+  // all joint states for collision checker
   std::vector<std::string> all_joint_names_;
   std::unordered_map<std::string, double> cc_positions_; // for collision checker
 
+  // command and current positions
   std::vector<double> cmd_positions_;
   std::vector<double> current_positions_;
+
+  // hold mode -> when no parent available
+  bool on_hold_{ false };
+  std::vector<double> hold_positions_;
 
   // Params
   std::shared_ptr<ParamListener> param_listener_;

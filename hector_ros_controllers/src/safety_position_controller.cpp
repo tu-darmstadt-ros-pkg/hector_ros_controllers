@@ -47,8 +47,8 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       } );
 
   if ( params_.check_self_collisions )
-    collision_checker_ =
-        std::make_unique<CollisionChecker>( node, params_.debug_visualize_collisions );
+    collision_checker_ = std::make_unique<CollisionChecker>( node, params_.collision_padding,
+                                                             params_.debug_visualize_collisions );
 
   if ( !parse_urdf_and_fill_joint_info( this->get_robot_description() ) ) {
     RCLCPP_ERROR( node->get_logger(), "Failed to parse URDF / joint limits." );
@@ -104,13 +104,18 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     return controller_interface::CallbackReturn::SUCCESS;
   }
 
+  on_hold_ = false;
+
   if ( !gather_interface_indices() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
                   "Failed to gather state interface indices for joints." );
     return controller_interface::CallbackReturn::ERROR;
   }
+  // update params in case they changed
   param_listener_->try_update_params( params_ );
   params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
+  collision_checker_->setCollisionPadding( params_.collision_padding );
+
   for ( size_t n = 0; n < params_.joints.size(); ++n ) {
     max_allowed_distance_per_cycle_[n] =
         velocity_limits_[n] * 1 / get_update_rate() * params_.block_velocity_scaling;
@@ -186,14 +191,9 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const rclcpp::Duration & )
 {
-  if ( !is_chained_ ) {
-    RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
-                           "SafetyPositionController is CHAINED-ONLY." );
-  }
-
   bool success = true;
   const size_t n = params_.joints.size();
-
+  // read current position
   for ( size_t i = 0; i < n; ++i ) {
     const auto &opt =
         state_interfaces_[static_cast<size_t>( state_interface_index_[i] )].get_optional();
@@ -205,6 +205,25 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       success = false;
       continue;
     }
+  }
+  // handle non-chained mode
+  if ( !is_chained_ ) {
+    RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
+                           "SafetyPositionController is CHAINED-ONLY." );
+    if ( !on_hold_ ) {
+      // store hold positions
+      hold_positions_ = current_positions_;
+      on_hold_ = true;
+    }
+    // write hold positions
+    for ( size_t i = 0; i < n; ++i ) {
+      success &= command_interfaces_[i].set_value( hold_positions_[i] );
+    }
+    return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+  }
+
+  // resolve continuous joints & enforce limits
+  for ( size_t i = 0; i < n; ++i ) {
 
     const double target_wrapped = reference_interfaces_[i];
     if ( std::isnan( target_wrapped ) )
