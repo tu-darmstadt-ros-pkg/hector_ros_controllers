@@ -15,7 +15,7 @@
 #include <hpp/fcl/collision.h>
 #include <unordered_map>
 
-#define SAFETY_CC_ENABLE_TIMING
+// #define SAFETY_CC_ENABLE_TIMING
 
 /// @brief CollisionChecker builds a Pinocchio + hpp-fcl collision model and performs self-collision tests.
 ///        - Builds from URDF + SRDF XML strings
