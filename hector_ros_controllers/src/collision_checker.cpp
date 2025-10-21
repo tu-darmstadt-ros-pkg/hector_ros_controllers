@@ -22,8 +22,9 @@
 #include <pinocchio/parsers/urdf.hpp>
 
 CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
-                                    bool pub_debug_geometry )
-    : node_( node ), pub_debug_geometry_( pub_debug_geometry )
+                                    double collision_padding, bool pub_debug_geometry )
+    : node_( node ), collision_padding_( collision_padding ),
+      pub_debug_geometry_( pub_debug_geometry )
 {
   if ( pub_debug_geometry_ ) {
     markers_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -178,7 +179,6 @@ bool CollisionChecker::checkCollision( const std::unordered_map<std::string, dou
 
   return checkCollisionQ( q );
 }
-
 bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
 #ifdef SAFETY_CC_ENABLE_TIMING
@@ -191,21 +191,34 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
     return true;
   }
 
+  // Kinematics + placements
   pinocchio::forwardKinematics( model_, data_, q );
   pinocchio::updateGeometryPlacements( model_, data_, geom_model_, geom_data_ );
-  pinocchio::computeCollisions( geom_model_, geom_data_ );
+
+  // Configure distance queries: nearest points + GJK guess caching
+  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+    auto &dreq = geom_data_.distanceRequests[k];
+    dreq.enable_nearest_points = true;
+    dreq.gjk_initial_guess = hpp::fcl::GJKInitialGuess::CachedGuess;
+  }
+
+  // Distance pass (fills distanceResults + caches)
+  pinocchio::computeDistances( geom_model_, geom_data_ );
 
   bool in_collision = false;
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
     const auto &cp = geom_model_.collisionPairs[k];
     const auto &o1 = geom_model_.geometryObjects[cp.first];
     const auto &o2 = geom_model_.geometryObjects[cp.second];
-    const auto &result = geom_data_.collisionResults[k];
-    if ( result.isCollision() ) {
+    const auto &dres = geom_data_.distanceResults[k];
+
+    // hpp-fcl distance is >= 0 for separated; 0 when touching; (some solvers clamp
+    // penetration to 0). Using <= 0.0 treats contact/overlap as "collision".
+    if ( dres.min_distance <= collision_padding_ ) {
       in_collision = true;
       RCLCPP_WARN_STREAM_THROTTLE( node_->get_logger(), *node_->get_clock(), 1000,
-                                   "Found collision distance "
-                                       << result.distance_lower_bound << " between "
+                                   "Collision (or contact) distance "
+                                       << dres.min_distance << " between "
                                        << model_.frames[o1.parentFrame].name << " and "
                                        << model_.frames[o2.parentFrame].name );
       break;
@@ -218,7 +231,7 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   sum_timings_ += static_cast<double>( us );
   n_timings_++;
   RCLCPP_INFO_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
-                        "[CC timing] checkCollisionQ total = %.3f microseconds (pairs=%zu)",
+                        "[CC timing] checkCollisionQ (distances) avg = %.3f µs (pairs=%zu)",
                         sum_timings_ / n_timings_, geom_model_.collisionPairs.size() );
 #endif
 
@@ -233,26 +246,26 @@ void CollisionChecker::publishMarkers() const
     return;
 
   visualization_msgs::msg::MarkerArray arr;
-  arr.markers.reserve( geom_model_.geometryObjects.size() );
+  arr.markers.reserve( geom_model_.geometryObjects.size() + 1 );
   const rclcpp::Time now = node_->now();
 
+  // Build a quick lookup of objects involved in "distance<=0" for coloring
   std::vector<size_t> objects_in_collision;
-
   auto add_unique = [&]( size_t idx ) {
     if ( std::find( objects_in_collision.begin(), objects_in_collision.end(), idx ) ==
          objects_in_collision.end() )
       objects_in_collision.push_back( idx );
   };
-
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
     const auto &cp = geom_model_.collisionPairs[k];
-    const auto &result = geom_data_.collisionResults[k];
-    if ( result.isCollision() ) {
+    const auto &dres = geom_data_.distanceResults[k];
+    if ( dres.min_distance <= 0.0 ) {
       add_unique( cp.first );
       add_unique( cp.second );
     }
   }
 
+  // 1) Geometry markers (unchanged)
   for ( std::size_t i = 0; i < geom_model_.geometryObjects.size(); ++i ) {
     const auto &go = geom_model_.geometryObjects[i];
     const auto &M = geom_data_.oMg[i];
@@ -295,12 +308,17 @@ void CollisionChecker::publishMarkers() const
         m.scale.x = go.meshScale[0];
         m.scale.y = go.meshScale[1];
         m.scale.z = go.meshScale[2];
+      } else {
+        m.type = visualization_msgs::msg::Marker::ARROW; // fallback
+        m.scale.x = 0.05;
+        m.scale.y = 0.01;
+        m.scale.z = 0.01;
       }
     }
 
-    const bool in_collision = std::find( objects_in_collision.begin(), objects_in_collision.end(),
-                                         i ) != objects_in_collision.end();
-    if ( in_collision ) {
+    const bool coll = std::find( objects_in_collision.begin(), objects_in_collision.end(), i ) !=
+                      objects_in_collision.end();
+    if ( coll ) {
       m.color.r = 1.0f;
       m.color.g = 0.0f;
       m.color.b = 0.0f;
@@ -311,8 +329,47 @@ void CollisionChecker::publishMarkers() const
       m.color.b = 0.7f;
       m.color.a = 0.6f;
     }
-    m.lifetime = rclcpp::Duration::from_seconds( 0 );
+
+    m.lifetime = rclcpp::Duration::from_seconds( 0.0 );
     arr.markers.push_back( std::move( m ) );
+  }
+
+  // 2) Lines between nearest points for ALL pairs (distance visualization)
+  {
+    visualization_msgs::msg::Marker lines;
+    lines.header.frame_id = "base_link";
+    lines.header.stamp = now;
+    lines.ns = "nearest_pairs";
+    lines.id = 999999; // single marker containing all segments
+    lines.type = visualization_msgs::msg::Marker::LINE_LIST;
+    lines.action = visualization_msgs::msg::Marker::ADD;
+    lines.scale.x = 0.004; // line thickness (m)
+    lines.color.r = 1.0f;
+    lines.color.g = 0.8f;
+    lines.color.b = 0.0f;
+    lines.color.a = 0.9f;
+    lines.lifetime = rclcpp::Duration::from_seconds( 0.0 );
+
+    lines.points.reserve( geom_model_.collisionPairs.size() * 2 );
+
+    for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+      const auto &dres = geom_data_.distanceResults[k];
+
+      // dres.nearest_points[0] and [1] should be in the base_link frame (after placements)
+      geometry_msgs::msg::Point pA, pB;
+      pA.x = dres.nearest_points[0][0];
+      pA.y = dres.nearest_points[0][1];
+      pA.z = dres.nearest_points[0][2];
+
+      pB.x = dres.nearest_points[1][0];
+      pB.y = dres.nearest_points[1][1];
+      pB.z = dres.nearest_points[1][2];
+
+      lines.points.push_back( pA );
+      lines.points.push_back( pB );
+    }
+
+    arr.markers.push_back( std::move( lines ) );
   }
 
   markers_pub_->publish( arr );

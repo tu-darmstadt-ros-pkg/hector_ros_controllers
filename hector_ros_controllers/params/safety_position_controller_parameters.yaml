@@ -20,6 +20,11 @@ safety_position_controller:
     default_value: false
     description: "If true, the controller checks for potential self-collisions at the target pose before applying position commands."
 
+  collision_padding:
+    type: double
+    default_value: 0.0
+    description: "Minimum allowed distance in [m] between any two links to consider the robot safe from self-collisions when 'check_self_collisions' is true."
+
   block_if_too_far:
     type: bool
     default_value: true
