@@ -181,6 +181,11 @@ bool CollisionChecker::checkCollision( const std::unordered_map<std::string, dou
 
 bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
+#ifdef SAFETY_CC_ENABLE_TIMING
+  using clock = std::chrono::steady_clock;
+  const auto t_begin = clock::now();
+#endif
+
   if ( q.size() != model_.nq ) {
     RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
     return true;
@@ -188,13 +193,8 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 
   pinocchio::forwardKinematics( model_, data_, q );
   pinocchio::updateGeometryPlacements( model_, data_, geom_model_, geom_data_ );
-  // pinocchio::computeDistances(geom_model_, geom_data_);
-  //  TODO: maybe use computeDistance -> allows to add margin
-
   pinocchio::computeCollisions( geom_model_, geom_data_ );
 
-  // RCLCPP_INFO_STREAM( node_->get_logger(),
-  //                     "Collision chcking " << geom_model_.collisionPairs.size() << " pairs." );
   bool in_collision = false;
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
     const auto &cp = geom_model_.collisionPairs[k];
@@ -204,16 +204,26 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
     if ( result.isCollision() ) {
       in_collision = true;
       RCLCPP_WARN_STREAM_THROTTLE( node_->get_logger(), *node_->get_clock(), 1000,
-                                   "Found collision  "
-                                       << " distance " << result.distance_lower_bound << " between "
-                                       << o1.parentFrame << " and " << o2.parentFrame );
+                                   "Found collision distance "
+                                       << result.distance_lower_bound << " between "
+                                       << model_.frames[o1.parentFrame].name << " and "
+                                       << model_.frames[o2.parentFrame].name );
       break;
     }
   }
 
+#ifdef SAFETY_CC_ENABLE_TIMING
+  const auto t_end = clock::now();
+  const auto us = std::chrono::duration_cast<std::chrono::microseconds>( t_end - t_begin ).count();
+  sum_timings_ += static_cast<double>( us );
+  n_timings_++;
+  RCLCPP_INFO_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
+                        "[CC timing] checkCollisionQ total = %.3f microseconds (pairs=%zu)",
+                        sum_timings_ / n_timings_, geom_model_.collisionPairs.size() );
+#endif
+
   if ( pub_debug_geometry_ )
     publishMarkers();
-
   return in_collision;
 }
 
