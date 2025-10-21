@@ -15,6 +15,8 @@
 #include <hpp/fcl/collision.h>
 #include <unordered_map>
 
+// #define SAFETY_CC_ENABLE_TIMING
+
 /// @brief CollisionChecker builds a Pinocchio + hpp-fcl collision model and performs self-collision tests.
 ///        - Builds from URDF + SRDF XML strings
 ///        - Handles revolute joints encoded as [sin(theta), cos(theta)]
@@ -54,6 +56,11 @@ private:
   Eigen::VectorXd q_default_;
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;
+
+#ifdef SAFETY_CC_ENABLE_TIMING
+  double sum_timings_{ 0.0 };
+  int n_timings_{ 0 };
+#endif
 };
 
 #endif // COLLISION_CHECKER_HPP
