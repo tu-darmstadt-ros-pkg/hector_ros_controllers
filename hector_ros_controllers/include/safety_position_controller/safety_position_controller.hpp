@@ -40,6 +40,11 @@ private:
   enum class JointType { CONTINUOUS, REVOLUTE_BOUNDED, PRISMATIC_BOUNDED, FIXED, OTHER };
 
   // Internal helpers
+  bool read_current_positions();
+  bool write_position_commands( const std::vector<double> &commands );
+  void enforce_limits();
+  void block_if_too_far();
+  bool write_current_limits();
   static double unwrap_to_nearest( double current, double target );
   double clamp( size_t i, double value ) const;
   bool parse_urdf_and_fill_joint_info( const std::string &urdf_xml );
@@ -86,6 +91,7 @@ private:
   // ros communication
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enforce_current_limits_service_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr semantic_description_sub_;
+  static constexpr int throttle_logging_msg = 2000; // ms
 };
 
 } // namespace safety_position_controller
