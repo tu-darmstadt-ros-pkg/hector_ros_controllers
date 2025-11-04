@@ -191,22 +191,10 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const rclcpp::Duration & )
 {
-  bool success = true;
+  bool success = read_current_positions();
   const size_t n = params_.joints.size();
-  // read current position
-  for ( size_t i = 0; i < n; ++i ) {
-    const auto &opt =
-        state_interfaces_[static_cast<size_t>( state_interface_index_[i] )].get_optional();
-    if ( opt.has_value() ) {
-      current_positions_[i] = opt.value();
-    } else {
-      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
-                             "Cannot get joint state for joint '%s'", params_.joints[i].c_str() );
-      success = false;
-      continue;
-    }
-  }
-  // handle non-chained mode
+
+  // handle non-chained mode -> hold positions
   if ( !is_chained_ ) {
     RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
                            "SafetyPositionController is CHAINED-ONLY." );
@@ -216,14 +204,80 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       on_hold_ = true;
     }
     // write hold positions
-    for ( size_t i = 0; i < n; ++i ) {
-      success &= command_interfaces_[i].set_value( hold_positions_[i] );
-    }
+    success &= write_position_commands( hold_positions_ );
     return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
   }
 
   // resolve continuous joints & enforce limits
-  for ( size_t i = 0; i < n; ++i ) {
+  enforce_limits();
+  // make sure movement is not too large
+  if ( params_.block_if_too_far )
+    block_if_too_far();
+  if ( params_.set_current_limits )
+    success &= write_current_limits();
+
+  // check collisions with the new commands
+  if ( !params_.check_self_collisions || !collision_checker_ ) {
+    write_position_commands( cmd_positions_ );
+  } else {
+    // prepare collision checker input
+    bool success_cc_setup = true;
+    for ( size_t i = 0; i < all_joint_names_.size(); i++ ) {
+      const auto opt = state_interfaces_[i].get_optional();
+      if ( opt.has_value() )
+        cc_positions_[all_joint_names_[i]] = opt.value();
+      else
+        success_cc_setup = false;
+    }
+    for ( size_t i = 0; i < n; i++ ) { cc_positions_[params_.joints[i]] = cmd_positions_[i]; }
+    if ( success_cc_setup && !collision_checker_->checkCollision( cc_positions_ ) ) {
+      // write commands if no collision detected
+      write_position_commands( cmd_positions_ );
+    } else {
+      // write current positions to hold position in case of collision
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                            throttle_logging_msg, "Collision detected! Holding current positions." );
+      write_position_commands( current_positions_ );
+      // success = false; // make sure parent controllers are unloaded
+    }
+  }
+
+  return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+}
+
+// ===== Helpers =====
+
+bool SafetyPositionController::read_current_positions()
+{
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    const auto &opt =
+        state_interfaces_[static_cast<size_t>( state_interface_index_[i] )].get_optional();
+    if ( opt.has_value() ) {
+      current_positions_[i] = opt.value();
+    } else {
+      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
+                             "Cannot get joint state for joint '%s'", params_.joints[i].c_str() );
+      return false;
+    }
+  }
+  return true;
+}
+
+bool SafetyPositionController::write_position_commands( const std::vector<double> &commands )
+{
+  bool success = true;
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    if ( !std::isnan( commands[i] ) ) {
+      success &= command_interfaces_[i].set_value( commands[i] );
+    }
+  }
+  return success;
+}
+
+void SafetyPositionController::enforce_limits()
+{
+  // enforce limits and write updated commands into cmd_positions
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
 
     const double target_wrapped = reference_interfaces_[i];
     if ( std::isnan( target_wrapped ) )
@@ -236,7 +290,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
         commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
       break;
     case JointType::REVOLUTE_BOUNDED:
-      commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
+      // commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
       if ( params_.enforce_position_limits )
         commanded = clamp( i, commanded );
       break;
@@ -253,6 +307,32 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     }
 
     cmd_positions_[i] = commanded;
+  }
+}
+void SafetyPositionController::block_if_too_far()
+{
+  // check if any joint is too far from the command
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    const double target_distance = std::abs( cmd_positions_[i] - current_positions_[i] );
+    if ( !isnan( velocity_limits_[i] ) ) {
+      if ( target_distance > max_allowed_distance_per_cycle_[i] ) {
+        RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+            "Joint '%s' is too far from command (target_distance=%.3f > allowed=%.3f). "
+            "Reducing Target Position.",
+            params_.joints[i].c_str(), target_distance, max_allowed_distance_per_cycle_[i] );
+        // set command to current position to hold
+        cmd_positions_[i] =
+            current_positions_[i] + ( ( cmd_positions_[i] > current_positions_[i] ) ? 1.0 : -1.0 ) *
+                                        max_allowed_distance_per_cycle_[i];
+      }
+    }
+  }
+}
+bool SafetyPositionController::write_current_limits()
+{
+  bool success = true;
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
 
     // set current limit if enabled and command interfaces are requested
     if ( params_.set_current_limits && command_interfaces_.size() > params_.joints.size() ) {
@@ -263,59 +343,8 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       success &= command_interfaces_[i + params_.joints.size()].set_value( limit );
     }
   }
-
-  if ( params_.block_if_too_far ) {
-    // check if any joint is too far from the command
-    for ( size_t i = 0; i < n; ++i ) {
-      const double target_distance = std::abs( cmd_positions_[i] - current_positions_[i] );
-      if ( !isnan( velocity_limits_[i] ) ) {
-        if ( target_distance > max_allowed_distance_per_cycle_[i] ) {
-          RCLCPP_WARN_THROTTLE(
-              get_node()->get_logger(), *get_node()->get_clock(), 1000,
-              "Joint '%s' is too far from command (target_distance=%.3f > allowed=%.3f). "
-              "Reducing Target Position.",
-              params_.joints[i].c_str(), target_distance, max_allowed_distance_per_cycle_[i] );
-          // set command to current position to hold
-          cmd_positions_[i] = current_positions_[i] +
-                              ( ( cmd_positions_[i] > current_positions_[i] ) ? 1.0 : -1.0 ) *
-                                  max_allowed_distance_per_cycle_[i];
-        }
-      }
-    }
-  }
-
-  // check collisions with the new commands
-  if ( !params_.check_self_collisions || !collision_checker_ ) {
-    for ( size_t i = 0; i < n; ++i ) {
-      success &= command_interfaces_[i].set_value( cmd_positions_[i] );
-    }
-  } else {
-    // prepare collision checker input
-    for ( size_t i = 0; i < all_joint_names_.size(); i++ ) {
-      cc_positions_[all_joint_names_[i]] = state_interfaces_[i].get_value();
-    }
-    for ( size_t i = 0; i < n; i++ ) { cc_positions_[params_.joints[i]] = cmd_positions_[i]; }
-    if ( !collision_checker_->checkCollision( cc_positions_ ) ) {
-      // write commands if no collision detected
-      for ( size_t i = 0; i < n; ++i ) {
-        success &= command_interfaces_[i].set_value( cmd_positions_[i] );
-      }
-    } else {
-      // write current positions to hold position in case of collision
-      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
-                            "Collision detected! Holding current positions." );
-      for ( size_t i = 0; i < n; ++i ) {
-        if ( !std::isnan( current_positions_[i] ) )
-          success &= command_interfaces_[i].set_value( current_positions_[i] );
-      }
-      // success = false; // make sure parent controllers are unloaded
-    }
-  }
-
-  return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+  return success;
 }
-
-// ===== Helpers =====
 
 double SafetyPositionController::unwrap_to_nearest( const double current, const double target )
 {
@@ -328,15 +357,15 @@ double SafetyPositionController::clamp( size_t i, double value ) const
   if ( !has_limits_[i] )
     return value;
 
-  const double lo = lower_limits_[i];
-  const double hi = upper_limits_[i];
+  const double lo = std::min( lower_limits_[i], current_positions_[i] );
+  const double hi = std::max( upper_limits_[i], current_positions_[i] );
   if ( value < lo ) {
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "Clamping joint '%s' to lower limit %.3f", params_.joints[i].c_str(), lo );
     return lo;
   }
   if ( value > hi ) {
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "Clamping joint '%s' to upper limit %.3f", params_.joints[i].c_str(), hi );
     return hi;
   }
