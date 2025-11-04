@@ -1,8 +1,10 @@
 #include "safety_position_controller/safety_position_controller.hpp"
 
+#include <cmath>
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
+#include <limits>
 #include <rclcpp/rclcpp.hpp>
 #include <srdfdom/model.h>
 #include <urdf_parser/urdf_parser.h>
@@ -83,7 +85,8 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 
   if ( !wait_for_srdf() )
     return controller_interface::CallbackReturn::ERROR;
-  collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints, false );
+  if ( collision_checker_ )
+    collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints, false );
 
   const size_t n = params_.joints.size();
   reference_interfaces_.assign( n, std::numeric_limits<double>::quiet_NaN() );
@@ -114,11 +117,12 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   // update params in case they changed
   param_listener_->try_update_params( params_ );
   params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
-  collision_checker_->setCollisionPadding( params_.collision_padding );
+  if ( collision_checker_ )
+    collision_checker_->setCollisionPadding( params_.collision_padding );
 
   for ( size_t n = 0; n < params_.joints.size(); ++n ) {
     max_allowed_distance_per_cycle_[n] =
-        velocity_limits_[n] * 1 / get_update_rate() * params_.block_velocity_scaling;
+        velocity_limits_[n] / get_update_rate() * params_.block_velocity_scaling;
   }
 
   // check order of command interfaces
@@ -385,9 +389,9 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
   const size_t n = params_.joints.size();
   kinds_.assign( n, JointType::OTHER );
   has_limits_.assign( n, false );
-  lower_limits_.assign( n, 0.0 );
-  upper_limits_.assign( n, 0.0 );
-  velocity_limits_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  lower_limits_.assign( n, std::numeric_limits<double>::lowest() );
+  upper_limits_.assign( n, std::numeric_limits<double>::max() );
+  velocity_limits_.assign( n, std::numeric_limits<double>::max() );
   max_allowed_distance_per_cycle_.assign( n, 0.0 );
 
   for ( size_t i = 0; i < n; ++i ) {
@@ -399,7 +403,8 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
     switch ( urdf_joint->type ) {
     case urdf::Joint::CONTINUOUS:
       kinds_[i] = JointType::CONTINUOUS;
-      velocity_limits_[i] = urdf_joint->limits->velocity;
+      velocity_limits_[i] = ( urdf_joint->limits ) ? urdf_joint->limits->velocity
+                                                   : std::numeric_limits<double>::max();
       break;
     case urdf::Joint::REVOLUTE:
       kinds_[i] = JointType::REVOLUTE_BOUNDED;
