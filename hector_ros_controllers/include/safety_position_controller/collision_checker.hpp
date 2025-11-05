@@ -25,7 +25,8 @@ class CollisionChecker
 {
 public:
   explicit CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
-                             double collision_padding_, bool pub_debug_geometry = false );
+                             double collision_padding = 0.0, double collision_cache_epsilon = 1e-4,
+                             bool pub_debug_geometry = false );
 
   /// Initialize from URDF and SRDF XML strings
   bool initFromXml( const std::string &urdf_xml, const std::string &srdf_xml,
@@ -40,12 +41,10 @@ public:
   /// Check collision for a given q vector
   bool checkCollisionQ( const Eigen::VectorXd &q );
 
-  void setCollisionPadding( const double collision_padding )
-  {
-    collision_padding_ = collision_padding;
-  }
+  void updateCollisionPadding( double collision_padding );
 
-  void setDebugVisualizeCollisions( bool pub_debug_geometry );
+  void updateDoDebugVisualization( bool pub_debug_geometry );
+  void updateCollisionCacheEpsilon( double epsilon );
 
 private:
   void publishMarkers() const;
@@ -60,8 +59,11 @@ private:
   pinocchio::GeometryModel geom_model_;
   pinocchio::GeometryData geom_data_;
   Eigen::VectorXd q_default_;
+  Eigen::VectorXd q_last_;
+  bool last_collision_state_{ false };
 
   double collision_padding_{ 0.0 };
+  double collision_cache_epsilon_{ 1e-4 };
   bool pub_debug_geometry_{ false };
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;

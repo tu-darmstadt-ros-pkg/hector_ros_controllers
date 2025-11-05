@@ -22,11 +22,12 @@
 #include <pinocchio/parsers/urdf.hpp>
 
 CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
-                                    double collision_padding, bool pub_debug_geometry )
+                                    double collision_padding, double collision_cache_epsilon,
+                                    bool pub_debug_geometry )
     : node_( node ), collision_padding_( collision_padding ),
-      pub_debug_geometry_( pub_debug_geometry )
+      collision_cache_epsilon_( collision_cache_epsilon ), pub_debug_geometry_( pub_debug_geometry )
 {
-  setDebugVisualizeCollisions( pub_debug_geometry );
+  updateDoDebugVisualization( pub_debug_geometry );
 }
 
 bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::string &srdf_xml,
@@ -188,6 +189,13 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
     return true;
   }
 
+  // check if robot moved since the last check
+  if ( q.size() == q_last_.size() && ( q - q_last_ ).cwiseAbs().maxCoeff() < 1e-4 ) {
+    // no movement -> no need to recompute distances
+    return last_collision_state_;
+  }
+  q_last_ = q;
+
   // Kinematics + placements
   pinocchio::forwardKinematics( model_, data_, q );
   pinocchio::updateGeometryPlacements( model_, data_, geom_model_, geom_data_ );
@@ -232,18 +240,28 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
                         sum_timings_ / n_timings_, geom_model_.collisionPairs.size() );
 #endif
 
+  last_collision_state_ = in_collision;
   if ( pub_debug_geometry_ )
     publishMarkers();
   return in_collision;
 }
 
-void CollisionChecker::setDebugVisualizeCollisions( bool pub_debug_geometry )
+void CollisionChecker::updateDoDebugVisualization( bool pub_debug_geometry )
 {
   pub_debug_geometry_ = pub_debug_geometry;
   if ( pub_debug_geometry_ && !markers_pub_ ) {
     markers_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
         "~/debug_collision_geometry", 1 );
   }
+}
+void CollisionChecker::updateCollisionPadding( const double collision_padding )
+{
+  collision_padding_ = collision_padding;
+}
+
+void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
+{
+  collision_cache_epsilon_ = epsilon;
 }
 
 void CollisionChecker::publishMarkers() const
