@@ -45,6 +45,8 @@ public:
     collision_padding_ = collision_padding;
   }
 
+  void setDebugVisualizeCollisions( bool pub_debug_geometry );
+
 private:
   void publishMarkers() const;
   void filterCollisionPairs( const std::vector<std::string> &controlled_joints );
