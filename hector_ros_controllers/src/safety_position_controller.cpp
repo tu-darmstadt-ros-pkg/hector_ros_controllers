@@ -117,8 +117,11 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   // update params in case they changed
   param_listener_->try_update_params( params_ );
   params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
-  if ( collision_checker_ )
-    collision_checker_->setCollisionPadding( params_.collision_padding );
+  if ( collision_checker_ ) {
+    collision_checker_->updateCollisionPadding( params_.collision_padding );
+    collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
+    collision_checker_->updateDoDebugVisualization( params_.debug_visualize_collisions );
+  }
 
   for ( size_t n = 0; n < params_.joints.size(); ++n ) {
     max_allowed_distance_per_cycle_[n] =

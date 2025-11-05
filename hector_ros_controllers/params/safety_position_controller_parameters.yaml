@@ -25,6 +25,11 @@ safety_position_controller:
     default_value: 0.0
     description: "Minimum allowed distance in [m] between any two links to consider the robot safe from self-collisions when 'check_self_collisions' is true."
 
+  collision_cache_epsilon:
+    type: double
+    default_value: 0.0001
+    description: "Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true."
+
   block_if_too_far:
     type: bool
     default_value: true
