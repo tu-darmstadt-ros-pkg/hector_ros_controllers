@@ -293,11 +293,7 @@ void SafetyPositionController::enforce_limits()
       if ( params_.unwrap_continuous_joints )
         commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
       break;
-    case JointType::REVOLUTE_BOUNDED:
-      // commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
-      if ( params_.enforce_position_limits )
-        commanded = clamp( i, commanded );
-      break;
+    case JointType::REVOLUTE_BOUNDED: // behavior for revolute and prismatic is the same
     case JointType::PRISMATIC_BOUNDED:
       if ( params_.enforce_position_limits )
         commanded = clamp( i, commanded );

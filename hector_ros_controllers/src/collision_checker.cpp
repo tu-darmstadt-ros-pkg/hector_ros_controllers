@@ -26,10 +26,7 @@ CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::Share
     : node_( node ), collision_padding_( collision_padding ),
       pub_debug_geometry_( pub_debug_geometry )
 {
-  if ( pub_debug_geometry_ ) {
-    markers_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-        "~/debug_collision_geometry", 1 );
-  }
+  setDebugVisualizeCollisions( pub_debug_geometry );
 }
 
 bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::string &srdf_xml,
@@ -238,6 +235,15 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   if ( pub_debug_geometry_ )
     publishMarkers();
   return in_collision;
+}
+
+void CollisionChecker::setDebugVisualizeCollisions( bool pub_debug_geometry )
+{
+  pub_debug_geometry_ = pub_debug_geometry;
+  if ( pub_debug_geometry_ && !markers_pub_ ) {
+    markers_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+        "~/debug_collision_geometry", 1 );
+  }
 }
 
 void CollisionChecker::publishMarkers() const
