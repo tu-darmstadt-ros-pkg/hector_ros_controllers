@@ -17,7 +17,7 @@ safety_position_controller:
 
   check_self_collisions:
     type: bool
-    default_value: false
+    default_value: true
     description: "If true, the controller checks for potential self-collisions at the target pose before applying position commands."
 
   collision_padding:
@@ -27,7 +27,7 @@ safety_position_controller:
 
   collision_cache_epsilon:
     type: double
-    default_value: 0.00001
+    default_value: 0.000001
     description: "Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true."
 
   block_if_too_far:
