@@ -17,10 +17,53 @@ VelocityToPositionControllersBase::VelocityToPositionControllersBase()
 {
 }
 
+rcl_interfaces::msg::SetParametersResult
+VelocityToPositionControllersBase::setPIDGains( const rclcpp::Parameter &p )
+{
+  auto result = rcl_interfaces::msg::SetParametersResult();
+  const double val = p.as_double();
+
+  if ( val <= 0 )
+    result.successful = false;
+  else {
+    result.successful = true;
+    if ( p.get_name() == "kp" ) {
+      kp_ = val;
+    }
+    if ( p.get_name() == "kd" ) {
+      kd_ = val;
+    }
+    if ( p.get_name() == "kp_sync" ) {
+      kp_sync_ = val;
+    }
+
+    RCLCPP_INFO( get_node()->get_logger(), "Reconfigured %s to %f", p.get_name().c_str(), val );
+  }
+
+  return result;
+}
+
 controller_interface::CallbackReturn VelocityToPositionControllersBase::on_init()
 {
   try {
     declare_parameters();
+
+    param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( get_node() );
+    cb_handle_kp_ = param_subscriber_->add_parameter_callback(
+        "kp",
+        std::bind( &VelocityToPositionControllersBase::setPIDGains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_kd_ = param_subscriber_->add_parameter_callback(
+        "kd",
+        std::bind( &VelocityToPositionControllersBase::setPIDGains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
+        "kp_sync",
+        std::bind( &VelocityToPositionControllersBase::setPIDGains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
   } catch ( const std::exception &e ) {
     fprintf( stderr, "Exception thrown during init stage with message: %s \n", e.what() );
     return controller_interface::CallbackReturn::ERROR;
@@ -180,7 +223,7 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
         if ( msg->data ) {
           RCLCPP_WARN(
               get_node()->get_logger(),
-              "Hard E-Stop activated, stopping all joints && enable continous target pos update" );
+              "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
           e_stop_active_ = true;
           // invalidate last positions
           for ( auto &position : joint_position_states_ )
@@ -334,14 +377,14 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
       }
 
       if ( joint_idx == 0 )
-        RCLCPP_INFO(
-            get_node()->get_logger(), "Joint {%s}: Pos {%f}, Vel {%f}. New pos {%f}. Command vel {%f}, Hold position {%f}. Move state %s",
-            joints_[joint_idx].c_str(), joint_position_states_[joint_idx],
-            joint_velocity_states_[joint_idx], pos_command, vel_command, hold_positions_[joint_idx],
-            move_state.c_str() );
+        /*RCLCPP_INFO(
+            get_node()->get_logger(), "Joint {%s}: Pos {%f}, Vel {%f}. New pos {%f}. Command vel
+           {%f}, Hold position {%f}. Move state %s", joints_[joint_idx].c_str(),
+           joint_position_states_[joint_idx], joint_velocity_states_[joint_idx], pos_command,
+           vel_command, hold_positions_[joint_idx], move_state.c_str() );*/
 
-      if ( std::isnan( pos_command ) )
-        continue;
+        if ( std::isnan( pos_command ) )
+          continue;
 
       successful &= command_interfaces_[joint_idx].set_value( pos_command );
     }

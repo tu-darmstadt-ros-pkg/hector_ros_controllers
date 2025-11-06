@@ -94,6 +94,8 @@ protected:
    */
   virtual controller_interface::CallbackReturn read_parameters() = 0;
 
+  rcl_interfaces::msg::SetParametersResult setPIDGains( const rclcpp::Parameter &p );
+
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
 
   controller_interface::return_type
@@ -151,6 +153,12 @@ protected:
   double kp_sync_;
   double kp_;
   double kd_;
+
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_kp_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_kd_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_kp_;
+
+  std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
 
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hard_estop_sub_;
