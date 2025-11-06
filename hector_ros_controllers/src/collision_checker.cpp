@@ -3,23 +3,18 @@
 //
 #include "safety_position_controller/collision_checker.hpp"
 
-#include <hpp/fcl/narrowphase/narrowphase.h>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/multibody/geometry.hpp>
 #include <pinocchio/parsers/srdf.hpp>
 #include <pinocchio/parsers/urdf.hpp>
 
-#include "pinocchio/collision/collision.hpp"
 #include "pinocchio/collision/distance.hpp"
 #include <cmath>
 #include <hpp/fcl/collision_data.h>
-#include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/fcl.hpp>
-#include <pinocchio/multibody/geometry.hpp>
 #include <pinocchio/multibody/model.hpp>
-#include <pinocchio/parsers/urdf.hpp>
 
 CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                                     double collision_padding, double collision_cache_epsilon,
@@ -140,7 +135,7 @@ bool CollisionChecker::checkCollision( const std::unordered_map<std::string, dou
     RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
     return true;
   }
-
+  // transforms the joint positions into the pinocchio format
   Eigen::VectorXd q = q_default_;
   for ( const auto &[name, position] : joint_positions ) {
     const auto it = name_to_id_.find( name );
@@ -150,24 +145,19 @@ bool CollisionChecker::checkCollision( const std::unordered_map<std::string, dou
       continue;
     }
     const pinocchio::JointIndex jid = it->second;
-    const int nq_j = model_.joints[jid].nq();
-    const int nv_j = model_.joints[jid].nv();
-    const int iq = model_.idx_qs[jid];
+    const int nq_j = model_.joints[jid].nq(); // number of position DoF for this joint
+    const int nv_j = model_.joints[jid].nv(); // number of velocity DoF for this joint
+    const int iq = model_.idx_qs[jid];        // starting index in q vector
     const double alpha = position;
 
-    if ( nq_j == 1 ) {
+    if ( nq_j == 1 ) { // e.g prismatic or revolute with 1 DoF
       q[iq] = alpha;
-    } else if ( nq_j == 2 && nv_j == 1 ) {
-      // Revolute represented as unit complex [sin(α), cos(α)]
-      const double s = std::cos( alpha );
-      const double c = std::sin( alpha );
-      q[iq] = s;
-      q[iq + 1] = c;
-      /*const double n = std::hypot( s, c );
-      if ( n > 1e-12 ) {
-        q[iq] /= n;
-        q[iq + 1] /= n;
-      }*/
+    } else if ( nq_j == 2 && nv_j == 1 ) { // e.g. continuous Joint !!
+      // Revolute Continuous Joints represented as unit complex [cos(α), sin(α)]
+      const double c = std::cos( alpha );
+      const double s = std::sin( alpha );
+      q[iq] = c;
+      q[iq + 1] = s;
     } else {
       RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
                             "Joint '%s' (nq=%d,nv=%d) not supported; keeping default.",
@@ -217,8 +207,7 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
     const auto &o2 = geom_model_.geometryObjects[cp.second];
     const auto &dres = geom_data_.distanceResults[k];
 
-    // hpp-fcl distance is >= 0 for separated; 0 when touching; (some solvers clamp
-    // penetration to 0). Using <= 0.0 treats contact/overlap as "collision".
+    // hpp-fcl distance is >= 0 for separated; 0 when touching
     if ( dres.min_distance <= collision_padding_ ) {
       in_collision = true;
       RCLCPP_WARN_STREAM_THROTTLE( node_->get_logger(), *node_->get_clock(), 1000,
@@ -246,7 +235,7 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   return in_collision;
 }
 
-void CollisionChecker::updateDoDebugVisualization( bool pub_debug_geometry )
+void CollisionChecker::updateDoDebugVisualization( const bool pub_debug_geometry )
 {
   pub_debug_geometry_ = pub_debug_geometry;
   if ( pub_debug_geometry_ && !markers_pub_ ) {
