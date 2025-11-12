@@ -156,10 +156,11 @@ private:
   bool parse_urdf_and_fill_joint_info( const std::string &urdf_xml );
 
   /**
-   * @brief Map requested state interfaces to indices (position).
+   * @brief Map params_.joints to all_joint_names_ indices for state interface reads.
+   * We have len(all_joint_names_) state interfaces, need to find indices for params_.joints.
    * @return true if all indices were found
    */
-  bool gather_interface_indices();
+  bool gather_joint_indices();
 
   /**
    * @brief Wait for SRDF on "robot_description_semantic" (bounded attempts).
@@ -172,7 +173,7 @@ private:
   bool in_compliant_mode_ = false; ///< selects compliant vs. stiff current limits
 
   // ---- Interface bookkeeping ----
-  std::vector<int> state_interface_index_; ///< index in state_interfaces_ per params_.joints
+  std::vector<int> joint_index_; ///< index in all_joint_names per params_.joints
 
   // ---- URDF-based joint info ----
   std::vector<JointType> kinds_;                       // in order of params_.joints

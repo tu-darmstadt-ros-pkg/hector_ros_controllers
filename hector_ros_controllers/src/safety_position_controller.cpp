@@ -90,7 +90,7 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 
   const size_t n = params_.joints.size();
   reference_interfaces_.assign( n, std::numeric_limits<double>::quiet_NaN() );
-  state_interface_index_.assign( n, -1 );
+  joint_index_.assign( n, -1 );
   cmd_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
 
@@ -109,7 +109,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   on_hold_ = false;
 
-  if ( !gather_interface_indices() ) {
+  if ( !gather_joint_indices() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
                   "Failed to gather state interface indices for joints." );
     return controller_interface::CallbackReturn::ERROR;
@@ -257,8 +257,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 bool SafetyPositionController::read_current_positions()
 {
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    const auto &opt =
-        state_interfaces_[static_cast<size_t>( state_interface_index_[i] )].get_optional();
+    const auto &opt = state_interfaces_[static_cast<size_t>( joint_index_[i] )].get_optional();
     if ( opt.has_value() ) {
       current_positions_[i] = opt.value();
     } else {
@@ -441,27 +440,26 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
   return true;
 }
 
-bool SafetyPositionController::gather_interface_indices()
+bool SafetyPositionController::gather_joint_indices()
 {
   bool success = true;
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    state_interface_index_[i] = -1;
-    for ( size_t s = 0; s < state_interfaces_.size(); ++s ) {
-      auto name = state_interfaces_[s].get_name();
-      auto interface_name = state_interfaces_[s].get_interface_name();
-      if ( state_interfaces_[s].get_name() == params_.joints[i] + "/position" &&
-           state_interfaces_[s].get_interface_name() == "position" ) {
-        state_interface_index_[i] = static_cast<int>( s );
+    const auto &jn = params_.joints[i];
+    for ( size_t s = 0; s < all_joint_names_.size(); ++s ) {
+      const auto &candidate = all_joint_names_[s];
+      if ( candidate == jn ) {
+        joint_index_[i] = static_cast<int>( s );
         break;
       }
     }
-    if ( state_interface_index_[i] < 0 )
-      RCLCPP_WARN( get_node()->get_logger(), "No state interface 'position' found for joint '%s'.",
+    if ( joint_index_[i] < 0 )
+      RCLCPP_WARN( get_node()->get_logger(), "Error in joint indexing '%s'.",
                    params_.joints[i].c_str() );
-    success &= ( state_interface_index_[i] >= 0 );
+    success &= ( joint_index_[i] >= 0 );
   }
   return success;
 }
+
 bool SafetyPositionController::wait_for_srdf()
 {
   // wait for the semantic description message to be received
