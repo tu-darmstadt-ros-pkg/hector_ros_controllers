@@ -19,13 +19,16 @@
   <depend>controller_interface</depend>
   <depend>generate_parameter_library</depend>
   <depend>hardware_interface</depend>
+  <depend>hpp-fcl</depend>
   <depend>libfcl-dev</depend>
+  <depend>pinocchio</depend>
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
   <depend>realtime_tools</depend>
   <depend>srdfdom</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>visualization_msgs</depend>
 
   <export>

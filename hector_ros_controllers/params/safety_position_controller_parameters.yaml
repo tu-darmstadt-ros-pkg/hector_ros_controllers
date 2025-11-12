@@ -1,0 +1,63 @@
+safety_position_controller:
+  joints:
+    type: string_array
+    default_value: [ ]
+    description: "Names of the joints to control. Must match the joints defined in the robot URDF."
+    read_only: true
+
+  unwrap_continuous_joints:
+    type: bool
+    default_value: true
+    description: "If true, continuous joints are unwrapped to maintain continuity between consecutive commands."
+
+  enforce_position_limits:
+    type: bool
+    default_value: true
+    description: "If true, position commands are clamped to joint limits ±epsilon according to the URDF limits."
+
+  check_self_collisions:
+    type: bool
+    default_value: true
+    description: "If true, the controller checks for potential self-collisions at the target pose before applying position commands."
+
+  collision_padding:
+    type: double
+    default_value: 0.0
+    description: "Minimum allowed distance in [m] between any two links to consider the robot safe from self-collisions when 'check_self_collisions' is true."
+
+  collision_cache_epsilon:
+    type: double
+    default_value: 0.000001
+    description: "Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true."
+
+  block_if_too_far:
+    type: bool
+    default_value: true
+    description: "If true, the controller blocks position commands that are too far from the current position. Automatically true when 'check_self_collisions' is true."
+
+  block_velocity_scaling:
+    type: double
+    default_value: 1.5
+    description: "Scaling factor block_if_too_far. it is blocked when (target_position - current_position) > block_velocity_scaling * dt * velocity limit."
+
+  debug_visualize_collisions:
+    type: bool
+    default_value: false
+    description: "If true, the controller publishes visualization markers for potential self-collisions to help with debugging."
+
+  set_current_limits:
+    type: bool
+    default_value: false
+    description: "If true, the controller additionally sets current limits see compliant and stiff limits"
+    read_only: true
+
+  current_limits:
+    __map_joints:
+      compliant_limit:
+        type: double
+        description: "Current limits for each joint in the group in Ampere. 'set_current_limits' must be true."
+        default_value: 3.0
+      stiff_limit:
+        type: double
+        default_value: 5.0
+        description: "Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off."
