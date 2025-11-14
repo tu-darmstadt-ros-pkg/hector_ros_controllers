@@ -75,6 +75,8 @@ target_include_directories(
 target_link_libraries(
   controllers
   PUBLIC fcl
+         hpp-fcl::hpp-fcl
+         pinocchio::pinocchio
          velocity_to_position_command_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
