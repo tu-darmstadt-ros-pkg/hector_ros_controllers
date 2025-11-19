@@ -72,6 +72,8 @@ private:
                             std::unordered_map<std::string, std::string> &current_state );
   bool ensureControllerState( bool desired_state,
                               const std::unordered_map<std::string, std::string> &current_state );
+  bool loadControllerGroup(const std::vector<std::string> &to_activate,
+                                 const std::vector<std::string> &to_deactivate );
   bool switchControllersRequest( const std::vector<std::string> &to_activate,
                                  const std::vector<std::string> &to_deactivate );
 
@@ -80,9 +82,12 @@ private:
   std::vector<std::string> controllers_;
   std::unordered_map<std::string, ControllerCfg> controller_cfg_;
   std::vector<ControllerGroup> controller_groups_;
+  std::map<std::string, std::vector<std::string>> chained_connections_; // controller name → controllers that depend on it
   double retry_delay_{ 5.0 };
+  double start_delay_{ 0.0 };
   std::string estop_topic_;
   bool restart_after_estop_deactivation_{ false };
+  bool load_groups_one_by_one_{ true };
 
   std::atomic<bool> in_progress_{ false };
   std::atomic<bool> done_{ false };
