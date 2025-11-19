@@ -41,11 +41,11 @@ void MultiSpawner::initialize()
   ss << "  estop_topic: '" << estop_topic_ << "'\n";
   RCLCPP_DEBUG( get_logger(), "%s", ss.str().c_str() );
 
-  if (start_delay_ > 0.0) {
-    RCLCPP_INFO(get_logger(), "Delaying start sequence by %.1f seconds...", start_delay_);
+  if ( start_delay_ > 0.0 ) {
+    RCLCPP_INFO( get_logger(), "Delaying start sequence by %.1f seconds...", start_delay_ );
     const auto delay = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::duration<double>(start_delay_));
-    rclcpp::sleep_for(delay);
+        std::chrono::duration<double>( start_delay_ ) );
+    rclcpp::sleep_for( delay );
   }
 
   // 2) Create service clients
@@ -301,29 +301,28 @@ bool MultiSpawner::ensureControllerState(
 bool MultiSpawner::loadControllerGroup( const std::vector<std::string> &to_activate,
                                         const std::vector<std::string> &to_deactivate )
 {
-  if (load_groups_one_by_one_) {
+  if ( load_groups_one_by_one_ ) {
     // deactivate in reverse order
-    for (auto it = to_deactivate.rbegin(); it != to_deactivate.rend(); ++it) {
+    for ( auto it = to_deactivate.rbegin(); it != to_deactivate.rend(); ++it ) {
       const auto &ctrl = *it;
-      if (!switchControllersRequest({}, {ctrl})) {
-        RCLCPP_ERROR(get_logger(), "Deactivated controller: %s", ctrl.c_str());
+      if ( !switchControllersRequest( {}, { ctrl } ) ) {
+        RCLCPP_ERROR( get_logger(), "Deactivated controller: %s", ctrl.c_str() );
         return false;
       }
-      RCLCPP_DEBUG(get_logger(), "Deactivated controller: %s", ctrl.c_str());
+      RCLCPP_DEBUG( get_logger(), "Deactivated controller: %s", ctrl.c_str() );
     }
     // activate in order (in respect to normal dependencies)
-    for (const auto& ctrl : to_activate) {
-      if (!switchControllersRequest({ctrl}, {})) {
-        RCLCPP_ERROR(get_logger(), "Failed to activate controller '%s'", ctrl.c_str());
+    for ( const auto &ctrl : to_activate ) {
+      if ( !switchControllersRequest( { ctrl }, {} ) ) {
+        RCLCPP_ERROR( get_logger(), "Failed to activate controller '%s'", ctrl.c_str() );
         return false;
       }
-      RCLCPP_DEBUG(get_logger(), "Activated controller: %s", ctrl.c_str());
+      RCLCPP_DEBUG( get_logger(), "Activated controller: %s", ctrl.c_str() );
     }
-        return true;
+    return true;
   }
-    return switchControllersRequest(to_activate, to_deactivate);
+  return switchControllersRequest( to_activate, to_deactivate );
 }
-
 
 bool MultiSpawner::switchControllersRequest( const std::vector<std::string> &to_activate,
                                              const std::vector<std::string> &to_deactivate )
@@ -404,15 +403,16 @@ void MultiSpawner::parseControllerInfo(
     }
   }
   // add recursive chained connections
-  for (auto &group : controller_groups_ ) {
+  for ( auto &group : controller_groups_ ) {
     bool changed = true;
     while ( changed ) {
       changed = false;
-      for (const auto& ctrl: group) {
-        for (const auto& dependent_ctrl: chained_connections_[ctrl]) {
-          for (const auto& dep_dep_ctr: chained_connections_[dependent_ctrl]) {
-            if (std::find(chained_connections_[ctrl].begin(), chained_connections_[ctrl].end(), dep_dep_ctr) == chained_connections_[ctrl].end()) {
-              chained_connections_[ctrl].push_back(dep_dep_ctr);
+      for ( const auto &ctrl : group ) {
+        for ( const auto &dependent_ctrl : chained_connections_[ctrl] ) {
+          for ( const auto &dep_dep_ctr : chained_connections_[dependent_ctrl] ) {
+            if ( std::find( chained_connections_[ctrl].begin(), chained_connections_[ctrl].end(),
+                            dep_dep_ctr ) == chained_connections_[ctrl].end() ) {
+              chained_connections_[ctrl].push_back( dep_dep_ctr );
               changed = true;
             }
           }
@@ -420,12 +420,11 @@ void MultiSpawner::parseControllerInfo(
       }
     }
     // sort members in group by number of dependent controllers (descending)
-    std::sort( group.begin(), group.end(),
-               [this]( const std::string &a, const std::string &b ) {
-                 const size_t size_a = chained_connections_.count( a ) ? chained_connections_[a].size() : 0;
-                 const size_t size_b = chained_connections_.count( b ) ? chained_connections_[b].size() : 0;
-                 return size_a < size_b;
-               } );
+    std::sort( group.begin(), group.end(), [this]( const std::string &a, const std::string &b ) {
+      const size_t size_a = chained_connections_.count( a ) ? chained_connections_[a].size() : 0;
+      const size_t size_b = chained_connections_.count( b ) ? chained_connections_[b].size() : 0;
+      return size_a < size_b;
+    } );
   }
 }
 
