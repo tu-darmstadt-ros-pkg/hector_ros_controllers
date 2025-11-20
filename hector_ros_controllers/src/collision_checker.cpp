@@ -135,6 +135,16 @@ bool CollisionChecker::checkCollision( const std::unordered_map<std::string, dou
     RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
     return true;
   }
+  // return true if any position is Nan or Inf
+  for ( const auto &[name, position] : joint_positions ) {
+    if ( std::isnan( position ) || std::isinf( position ) ) {
+      RCLCPP_ERROR(
+          node_->get_logger(),
+          "Joint position for joint '%s' is NaN or Inf (%.3f). Assuming the robot is in collision.",
+          name.c_str(), position );
+      return true;
+    }
+  }
   // transforms the joint positions into the pinocchio format
   Eigen::VectorXd q = q_default_;
   for ( const auto &[name, position] : joint_positions ) {
