@@ -575,6 +575,7 @@ int main( int argc, char **argv )
     }
     std::this_thread::sleep_for( 50ms );
   }
+  RCLCPP_INFO( node->get_logger(), "Shutting down Multi Controller Spawner node. ---------------" );
 
   node.reset();
   rclcpp::shutdown();
