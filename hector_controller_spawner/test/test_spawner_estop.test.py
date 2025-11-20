@@ -116,7 +116,8 @@ class TestEStopFunctionality(unittest.TestCase):
         self.assertEqual(
             len(active_hardware),
             0,
-            "No hardware interfaces should be active while e-stop is active",
+            "No hardware interfaces should be active while e-stop is active. Active hardware: "
+            + ", ".join(active_hardware),
         )
 
         # Verify no controllers are active
