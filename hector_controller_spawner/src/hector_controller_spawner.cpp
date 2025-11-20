@@ -15,9 +15,11 @@ void MultiSpawner::initialize()
   controllers_ =
       this->declare_parameter<std::vector<std::string>>( "controllers", std::vector<std::string>() );
   retry_delay_ = this->declare_parameter<double>( "retry_delay", 5.0 );
+  start_delay_ = this->declare_parameter<double>( "start_delay", 0.0 );
   estop_topic_ = this->declare_parameter<std::string>( "estop_topic", "" );
   restart_after_estop_deactivation_ =
       this->declare_parameter<bool>( "restart_after_estop_deactivation", true );
+  load_groups_one_by_one_ = this->declare_parameter<bool>( "load_groups_one_by_one", true );
 
   for ( const auto &ctrl : controllers_ ) {
     ControllerCfg cfg;
@@ -38,6 +40,13 @@ void MultiSpawner::initialize()
   ss << "  retry_delay: " << retry_delay_ << " seconds\n";
   ss << "  estop_topic: '" << estop_topic_ << "'\n";
   RCLCPP_DEBUG( get_logger(), "%s", ss.str().c_str() );
+
+  if ( start_delay_ > 0.0 ) {
+    RCLCPP_INFO( get_logger(), "Delaying start sequence by %.1f seconds...", start_delay_ );
+    const auto delay = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>( start_delay_ ) );
+    rclcpp::sleep_for( delay );
+  }
 
   // 2) Create service clients
   set_hw_state_client_ = this->create_client<controller_manager_msgs::srv::SetHardwareComponentState>(
@@ -273,8 +282,8 @@ bool MultiSpawner::ensureControllerState(
     }
 
     /* Issue one switch_controller call for this group. */
-    if ( ( group_requested_active && !switchControllersRequest( group, /*deactivate*/ {} ) ) ||
-         ( !group_requested_active && !switchControllersRequest( {}, group ) ) ) {
+    if ( ( group_requested_active && !loadControllerGroup( group, /*deactivate*/ {} ) ) ||
+         ( !group_requested_active && !loadControllerGroup( {}, group ) ) ) {
       RCLCPP_ERROR( get_logger(), "Failed to %s controller group containing '%s'",
                     group_requested_active ? "activate" : "deactivate",
                     vecToString( group ).c_str() );
@@ -289,6 +298,32 @@ bool MultiSpawner::ensureControllerState(
   return success;
 }
 
+bool MultiSpawner::loadControllerGroup( const std::vector<std::string> &to_activate,
+                                        const std::vector<std::string> &to_deactivate )
+{
+  if ( load_groups_one_by_one_ ) {
+    // deactivate in reverse order
+    for ( auto it = to_deactivate.rbegin(); it != to_deactivate.rend(); ++it ) {
+      const auto &ctrl = *it;
+      if ( !switchControllersRequest( {}, { ctrl } ) ) {
+        RCLCPP_ERROR( get_logger(), "Deactivated controller: %s", ctrl.c_str() );
+        return false;
+      }
+      RCLCPP_DEBUG( get_logger(), "Deactivated controller: %s", ctrl.c_str() );
+    }
+    // activate in order (in respect to normal dependencies)
+    for ( const auto &ctrl : to_activate ) {
+      if ( !switchControllersRequest( { ctrl }, {} ) ) {
+        RCLCPP_ERROR( get_logger(), "Failed to activate controller '%s'", ctrl.c_str() );
+        return false;
+      }
+      RCLCPP_DEBUG( get_logger(), "Activated controller: %s", ctrl.c_str() );
+    }
+    return true;
+  }
+  return switchControllersRequest( to_activate, to_deactivate );
+}
+
 bool MultiSpawner::switchControllersRequest( const std::vector<std::string> &to_activate,
                                              const std::vector<std::string> &to_deactivate )
 {
@@ -296,7 +331,7 @@ bool MultiSpawner::switchControllersRequest( const std::vector<std::string> &to_
     RCLCPP_ERROR( get_logger(), "switch_controller service unavailable" );
     return false;
   }
-  auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
+  const auto req = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
   req->activate_controllers = to_activate;
   req->deactivate_controllers = to_deactivate;
   req->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
@@ -317,7 +352,9 @@ void MultiSpawner::parseControllerInfo(
 
   // —— auto-detect chained controllers groups ——
   for ( const auto &c : resp.controller ) {
+    chained_connections_.erase( c.name );
     for ( const auto &conn : c.chain_connections ) {
+      chained_connections_[c.name].push_back( conn.name );
       // check if there is a ControllerGroup that includes name or conn.name
       bool found = false;
       for ( auto &group : controller_groups_ ) {
@@ -364,6 +401,30 @@ void MultiSpawner::parseControllerInfo(
       RCLCPP_DEBUG( get_logger(), "Adding controller '%s' with state '%s' to config.",
                     c.name.c_str(), c.state.c_str() );
     }
+  }
+  // add recursive chained connections
+  for ( auto &group : controller_groups_ ) {
+    bool changed = true;
+    while ( changed ) {
+      changed = false;
+      for ( const auto &ctrl : group ) {
+        for ( const auto &dependent_ctrl : chained_connections_[ctrl] ) {
+          for ( const auto &dep_dep_ctr : chained_connections_[dependent_ctrl] ) {
+            if ( std::find( chained_connections_[ctrl].begin(), chained_connections_[ctrl].end(),
+                            dep_dep_ctr ) == chained_connections_[ctrl].end() ) {
+              chained_connections_[ctrl].push_back( dep_dep_ctr );
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+    // sort members in group by number of dependent controllers (descending)
+    std::sort( group.begin(), group.end(), [this]( const std::string &a, const std::string &b ) {
+      const size_t size_a = chained_connections_.count( a ) ? chained_connections_[a].size() : 0;
+      const size_t size_b = chained_connections_.count( b ) ? chained_connections_[b].size() : 0;
+      return size_a < size_b;
+    } );
   }
 }
 

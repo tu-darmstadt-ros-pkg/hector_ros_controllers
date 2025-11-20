@@ -194,7 +194,6 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
     auto &dreq = geom_data_.distanceRequests[k];
     dreq.enable_nearest_points = true;
-    dreq.gjk_initial_guess = hpp::fcl::GJKInitialGuess::CachedGuess;
   }
 
   // Distance pass (fills distanceResults + caches)
@@ -275,6 +274,11 @@ void CollisionChecker::publishMarkers() const
     if ( dres.min_distance <= 0.0 ) {
       add_unique( cp.first );
       add_unique( cp.second );
+      RCLCPP_WARN(
+          node_->get_logger(),
+          "Collision detected between objects %zu and %zu (distance=%.6f), names '%s' - '%s'",
+          cp.first, cp.second, dres.min_distance, geom_model_.geometryObjects[cp.first].name.c_str(),
+          geom_model_.geometryObjects[cp.second].name.c_str() );
     }
   }
 
@@ -367,6 +371,18 @@ void CollisionChecker::publishMarkers() const
 
     for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
       const auto &dres = geom_data_.distanceResults[k];
+
+      // check if nearest points are valid (no nans or infs)
+      if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
+           !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() ) {
+        RCLCPP_WARN_STREAM(
+            node_->get_logger(),
+            "Skipping invalid nearest points for pair "
+                << k << " (distance=" << dres.min_distance << "names "
+                << geom_model_.geometryObjects[geom_model_.collisionPairs[k].first].name << " - "
+                << geom_model_.geometryObjects[geom_model_.collisionPairs[k].second].name << ")" );
+        continue;
+      }
 
       // dres.nearest_points[0] and [1] should be in the base_link frame (after placements)
       geometry_msgs::msg::Point pA, pB;

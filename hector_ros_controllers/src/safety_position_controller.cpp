@@ -241,9 +241,14 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       // write commands if no collision detected
       write_position_commands( cmd_positions_ );
     } else {
-      // write current positions to hold position in case of collision
-      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                            throttle_logging_msg, "Collision detected! Holding current positions." );
+      if ( !success_cc_setup )
+        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                              throttle_logging_msg, "Failed to setup collision checking." );
+      else
+        // write current positions to hold position in case of collision
+        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                              throttle_logging_msg,
+                              "Collision detected! Holding current positions." );
       write_position_commands( current_positions_ );
       // success = false; // make sure parent controllers are unloaded
     }
