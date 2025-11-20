@@ -15,7 +15,7 @@ void MultiSpawner::initialize()
   controllers_ =
       this->declare_parameter<std::vector<std::string>>( "controllers", std::vector<std::string>() );
   retry_delay_ = this->declare_parameter<double>( "retry_delay", 5.0 );
-  start_delay_ = this->declare_parameter<double>( "start_delay", 30.0 );
+  start_delay_ = this->declare_parameter<double>( "start_delay", 0.0 );
   estop_topic_ = this->declare_parameter<std::string>( "estop_topic", "" );
   restart_after_estop_deactivation_ =
       this->declare_parameter<bool>( "restart_after_estop_deactivation", true );
@@ -575,6 +575,7 @@ int main( int argc, char **argv )
     }
     std::this_thread::sleep_for( 50ms );
   }
+  RCLCPP_INFO( node->get_logger(), "Shutting down Multi Controller Spawner node. ---------------" );
 
   node.reset();
   rclcpp::shutdown();
