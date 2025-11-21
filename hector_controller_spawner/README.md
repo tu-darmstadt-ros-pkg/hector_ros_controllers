@@ -27,14 +27,18 @@ ready to go with minimal configuration.
 
 ## 🔧 Key Parameters
 
-| Name                  | Type       | Default | Description                                                               |
-|-----------------------|------------|---------|---------------------------------------------------------------------------|
-| `hardware_interfaces` | `string[]` | -       | Ordered list of hardware interface names to activate.                     |
-| `controllers`         | `string[]` | -       | Ordered list of controller names to load and manage.                      |
-| `<ctrl>.activate`     | `bool`     | `true`  | Should the controller be activated after loading?                         |
-| `retry_delay`         | `double`   | `5.0`   | Delay (in seconds) between retry attempts.                                |
-| `estop_topic`         | `string`   | `""`    | Topic to wait on (false ⇒ proceed). Leave empty to disable e-stop gating. |
-| `restart_after_estop_deactivation` |  `bool`    | `true`  | Restart hardware and controllers after e-stop deactivation          |
+| Name                             | Type       | Default | Description                                                               |
+|----------------------------------|------------|---------|---------------------------------------------------------------------------|
+| `hardware_interfaces`            | `string[]` | -       | Ordered list of hardware interface names to activate.                     |
+| `controllers`                    | `string[]` | -       | Ordered list of controller names to load and manage.                      |
+| `<ctrl>.activate`                | `bool`     | `true`  | Should the controller be activated after loading?                         |
+| `retry_delay`                    | `double`   | `5.0`   | Delay (in seconds) between retry attempts.                                |
+| `start_delay'                     | `double`   | `0.0`   | Initial delay (in seconds) before starting the spawner process.           |
+| `srv_call_timeout_ms'             | `int`      | `5000`  | Timeout (in milliseconds) for service calls to the controller manager.    |
+| `load_groups_one_by_one`         | `bool`     | `true`  | Load controllers in groups (chained controllers together) or all at once. |
+| `estop_topic`                    | `string`   | `""`    | Topic to wait on (false ⇒ proceed). Leave empty to disable e-stop gating. |
+| `restart_after_estop_deactivation` | `bool`     | `true`  | Restart hardware and controllers after e-stop deactivation                |
+
 📄 See [`athena.yaml`](config/athena.yaml) for a complete configuration example.
 
 ---
