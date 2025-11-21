@@ -94,6 +94,12 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   cmd_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
 
+  if ( !gather_joint_indices() ) {
+    RCLCPP_ERROR( get_node()->get_logger(),
+                  "Failed to gather state interface indices for joints." );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -109,11 +115,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   on_hold_ = false;
 
-  if ( !gather_joint_indices() ) {
-    RCLCPP_ERROR( get_node()->get_logger(),
-                  "Failed to gather state interface indices for joints." );
-    return controller_interface::CallbackReturn::ERROR;
-  }
   // update params in case they changed
   param_listener_->try_update_params( params_ );
   params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
@@ -262,6 +263,12 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 bool SafetyPositionController::read_current_positions()
 {
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    if ( joint_index_[i] < 0 || static_cast<size_t>( joint_index_[i] ) >= state_interfaces_.size() ) {
+      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 2000,
+                             "Invalid joint index for joint '%s' (%d) but should be in [0, %zu)",
+                             params_.joints[i].c_str(), joint_index_[i], state_interfaces_.size() );
+      return false;
+    }
     const auto &opt = state_interfaces_[static_cast<size_t>( joint_index_[i] )].get_optional();
     if ( opt.has_value() ) {
       current_positions_[i] = opt.value();
@@ -461,6 +468,8 @@ bool SafetyPositionController::gather_joint_indices()
       RCLCPP_WARN( get_node()->get_logger(), "Error in joint indexing '%s'.",
                    params_.joints[i].c_str() );
     success &= ( joint_index_[i] >= 0 );
+    RCLCPP_DEBUG( get_node()->get_logger(), "Joint '%s' mapped to state interface index %d.",
+                  params_.joints[i].c_str(), joint_index_[i] );
   }
   return success;
 }
