@@ -72,6 +72,8 @@ private:
                             std::unordered_map<std::string, std::string> &current_state );
   bool ensureControllerState( bool desired_state,
                               const std::unordered_map<std::string, std::string> &current_state );
+  bool
+  deactivateAllActiveControllers( const std::unordered_map<std::string, std::string> &current_state );
   bool loadControllerGroup( const std::vector<std::string> &to_activate,
                             const std::vector<std::string> &to_deactivate );
   bool switchControllersRequest( const std::vector<std::string> &to_activate,
@@ -89,6 +91,7 @@ private:
   std::string estop_topic_;
   bool restart_after_estop_deactivation_{ false };
   bool load_groups_one_by_one_{ true };
+  std::chrono::milliseconds srv_call_timeout_{ 2000 };
 
   std::atomic<bool> in_progress_{ false };
   std::atomic<bool> done_{ false };

@@ -6,6 +6,11 @@
 
     # How long to wait between retry attempts (HW + controllers).
     retry_delay: 5.0
+    # How long to wait before starting HW + controllers. 0.0 → start immediately.
+    start_delay: 0.0
+
+    # Timeout for service calls to the controller manager in milliseconds.
+    srv_call_timeout_ms: 5.0
 
     # ---------- hardware interfaces (activate = always) ----------
     hardware_interfaces:
