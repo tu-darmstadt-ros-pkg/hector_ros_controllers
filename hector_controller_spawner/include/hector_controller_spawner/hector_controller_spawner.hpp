@@ -88,7 +88,6 @@ private:
       chained_connections_; // controller name → controllers that depend on it
   double retry_delay_{ 5.0 };
   double start_delay_{ 0.0 };
-  double start_delay_{ 0.0 };
   std::string estop_topic_;
   bool restart_after_estop_deactivation_{ false };
   bool load_groups_one_by_one_{ true };
