@@ -376,15 +376,8 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
         hold_positions_[joint_idx] = joint_position_states_[joint_idx];
       }
 
-      if ( joint_idx == 0 )
-        /*RCLCPP_INFO(
-            get_node()->get_logger(), "Joint {%s}: Pos {%f}, Vel {%f}. New pos {%f}. Command vel
-           {%f}, Hold position {%f}. Move state %s", joints_[joint_idx].c_str(),
-           joint_position_states_[joint_idx], joint_velocity_states_[joint_idx], pos_command,
-           vel_command, hold_positions_[joint_idx], move_state.c_str() );*/
-
-        if ( std::isnan( pos_command ) )
-          continue;
+      if ( std::isnan( pos_command ) )
+        continue;
 
       successful &= command_interfaces_[joint_idx].set_value( pos_command );
     }
