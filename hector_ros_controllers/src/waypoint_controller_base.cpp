@@ -1,4 +1,4 @@
-#include "safety_forward_controller/safety_forward_controller.hpp"
+#include "waypoint_controller_base/waypoint_controller_base.hpp"
 
 #include <memory>
 #include <string>
@@ -11,29 +11,23 @@
 
 namespace waypoint_controller_base
 {
-SafetyForwardController::SafetyForwardController()
-    : controller_interface::ControllerInterface(), rt_command_ptr_( nullptr ),
-      trajectory_subscriber_( nullptr )
+WaypointControllerBase::WaypointControllerBase()
+    : controller_interface::ControllerInterface(), trajectory_( nullptr )
 {
 }
 
 void WaypointControllerBase::declare_parameters()
 {
-  param_listener_ = std::make_shared<ParamListener>( get_node() );
+  // param_listener_ = std::make_shared<ParamListener>( get_node() );
 }
 
 controller_interface::CallbackReturn WaypointControllerBase::read_parameters()
 {
-  if ( !param_listener_ ) {
+  /*if ( !param_listener_ ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Error encountered during init" );
     return controller_interface::CallbackReturn::ERROR;
   }
   params_ = param_listener_->get_params();
-
-  if ( params_.joints.empty() ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "'joints' parameter was empty" );
-    return controller_interface::CallbackReturn::ERROR;
-  }
 
   std::string interface_prefix = "";
   if ( !params_.passthrough_controller.empty() )
@@ -50,16 +44,7 @@ controller_interface::CallbackReturn WaypointControllerBase::read_parameters()
   } else {
     RCLCPP_ERROR( get_node()->get_logger(), "'interface' parameter was empty" );
     return controller_interface::CallbackReturn::ERROR;
-  }
-
-  safety_timer_period_ms_ = (int)params_.safety_timer_duration;
-
-  urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
-  for ( const auto &joint : params_.joints ) {
-    command_interface_types_.push_back( interface_prefix + joint + "/" + interface_type_ );
-    state_interface_types_.push_back( joint + "/" + interface_type_ );
-    joint_limits_.push_back( urdf->getJoint( joint )->limits );
-  }
+  }*/
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -84,12 +69,14 @@ WaypointControllerBase::on_configure( const rclcpp_lifecycle::State & /*previous
     return ret;
   }
 
-  trajectory_subscriber_ = get_node()->create_subscription<CmdType>(
-      "~/waypoint_trajectory", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
-        rt_command_ptr_.writeFromNonRT( msg );
-        safety_engaged_ = false;
-        safety_timer_->reset();
-      } );
+  navigation_server_ =
+      rclcpp_action::create_server<hector_controller_msgs::action::WaypointNavigation>(
+          get_node() "~/waypoint_navigation", rclcpp::SystemDefaultsQoS(),
+          [this]( const CmdType::SharedPtr msg ) {
+            rt_command_ptr_.writeFromNonRT( msg );
+            safety_engaged_ = false;
+            safety_timer_->reset();
+          } );
 
   RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
 
@@ -130,9 +117,7 @@ WaypointControllerBase::on_activate( const rclcpp_lifecycle::State & /*previous_
   }
 
   // reset command buffer if a command came through callback when controller was inactive
-  rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
-
-  safety_timer_->reset();
+  trajectory_ = realtime_tools::RealtimeBuffer<std::shared_ptr<std::vector<Goal>>>( nullptr );
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
@@ -142,44 +127,37 @@ controller_interface::CallbackReturn
 WaypointControllerBase::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   // reset command buffer
-  rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
-  safety_timer_->cancel();
+  trajectory_ = realtime_tools::RealtimeBuffer<std::shared_ptr<std::vector<Goal>>>( nullptr );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
+bool check_goal_completion( const Goal &goal, const Pose &current_pose ) { return false; }
+
 controller_interface::return_type
 WaypointControllerBase::update( const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
 {
-  auto joint_commands = rt_command_ptr_.readFromRT();
-  // no command received yet
-  if ( !joint_commands || !( *joint_commands ) ) {
+  auto trajectory = trajectory_.readFromRT();
+
+  if ( !trajectory ) {
+    // Reset trajectory waypoint
+    current_goal_idx_ = 0;
     return controller_interface::return_type::OK;
   }
 
-  bool successful = true;
-  // Set commands for joints
-  for ( auto index = 0ul; index < command_interfaces_.size(); ++index ) {
-    if ( safety_engaged_ ) {
-      successful = command_interfaces_[index].set_value( 0.0 ) && successful;
-      continue;
-    }
+  if ( check_goal_completion( current_goal_, current_pose_ ) )
 
-    double command = ( *joint_commands )->data[index];
+    current_goal_idx_ += 1;
+  if ( current_goal_idx_ == trajectory->get()->size() ) {
+    // finished trajectory
 
-    auto limits = joint_limits_[index];
-    if ( limits ) {
-      if ( interface_type_ == "velocity" ) {
-        if ( limits->velocity )
-          command = std::clamp( command, -limits->velocity, limits->velocity );
-      }
-      if ( interface_type_ == "effort" ) {
-        if ( limits->effort )
-          command = std::clamp( command, -limits->effort, limits->effort );
-      }
-    }
-    successful = command_interfaces_[index].set_value( command ) && successful;
+  } else {
+    // proceed to next goal
+    current_goal_idx_++;
+    current_goal_ = ( *trajectory )[current_goal_idx_];
   }
+
+  bool successful = true;
 
   if ( !successful )
     return controller_interface::return_type::ERROR;

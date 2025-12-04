@@ -59,6 +59,7 @@ generate_parameter_library(safety_position_controller_parameters
 
 add_library(
   controllers SHARED
+  src/waypoint_controller_base.cpp
   src/velocity_to_position_controllers_base.cpp
   src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
