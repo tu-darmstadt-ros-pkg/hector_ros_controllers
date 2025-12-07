@@ -45,8 +45,6 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
-
   std::string interface_prefix = "";
 
   if ( !params_.passthrough_controller.empty() )
