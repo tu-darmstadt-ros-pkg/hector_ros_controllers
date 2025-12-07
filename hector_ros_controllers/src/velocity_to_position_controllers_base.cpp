@@ -23,7 +23,7 @@ VelocityToPositionControllersBase::setPIDGains( const rclcpp::Parameter &p )
   auto result = rcl_interfaces::msg::SetParametersResult();
   const double val = p.as_double();
 
-  if ( val <= 0 )
+  if ( val < 0 )
     result.successful = false;
   else {
     result.successful = true;
@@ -215,6 +215,7 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
 
   // reset command buffer if a command came through callback when controller was inactive
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  e_stop_active_.initRT( false );
 
   auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
   qos.transient_local();
@@ -224,12 +225,10 @@ VelocityToPositionControllersBase::on_activate( const rclcpp_lifecycle::State & 
           RCLCPP_WARN(
               get_node()->get_logger(),
               "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
-          e_stop_active_ = true;
+          e_stop_active_.writeFromNonRT( true );
           // invalidate last positions
-          for ( auto &position : joint_position_states_ )
-            position = std::numeric_limits<double>::quiet_NaN();
         } else {
-          e_stop_active_ = false;
+          e_stop_active_.writeFromNonRT( false );
         }
       } );
 
@@ -336,15 +335,15 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
 {
   update_joint_states_if_valid();
   if ( !interfaces_valid_ )
-    return controller_interface::return_type::ERROR;
+    return controller_interface::return_type::OK;
 
   bool successful = true;
-  if ( e_stop_active_ ) {
+  if ( e_stop_active_.readFromRT() ) {
     for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
-      if ( !std::isnan( joint_position_states_[index] ) )
-        successful = command_interfaces_[index].set_value( joint_position_states_[index] );
       hold_positions_[index] = joint_position_states_[index];
+      move_states_[index] = STOPPED;
     }
+    return controller_interface::return_type::OK;
   } else {
 
     update_sync_states( reference_interfaces_ );

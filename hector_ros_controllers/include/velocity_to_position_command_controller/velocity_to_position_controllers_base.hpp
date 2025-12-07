@@ -147,7 +147,7 @@ protected:
   std::vector<std::vector<size_t>> synced_joints_;
 
   std::string e_stop_topic_;
-  bool e_stop_active_{};
+  realtime_tools::RealtimeBuffer<bool> e_stop_active_;
   bool interfaces_valid_;
 
   double kp_sync_;
