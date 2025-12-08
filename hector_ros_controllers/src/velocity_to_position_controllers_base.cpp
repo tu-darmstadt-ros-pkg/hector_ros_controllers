@@ -315,7 +315,7 @@ double VelocityToPositionControllersBase::pos_pd_control( const size_t &joint_id
   return joint_position_states_[joint_idx] + vel_command * p.seconds() +
          kp_ * ( vel_command - joint_velocity_states_[joint_idx] ) * p.seconds() -
          kd_ * ( joint_velocity_states_[joint_idx] - joint_prev_vel_states_[joint_idx] ) *
-             ( p.seconds() * p.seconds() );
+             p.seconds();
 }
 
 double VelocityToPositionControllersBase::position_control( const size_t &joint_idx,
