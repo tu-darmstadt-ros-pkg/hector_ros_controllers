@@ -32,6 +32,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     std_msgs
     std_srvs
     fcl
+    hector_ros_controllers_msgs
     ad_kinematics)
 
 foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})

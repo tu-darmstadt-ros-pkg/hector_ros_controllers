@@ -69,15 +69,6 @@ WaypointControllerBase::on_configure( const rclcpp_lifecycle::State & /*previous
     return ret;
   }
 
-  navigation_server_ =
-      rclcpp_action::create_server<hector_controller_msgs::action::WaypointNavigation>(
-          get_node() "~/waypoint_navigation", rclcpp::SystemDefaultsQoS(),
-          [this]( const CmdType::SharedPtr msg ) {
-            rt_command_ptr_.writeFromNonRT( msg );
-            safety_engaged_ = false;
-            safety_timer_->reset();
-          } );
-
   RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
 
   return controller_interface::CallbackReturn::SUCCESS;
@@ -154,7 +145,7 @@ WaypointControllerBase::update( const rclcpp::Time & /*time*/, const rclcpp::Dur
   } else {
     // proceed to next goal
     current_goal_idx_++;
-    current_goal_ = ( *trajectory )[current_goal_idx_];
+    current_goal_ = ( *trajectory )->at( current_goal_idx_ );
   }
 
   bool successful = true;

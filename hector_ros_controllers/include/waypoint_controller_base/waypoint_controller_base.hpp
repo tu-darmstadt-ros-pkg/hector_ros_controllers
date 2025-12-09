@@ -90,6 +90,8 @@ protected:
   size_t current_goal_idx_;
   Goal current_goal_;
   MoveCommand current_cmd_;
+
+  Pose current_pose_;
 };
 
 } // namespace waypoint_controller_base
