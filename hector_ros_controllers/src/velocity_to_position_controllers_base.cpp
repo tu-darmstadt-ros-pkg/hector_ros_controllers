@@ -338,7 +338,7 @@ VelocityToPositionControllersBase::update_and_write_commands( const rclcpp::Time
     return controller_interface::return_type::OK;
 
   bool successful = true;
-  if ( e_stop_active_.readFromRT() ) {
+  if ( *( e_stop_active_.readFromRT() ) ) {
     for ( auto index = 0ul; index < command_interfaces_.size(); index++ ) {
       hold_positions_[index] = joint_position_states_[index];
       move_states_[index] = STOPPED;
