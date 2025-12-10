@@ -15,7 +15,7 @@
     </class>
     <class name="safety_forward_controller/SafetyForwardController"
            type="safety_forward_controller::SafetyForwardController"
-           base_class_type="controller_interface::ControllerInterface">
+           base_class_type="controller_interface::ChainableControllerInterface">
         <description>
             A high-level forward controller ensuring that all command interfaces are stopped after receiving now
             commands for a specified time, i.e. disconnect to operator station.
