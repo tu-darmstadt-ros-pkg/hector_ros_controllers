@@ -45,30 +45,66 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
-
   std::string interface_prefix = "";
 
   if ( !params_.passthrough_controller.empty() )
     interface_prefix = params_.passthrough_controller + "/";
 
   for ( const auto &joint : params_.joints ) {
+    joints_.push_back( joint );
     command_interface_types_.push_back( interface_prefix + joint + "/position" );
     state_interface_types_.push_back( joint + "/" + "position" );
-    // joint_limits_.push_back(*(urdf->getJoint(joint)->limits));
-
+    state_interface_types_.push_back( joint + "/" + "velocity" );
     reference_interface_names_.push_back( joint + "/" + "velocity" );
-    // if(urdf->getJoint(joint)->limits){
-    //   RCLCPP_INFO(get_node()->get_logger(), "Got limit for joint %s", joint.c_str());
-    //   joint_limits_.insert({joint, urdf->getJoint(joint)->limits});
-    // joint_limits_.push_back( urdf->getJoint( joint )->limits );
-    last_positions_.push_back( std::numeric_limits<double>::quiet_NaN() );
+
+    joint_position_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
+    joint_velocity_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
+    joint_prev_vel_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
+  }
+
+  if ( params_.synchronous_groups.size() != 0 && params_.synchronous_groups.size() != joints_.size() ) {
+    RCLCPP_ERROR( get_node()->get_logger(),
+                  "Need to either specify a sync group for each joint or none at all" );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  synced_joints_ = std::vector<std::vector<size_t>>( joints_.size() );
+  sync_states_ = std::vector<bool>( joints_.size(), false );
+  sync_offsets_ = std::vector<std::vector<double>>( joints_.size() );
+
+  for ( size_t i = 0; i < params_.synchronous_groups.size(); i++ ) {
+    joint_groups_.push_back( params_.synchronous_groups[i] );
+    groups_[params_.synchronous_groups[i]].push_back( i );
+  }
+
+  for ( const auto &group : groups_ ) {
+    for ( size_t i = 0; i < group.second.size(); i++ ) {
+      size_t joint_idx = group.second[i];
+
+      for ( size_t j = 0; j < group.second.size() - 1; j++ ) {
+        size_t synced_joint_idx = group.second[( i + j + 1 ) % group.second.size()];
+
+        synced_joints_[joint_idx].push_back( synced_joint_idx );
+        sync_offsets_[joint_idx].push_back( std::numeric_limits<double>::quiet_NaN() );
+        RCLCPP_INFO( get_node()->get_logger(),
+                     "Adding synced joint %s for joint %s for vel to pos controller",
+                     joints_[group.second[i]].c_str(),
+                     joints_[group.second[( i + j + 1 ) % group.second.size()]].c_str() );
+      }
+    }
   }
 
   reference_interfaces_.resize( reference_interface_names_.size() );
-  stopping_.resize( reference_interface_names_.size(), false );
+  hold_positions_.resize( reference_interface_names_.size() );
+  move_states_.resize( reference_interface_names_.size() );
 
   e_stop_topic_ = params_.e_stop_topic;
+
+  kp_sync_ = params_.kp_sync;
+  kp_ = params_.kp;
+  kd_ = params_.kd;
+
+  stopping_vel_threshold_ = params_.stopping_velocity_threshold;
 
   return controller_interface::CallbackReturn::SUCCESS;
 }

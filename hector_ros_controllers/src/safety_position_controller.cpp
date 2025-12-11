@@ -128,6 +128,9 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
   on_hold_ = false;
 
+  // reset reference interfaces
+  for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
+
   // update params in case they changed
   param_listener_->try_update_params( params_ );
   params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
