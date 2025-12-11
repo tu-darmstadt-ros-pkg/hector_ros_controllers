@@ -22,6 +22,8 @@ SafetyPositionController::SafetyPositionController()
 bool SafetyPositionController::on_set_chained_mode( const bool chained_mode )
 {
   is_chained_ = chained_mode;
+  // invalidate reference interfaces
+  for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
   return true;
 }
 
@@ -303,7 +305,15 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
   }
 
-  // Chained mode
+  bool nan_in_refs = std::any_of( reference_interfaces_.begin(), reference_interfaces_.end(),
+                                  []( double v ) { return std::isnan( v ); } );
+
+  if ( nan_in_refs ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                          "NaN detected in reference interfaces. Not writing commands." );
+    return controller_interface::return_type::OK;
+  }
+
   // resolve continuous joints & enforce limits
   enforce_limits();
   // make sure movement is not too large
