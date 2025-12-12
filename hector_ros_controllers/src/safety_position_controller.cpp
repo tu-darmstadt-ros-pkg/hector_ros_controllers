@@ -294,8 +294,10 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     } else {
       // release E-stop
       estop_engaged_.store( false, std::memory_order_relaxed );
-      estop_engaged = false;
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming normal commands" );
+      // on release, invalidate old commands once
+      for ( auto &ref : reference_interfaces_ ) ref = std::numeric_limits<double>::quiet_NaN();
+      return controller_interface::return_type::OK;
     }
   }
 
@@ -404,25 +406,14 @@ void SafetyPositionController::enforce_limits()
     }
 
     double commanded = target_wrapped;
-    switch ( kinds_[i] ) {
-    case JointType::CONTINUOUS:
+    if ( kinds_[i] == JointType::CONTINUOUS ) {
       if ( params_.unwrap_continuous_joints ) {
         commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
       }
-      break;
-    case JointType::REVOLUTE_BOUNDED:
-    case JointType::PRISMATIC_BOUNDED:
+    } else {
       if ( params_.enforce_position_limits ) {
-        commanded = clamp( i, commanded );
+        commanded = clamp( i, commanded ); // checks if the joint has limits
       }
-      break;
-    case JointType::FIXED:
-    case JointType::OTHER:
-    default:
-      if ( params_.enforce_position_limits && has_limits_[i] ) {
-        commanded = clamp( i, commanded );
-      }
-      break;
     }
 
     cmd_positions_[i] = commanded;

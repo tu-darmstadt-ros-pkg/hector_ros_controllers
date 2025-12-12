@@ -335,6 +335,9 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
       estop_engaged = false;
 
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming command output" );
+      // on e-stop release, invalidate commands once
+      for ( auto &ref : reference_interfaces_ ) ref = std::numeric_limits<double>::quiet_NaN();
+      return controller_interface::return_type::OK;
     }
   }
 
@@ -348,11 +351,7 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
       // --- E-STOP BEHAVIOR ---
       if ( interface_type_ == "position" ) {
         // Hold current position
-        if ( index < hold_positions_.size() ) {
-          command_value = hold_positions_[index];
-        } else {
-          command_value = 0.0;
-        }
+        command_value = hold_positions_[index];
       } else {
         // velocity / effort → stop (zero)
         command_value = 0.0;
