@@ -1,7 +1,11 @@
 #pragma once
 
 #include <controller_interface/chainable_controller_interface.hpp>
+#include <realtime_tools/realtime_buffer.hpp>
 #include <safety_position_controller/collision_checker.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 #include <urdf_model/joint.h>
@@ -11,7 +15,7 @@
 
 namespace safety_position_controller
 {
-
+using CmdType = std_msgs::msg::Float64MultiArray;
 /**
  * @brief Chained-only safety controller.
  *
@@ -141,6 +145,16 @@ private:
   static double unwrap_to_nearest( double current, double target );
 
   /**
+   * Compute the signed shortest distance between two revolute joint angles.
+   *
+   * @param value_a  Start angle (rad)
+   * @param value_b  Target angle (rad)
+   * @return Signed minimal angular difference in [-π, π].
+   *         Positive → turn left (CCW), Negative → turn right (CW).
+   */
+  static double get_signed_distance( double value_a, double value_b );
+
+  /**
    * @brief Clamp value to [lower, upper] (with validity checks); logs on clamp.
    * @param i joint index in params_.joints
    * @param value requested value
@@ -168,9 +182,16 @@ private:
    */
   bool wait_for_srdf();
 
+  void publish_debug_joint_state_in();
+  void publish_debug_joint_state_out( const std::vector<double> &positions );
+
   // ---- Configuration / mode ----
   bool is_chained_ = true;         ///< chained-only controller (hold if false)
   bool in_compliant_mode_ = false; ///< selects compliant vs. stiff current limits
+
+  // ---- E-stop ----
+  std::atomic<bool> estop_active_{ false };  ///< last requested E-stop state
+  std::atomic<bool> estop_engaged_{ false }; ///< actually engaged in update loop
 
   // ---- Interface bookkeeping ----
   std::vector<int> joint_index_; ///< index in all_joint_names per params_.joints
@@ -205,7 +226,19 @@ private:
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr
       enforce_current_limits_service_; ///< toggles compliant mode
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr
-      semantic_description_sub_;                    ///< SRDF (transient local)
+      semantic_description_sub_; ///< SRDF (transient local)
+
+  // Non-chained command input
+  realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;
+  rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
+
+  // E-stop input
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_subscriber_;
+
+  // Debug JointState publishers
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
+
   static constexpr int throttle_logging_msg = 2000; ///< ms; throttle for WARN/ERROR logs
 };
 

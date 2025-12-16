@@ -45,6 +45,12 @@ safety_position_controller:
     default_value: false
     description: "If true, the controller publishes visualization markers for potential self-collisions to help with debugging."
 
+  publish_debug_joint_states:
+    type: bool
+    default_value: false
+    description: "If true, the controller publishes the received target command states and the computed states as separate joint state msgs"
+    read_only: true
+
   set_current_limits:
     type: bool
     default_value: false
