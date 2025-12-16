@@ -179,6 +179,13 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
         }
       } );
 
+  if ( is_chained_ ) {
+    // Non-chained command subscriber (RT buffer)
+    joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
+        "~/commands", rclcpp::SystemDefaultsQoS(),
+        [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
+  }
+
   // reset RT buffer
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
 

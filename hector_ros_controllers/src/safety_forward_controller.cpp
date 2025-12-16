@@ -176,6 +176,15 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
     safety_timer_->reset();
   }
 
+  joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
+      "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
+        rt_command_ptr_.writeFromNonRT( msg );
+        safety_engaged_.store( false );
+        if ( safety_timer_ ) {
+          safety_timer_->reset();
+        }
+      } );
+
   // E-stop subscription
   safety_estop_subscriber_ = get_node()->create_subscription<std_msgs::msg::Bool>(
       "~/safety_estop", rclcpp::SystemDefaultsQoS(),
