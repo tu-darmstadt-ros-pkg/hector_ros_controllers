@@ -146,11 +146,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   for ( size_t n = 0; n < params_.joints.size(); ++n ) {
     max_allowed_distance_per_cycle_[n] =
         velocity_limits_[n] / get_update_rate() * params_.block_velocity_scaling;
-    RCLCPP_WARN_STREAM( get_node()->get_logger(),
-                        "Velocity Limit: " << velocity_limits_[n]
-                                           << " Update Rate: " << get_update_rate() << " scaling: "
-                                           << params_.block_velocity_scaling << " -> max allowed "
-                                           << max_allowed_distance_per_cycle_[n] );
   }
 
   // check order of command interfaces
@@ -487,7 +482,7 @@ double SafetyPositionController::get_signed_distance( double value_a, double val
   return diff;
 }
 
-double SafetyPositionController::clamp( size_t i, double value ) const
+double SafetyPositionController::clamp( const size_t i, const double value ) const
 {
   if ( !has_limits_[i] ) {
     return value;
@@ -605,7 +600,7 @@ bool SafetyPositionController::wait_for_srdf()
   // wait for the semantic description message to be received
   rclcpp::Rate rate( 3 );
   int attempt = 0;
-  const int max_attempts = 50;
+  constexpr int max_attempts = 50;
   while ( !srdf_received_ ) {
     rate.sleep();
     ++attempt;
