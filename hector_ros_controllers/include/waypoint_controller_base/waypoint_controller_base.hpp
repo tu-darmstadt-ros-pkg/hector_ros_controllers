@@ -13,6 +13,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
+#include "realtime_tools/realtime_server_goal_handle.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
 #include <hector_ros_controllers_msgs/action/waypoint_navigation.hpp>
@@ -23,7 +24,14 @@
 namespace waypoint_controller_base
 {
 
-struct Goal {
+struct Waypoint {
+
+  Waypoint( const geometry_msgs::msg::Point &point )
+  {
+    x = point.x;
+    y = point.y;
+  }
+
   double x;
   double y;
 };
@@ -38,6 +46,10 @@ struct Pose {
   double y;
   double heading;
 };
+
+using WaypointNav = typename hector_ros_controllers_msgs::action::WaypointNavigation;
+using RtGhWayNav =
+    realtime_tools::RealtimeServerGoalHandle<hector_ros_controllers_msgs::action::WaypointNavigation>;
 
 class WaypointControllerBase : public controller_interface::ControllerInterface
 {
@@ -61,6 +73,12 @@ public:
   controller_interface::CallbackReturn
   on_deactivate( const rclcpp_lifecycle::State &previous_state ) override;
 
+  rclcpp_action::CancelResponse goal_cancelled_callback(
+      const std::shared_ptr<rclcpp_action::ServerGoalHandle<WaypointNav>> goal_handle );
+
+  rclcpp_action::GoalResponse goal_received_callback( const rclcpp_action::GoalUUID &,
+                                                      std::shared_ptr<const WaypointNav::Goal> goal );
+
   controller_interface::return_type update( const rclcpp::Time &time,
                                             const rclcpp::Duration &period ) override;
 
@@ -69,10 +87,15 @@ public:
 
   virtual bool check_goal_completion( const Goal &goal, const Pose &pose );
 
+  bool validate_trajectory( const std::vector<geometry_msgs::msg::Point> &trajectory );
+
 protected:
   void declare_parameters();
 
   controller_interface::CallbackReturn read_parameters();
+
+  void WaypointControllerBase::preempt_active_goal(
+      std::shared_ptr<waypoint_controller_base::RtGhWayNav> active_trajectory );
 
   std::vector<std::string> command_interface_types_;
   std::vector<std::string> state_interface_types_;
@@ -83,14 +106,15 @@ protected:
   // std::shared_ptr<ParamListener> param_listener_;
   // Params params_;
 
-  realtime_tools::RealtimeBuffer<std::shared_ptr<std::vector<Goal>>> trajectory_;
-  realtime_tools::RealtimeBuffer<std::shared_ptr<bool>> trajectory_is_active_;
-  realtime_tools::RealtimeBuffer<std::shared_ptr<bool>> reset_trajectory_;
+  realtime_tools::RealtimeBuffer<std::shared_ptr<const WaypointNav::Goal>> current_trajectory_;
 
-  size_t current_goal_idx_;
-  Goal current_goal_;
+  realtime_tools::RealtimeBuffer<std::shared_ptr<RtGhWayNav>> active_trajectory_rt_gh_;
+
+  std::atomic<bool> is_active_;
+  std::atomic<size_t> current_goal_idx_;
+
+  Waypoint current_goal_;
   MoveCommand current_cmd_;
-
   Pose current_pose_;
 };
 

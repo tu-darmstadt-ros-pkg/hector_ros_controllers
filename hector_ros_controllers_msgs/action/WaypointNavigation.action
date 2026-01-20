@@ -1,6 +1,9 @@
 geometry_msgs/Point[] waypoint_trajectory
 ---
-geometry_msgs/Point current_goal
----
 bool success
 string failure_report
+geometry_msgs/Point final_position
+---
+geometry_msgs/Point current_goal
+geometry_msgs/Point current_position
+float64 current_heading

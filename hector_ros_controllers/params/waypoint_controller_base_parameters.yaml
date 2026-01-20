@@ -1,0 +1,5 @@
+waypoint_controller_base_parameters:
+
+  base_prefix: { type: string, default_value: "robot_name", description: "" }
+
+  e_stop_topic: { type: string, default_value: "estop_board/hard_estop", description: "Topic to subscribe to for emergency stop messages. If set, the controller will stop all commands when an emergency stop message is received." }
