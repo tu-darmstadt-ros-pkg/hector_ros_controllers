@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "controller_interface/controller_interface.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "rclcpp_lifecycle/state.hpp"
@@ -82,10 +83,10 @@ public:
   controller_interface::return_type update( const rclcpp::Time &time,
                                             const rclcpp::Duration &period ) override;
 
-  virtual MoveCommand computeCommand( const Goal &goal, const Pose &pose,
+  virtual MoveCommand computeCommand( const Waypoint &goal, const Pose &pose,
                                       const double &curr_linear_vel, const double &curr_angular_vel );
 
-  virtual bool check_goal_completion( const Goal &goal, const Pose &pose );
+  virtual bool check_goal_completion( const Waypoint &goal, const Pose &pose );
 
   bool validate_trajectory( const std::vector<geometry_msgs::msg::Point> &trajectory );
 
@@ -94,8 +95,14 @@ protected:
 
   controller_interface::CallbackReturn read_parameters();
 
+  controller_interface::return_type set_base_velocities( const MoveCommand &cmd );
+
+  controller_interface::return_type stop_base();
+
   void WaypointControllerBase::preempt_active_goal(
       std::shared_ptr<waypoint_controller_base::RtGhWayNav> active_trajectory );
+
+  bool use_sim_base_;
 
   std::vector<std::string> command_interface_types_;
   std::vector<std::string> state_interface_types_;
@@ -116,6 +123,12 @@ protected:
   Waypoint current_goal_;
   MoveCommand current_cmd_;
   Pose current_pose_;
+
+  std::shared_ptr<ParamListener> param_listener_;
+  Params params_;
+
+  // Used for simulation only
+  std::shared_ptr<rclcpp::Publisher<geometry_msgs::msg::TwistStamped>> sim_vel_pub_;
 };
 
 } // namespace waypoint_controller_base

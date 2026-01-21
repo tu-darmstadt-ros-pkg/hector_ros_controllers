@@ -30,6 +30,10 @@ controller_interface::CallbackReturn WaypointControllerBase::read_parameters()
   if ( !params_.passthrough_controller.empty() )
     interface_prefix = params_.passthrough_controller + "/";
 
+  if ( !params_.use_sim_base_.empty() ) {
+    use_sim_base_ = params_.use_sim_base_;
+  }
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -40,6 +44,11 @@ controller_interface::CallbackReturn WaypointControllerBase::on_init()
   } catch ( const std::exception &e ) {
     fprintf( stderr, "Exception thrown during init stage with message: %s \n", e.what() );
     return controller_interface::CallbackReturn::ERROR;
+  }
+
+  if ( use_sim_base_ ) {
+    sim_vel_pub_ = get_node()->create_publisher<geometry_msgs::msg::TwistStamped>(
+        std::string( get_node()->get_namespace() ) + "/cmd_vel", rclcpp::SystemDefaultsQoS() );
   }
 
   return controller_interface::CallbackReturn::SUCCESS;
@@ -192,13 +201,24 @@ void WaypointControllerBase::preempt_active_goal(
   active_trajectory_rt_gh_.writeFromNonRT( std::shared_ptr<RtGhWayNav>() );
 }
 
-controller_interface::return_type stop_base()
+controller_interface::return_type WaypointControllerBase::stop_base()
 {
   return set_base_velocities( MoveCommand{ 0.0, 0.0 } );
 }
 
-controller_interface::return_type set_base_velocities( const MoveCommand &cmd )
+controller_interface::return_type WaypointControllerBase::set_base_velocities( const MoveCommand &cmd )
 {
+
+  if ( use_sim_base_ ) {
+    auto twist_msg = geometry_msgs::msg::TwistStamped();
+    twist_msg.header.stamp = this->get_node()->now();
+    twist_msg.twist.linear.x = cmd.linear_vel_cmd;
+    twist_msg.twist.angular.z = cmd.angual_vel_cmd;
+    sim_vel_pub_->publish( twist_msg );
+  } else {
+    // Implement real base command setting logic here
+  }
+
   // Implement command setting logic here
   return controller_interface::return_type::OK;
 }
