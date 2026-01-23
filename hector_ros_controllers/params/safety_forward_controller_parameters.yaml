@@ -1,8 +1,8 @@
 safety_forward_controller:
-  joints: { type: string_array, default_value: [ ], description: "Name of the joints to control" }
+  joints: {type: string_array, default_value: [], description: Name of the joints to control}
 
-  interface_type: { type: string, default_value: "", description: "Interface type of controller. Supported are 'position', 'velocity' and 'effort'." }
+  interface_type: {type: string, default_value: '', description: "Interface type of controller. Supported are 'position', 'velocity' and 'effort'."}
 
-  safety_timer_duration: { type: int, default_value: 500, description: "Temporal safety margin in ms. If now control inputs are received for this duration. All command interfaces are set to zero." }
+  safety_timer_duration: {type: int, default_value: 500, description: Temporal safety margin in ms. If now control inputs are received for this duration. All command interfaces are set to zero.}
 
-  passthrough_controller: { type: string, default_value: "", description: "Name of passthrough controller which exposes command interfaces for the specified joints" }
+  passthrough_controller: {type: string, default_value: '', description: Name of passthrough controller which exposes command interfaces for the specified joints}
