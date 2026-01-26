@@ -1,5 +1,13 @@
 waypoint_controller_base_parameters:
 
-  base_prefix: { type: string, default_value: "robot_name", description: "" }
+  use_cmd_vel: { type: bool, default_value: false, description: "Instead of claiming robot interfaces, vel commands are published to robot/cmd_vel. Easier to use within simulation context. Should be used with caution on real robot since additional velocity commands are not blocked." }
+
+  tf_prefix: { type: string, default_value: "", description: "Prefix for all relevant frames in tf tree. Usually identical to the robot namespace." }
+
+  base_link_frame_name: { type: string, default_value: "base_link", description: "The name of the robot's base link frame." }
+
+  action_monitior_period: { type: int, default_value: 10, description: "Time period in milli seconds for monitoring the action goal status." }
+
+  goal_completion_tolerance: { type: double, default_value: 0.1, description: "Distance tolerance in meters to consider a waypoint goal as reached." }
 
   e_stop_topic: { type: string, default_value: "estop_board/hard_estop", description: "Topic to subscribe to for emergency stop messages. If set, the controller will stop all commands when an emergency stop message is received." }

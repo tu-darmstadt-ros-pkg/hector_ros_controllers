@@ -32,7 +32,10 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     std_msgs
     std_srvs
     fcl
+    tf2_ros
+    tf2_geometry_msgs
     hector_ros_controllers_msgs
+    lifecycle_msgs
     ad_kinematics)
 
 foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -54,10 +57,13 @@ generate_parameter_library(
 generate_parameter_library(safety_forward_controller_parameters
                            params/safety_forward_controller_parameters.yaml)
 
+generate_parameter_library(waypoint_controller_base_parameters
+                           params/waypoint_controller_base_parameters.yaml)
+
 generate_parameter_library(safety_position_controller_parameters
                            params/safety_position_controller_parameters.yaml)
-# Add controllers here Define Controllers as Shared Libraries
 
+# Add controllers here Define Controllers as Shared Libraries
 add_library(
   controllers SHARED
   src/waypoint_controller_base.cpp
@@ -82,7 +88,8 @@ target_link_libraries(
          velocity_to_position_command_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
-         safety_position_controller_parameters)
+         safety_position_controller_parameters
+         waypoint_controller_base_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -99,6 +106,7 @@ install(
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters
           safety_position_controller_parameters
+          waypoint_controller_base_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
