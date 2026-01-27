@@ -1,11 +1,9 @@
 name: Lint, Build & Test
 on:
   push:
-    branches:
-      - jazzy
+    branches: [jazzy]
   pull_request:
-    branches:
-      - jazzy
+    branches: [jazzy]
 defaults:
   run:
     shell: bash
@@ -15,64 +13,85 @@ jobs:
     name: Lint Code Base
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup
-        run: |
-          sudo apt-get update && sudo apt-get install -y black clang-format cppcheck libxml2-utils
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-
-      - name: Install and Run pre-commit
-        uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --all-files
-
-
-
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    - name: Setup
+      run: sudo apt-get update && sudo apt-get install -y black clang-format cppcheck libxml2-utils
+    - name: Set up Python
+      uses: actions/setup-python@v4
+    - name: Install and Run pre-commit
+      uses: pre-commit/action@v3.0.1
+      with:
+        extra_args: --all-files
 
   build-and-test:
     needs: Linting
     strategy:
       matrix:
         setup:
-          - rosdistro: jazzy
-            os: ubuntu-24.04
-          #- rosdistro: rolling
-          #  os: ubuntu-latest
+        - rosdistro: jazzy
+          os: ubuntu-24.04
     runs-on: ${{ matrix.setup.os }}
     container:
       image: ros:${{ matrix.setup.rosdistro }}-ros-base
     steps:
-      - name: install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ros-dev-tools
-      - uses: actions/checkout@v4
-        with:
-          repository: tu-darmstadt-ros-pkg/ad_kinematics
-          path: src/ad_kinematics
-      - uses: actions/checkout@v4
-        with:
-          repository: tu-darmstadt-ros-pkg/hector_ros2_utils
-          path: src/hector_ros2_utils
-      - uses: actions/checkout@v4
-        with:
-          path: src/repo
-      - name: rosdep
-        run: |
-          rosdep update --rosdistro ${{ matrix.setup.rosdistro }} --include-eol-distros
-          rosdep install -y --from-paths src --ignore-src --rosdistro ${{ matrix.setup.rosdistro }}
-      - name: build
-        run: |
-          source /opt/ros/${{ matrix.setup.rosdistro }}/setup.bash
-          colcon build
-      - name: test
-        run: |
-          source /opt/ros/${{ matrix.setup.rosdistro }}/setup.bash
-          colcon test
-          colcon test-result --verbose
+    - name: Install Build Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ros-dev-tools python3-vcstool
+
+    - name: Checkout Local Repo
+      uses: actions/checkout@v4
+      with:
+        path: src/${{ github.event.repository.name }}
+
+    - name: Recursive VCS Import
+      run: |
+        cd src
+        PREVIOUS_HASH=""
+        for i in {1..10}; do
+          REPOS_FILES=$(find . -name "*.repos")
+          CURRENT_HASH=$(echo "$REPOS_FILES" | sort | md5sum)
+          if [ "$CURRENT_HASH" == "$PREVIOUS_HASH" ]; then
+            echo "Dependency tree fully resolved at level $((i-1))."
+            break
+          fi
+          echo "Processing Level $i dependencies..."
+          for f in $REPOS_FILES; do
+            vcs import . < "$f"
+          done
+          PREVIOUS_HASH="$CURRENT_HASH"
+        done
+
+    - name: rosdep
+      run: |
+        rosdep update --rosdistro ${{ matrix.setup.rosdistro }} --include-eol-distros
+        rosdep install -y --from-paths src --ignore-src --rosdistro ${{ matrix.setup.rosdistro }}
+
+    - name: Identify Local Packages
+      run: |
+        source /opt/ros/${{ matrix.setup.rosdistro }}/setup.bash
+        # Filter for local repo and flatten newlines to spaces
+        PKGS=$(colcon list --names-only --base-paths src/${{ github.event.repository.name }} | tr '\n' ' ')
+        if [ -z "$PKGS" ]; then
+          echo "::error::No packages found in src/${{ github.event.repository.name }}"
+          exit 1
+        fi
+        echo "LOCAL_PKGS=$PKGS" >> $GITHUB_ENV
+        echo "Found packages: $PKGS"
+
+    - name: Build Local Packages
+      run: |
+        source /opt/ros/${{ matrix.setup.rosdistro }}/setup.bash
+        colcon build --packages-up-to ${{ env.LOCAL_PKGS }} --event-handlers console_direct+
+
+    - name: Test Local Packages
+      run: |
+        source /opt/ros/${{ matrix.setup.rosdistro }}/setup.bash
+        colcon test --packages-select ${{ env.LOCAL_PKGS }} --event-handlers console_direct+
+
+    - name: Test Results
+      if: always()
+      run: |
+        source /opt/ros/${{ matrix.setup.rosdistro }}/setup.bash
+        colcon test-result --verbose
