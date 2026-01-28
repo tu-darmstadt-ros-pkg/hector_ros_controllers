@@ -20,12 +20,10 @@
     <description>
             A chainable position controller ensuring that revolute joints are unwrapped and joint limits are satisfied.
         </description>
-    </class>
-    <class name="waypoint_controller_base/WaypointControllerBase"
-           type="waypoint_controller_base::WaypointControllerBase"
-           base_class_type="controller_interface::ControllerInterface">
-        <description>
+  </class>
+  <class name="waypoint_controller_base/WaypointControllerBase" type="waypoint_controller_base::WaypointControllerBase" base_class_type="controller_interface::ControllerInterface">
+    <description>
             A controller base class for waypoint navigation controllers that send calculate velocity commands to the robot base hardware interface.
         </description>
-    </class>
+  </class>
 </library>
