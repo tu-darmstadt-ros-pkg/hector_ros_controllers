@@ -110,33 +110,32 @@ protected:
 
   virtual bool check_goal_completion( const Waypoint &goal, const Pose &pose );
 
+  controller_interface::CallbackReturn read_parameters();
+  void declare_parameters();
+
 private:
   bool validate_trajectory( const std::vector<geometry_msgs::msg::Point> &trajectory );
 
   void update_pose_cb();
 
-  controller_interface::CallbackReturn read_parameters();
-
   bool set_base_velocities( const MoveCommand &cmd );
-
   bool stop_base();
 
   void preempt_active_goal( std::shared_ptr<waypoint_controller_base::RtGhWayNav> active_trajectory );
 
   void update_feedback();
-
   WaypointNav::Result get_result_msg( bool success, const std::string &failure_report );
 
   // Parameters
   bool use_cmd_vel_;
   std::chrono::milliseconds action_monitor_period_;
-  std::string tf_prefix_;
+  std::string velocity_interfaces_prefix_;
   std::string base_link_frame_;
   double goal_completion_tolerance_;
 
-  std::vector<std::string> command_interface_types_;
-  std::vector<std::string> state_interface_types_;
-  std::string interface_type_;
+  // Interfaces
+  std::vector<std::string> command_interface_names_;
+  std::vector<std::string> state_interface_names_;
 
   rclcpp_action::Server<hector_ros_controllers_msgs::action::WaypointNavigation>::SharedPtr navigation_server_;
 
@@ -148,8 +147,8 @@ private:
   std::shared_ptr<const WaypointNav::Goal> active_trajectory_;
   std::shared_ptr<RtGhWayNav> active_gh_;
 
-  std::shared_ptr<waypoint_controller_base_parameters::ParamListener> param_listener_;
-  waypoint_controller_base_parameters::Params params_;
+  std::shared_ptr<waypoint_controller_base_parameters::ParamListener> base_param_listener_;
+  waypoint_controller_base_parameters::Params base_params_;
 
   // canceled_is only managed by Non-RT thread, active_ only by RT thread
   // This prevents logical race conditions
@@ -162,7 +161,6 @@ private:
   Waypoint current_goal_;
   MoveCommand current_cmd_;
   realtime_tools::RealtimeBuffer<Pose> current_pose_;
-
   realtime_tools::RealtimeDoubleBuffer<WaypointNav::Feedback> feedback_buffer_;
 
   std::shared_ptr<rclcpp::Publisher<geometry_msgs::msg::TwistStamped>> vel_pub_{ nullptr };

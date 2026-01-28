@@ -16,46 +16,56 @@ WaypointControllerBase::WaypointControllerBase() : controller_interface::Control
 
 controller_interface::CallbackReturn WaypointControllerBase::read_parameters()
 {
-  if ( !param_listener_ ) {
+  if ( !base_param_listener_ ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Error encountered during init" );
     return controller_interface::CallbackReturn::ERROR;
   }
-  params_ = param_listener_->get_params();
+  base_params_ = base_param_listener_->get_params();
 
-  if ( params_.tf_prefix.back() == '/' ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "Invalid tf prefix" );
-    return controller_interface::CallbackReturn::ERROR;
-  }
-  tf_prefix_ = params_.tf_prefix;
-
-  if ( params_.base_link_frame_name.empty() ) {
+  if ( base_params_.base_link_frame_name.empty() ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Base link frame name cannot be empty" );
     return controller_interface::CallbackReturn::ERROR;
   }
-  base_link_frame_ = params_.base_link_frame_name;
+  base_link_frame_ = base_params_.base_link_frame_name;
 
   try {
-    action_monitor_period_ = std::chrono::milliseconds( params_.action_monitior_period );
+    action_monitor_period_ = std::chrono::milliseconds( base_params_.action_monitior_period );
   } catch ( const std::exception &e ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Specified invalid action monitor period: %s", e.what() );
   }
 
-  use_cmd_vel_ = params_.use_cmd_vel;
+  velocity_interfaces_prefix_ = base_params_.velocity_interfaces_prefix;
+  use_cmd_vel_ = base_params_.use_cmd_vel;
 
-  if ( params_.goal_completion_tolerance < 0 ) {
+  if ( !use_cmd_vel_ ) {
+    // Define the command and state interface types based on the specified prefix
+    command_interface_names_.push_back( velocity_interfaces_prefix_ + "/linear/velocity" );
+    command_interface_names_.push_back( velocity_interfaces_prefix_ + "/angular/velocity" );
+
+    // state_interface_names_.push_back( velocity_interfaces_prefix_ + "/linear/velocity" );
+    // state_interface_names_.push_back( velocity_interfaces_prefix_ + "/angular/velocity" );
+  }
+
+  if ( base_params_.goal_completion_tolerance < 0 ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Goal completion tolerance must be non-negative" );
     return controller_interface::CallbackReturn::ERROR;
   }
-  goal_completion_tolerance_ = params_.goal_completion_tolerance;
+  goal_completion_tolerance_ = base_params_.goal_completion_tolerance;
 
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+void WaypointControllerBase::declare_parameters()
+{
+  base_param_listener_ =
+      std::make_shared<waypoint_controller_base_parameters::ParamListener>( get_node() );
 }
 
 controller_interface::CallbackReturn WaypointControllerBase::on_init()
 {
   try {
-    param_listener_ =
-        std::make_shared<waypoint_controller_base_parameters::ParamListener>( get_node() );
+    declare_parameters();
+
   } catch ( const std::exception &e ) {
     fprintf( stderr, "Exception thrown during init stage with message: %s \n", e.what() );
     return controller_interface::CallbackReturn::ERROR;
@@ -68,21 +78,12 @@ void WaypointControllerBase::update_pose_cb()
 {
   geometry_msgs::msg::TransformStamped t;
 
-  std::string map_frame = tf_prefix_ + "map";
-  std::string base_frame = tf_prefix_ + base_link_frame_;
-
   try {
-    t = tf_buffer_->lookupTransform( map_frame, base_frame, tf2::TimePointZero );
+    t = tf_buffer_->lookupTransform( "map", base_link_frame_, tf2::TimePointZero );
   } catch ( const tf2::TransformException &ex ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "Could not transform %s to %s: %s", map_frame.c_str(),
-                  base_frame.c_str(), ex.what() );
+    RCLCPP_ERROR( get_node()->get_logger(), "Could not transform the base link frame to map: %s",
+                  ex.what() );
   }
-
-  // Print pose
-  RCLCPP_INFO( get_node()->get_logger(), "Pose Update. x: %f, y: %f, heading: %f",
-               t.transform.translation.x, t.transform.translation.y,
-               tf2::getYaw( t.transform.rotation ) );
-
   const auto pose = Pose( t.transform.translation.x, t.transform.translation.y,
                           tf2::getYaw( t.transform.rotation ) );
   current_pose_.writeFromNonRT( pose );
@@ -128,7 +129,7 @@ WaypointControllerBase::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration command_interfaces_config;
   command_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  command_interfaces_config.names = command_interface_types_;
+  command_interfaces_config.names = command_interface_names_;
 
   return command_interfaces_config;
 }
@@ -137,7 +138,7 @@ controller_interface::InterfaceConfiguration WaypointControllerBase::state_inter
 {
   controller_interface::InterfaceConfiguration state_interface_config;
   state_interface_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  state_interface_config.names = state_interface_types_;
+  state_interface_config.names = state_interface_names_;
 
   return state_interface_config;
 }
@@ -148,11 +149,11 @@ WaypointControllerBase::on_activate( const rclcpp_lifecycle::State & /*previous_
   //  check if we have all resources defined in the "points" parameter
   //  also verify that we *only* have the resources defined in the "points" parameter
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_interfaces;
-  if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_types_,
+  if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_names_,
                                                       std::string( "" ), ordered_interfaces ) ||
-       command_interface_types_.size() != ordered_interfaces.size() ) {
+       command_interface_names_.size() != ordered_interfaces.size() ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Expected %zu command interfaces, got %zu",
-                  command_interface_types_.size(), ordered_interfaces.size() );
+                  command_interface_names_.size(), ordered_interfaces.size() );
     return controller_interface::CallbackReturn::ERROR;
   }
 
@@ -251,8 +252,8 @@ rclcpp_action::CancelResponse WaypointControllerBase::goal_cancelled_callback(
     trajectory_gh_buffer_.writeFromNonRT( std::shared_ptr<RtGhWayNav>() );
     trajectory_buffer_.writeFromNonRT( nullptr );
 
-    action_monitor_timer_->cancel();
-    action_monitor_timer_ = nullptr;
+    // action_monitor_timer_->cancel();
+    // action_monitor_timer_ = nullptr;
 
     RCLCPP_INFO( get_node()->get_logger(),
                  "Canceling active trajectory goal because cancel callback was received." );
@@ -315,8 +316,8 @@ void WaypointControllerBase::preempt_active_goal(
   const auto res_msg = get_result_msg( false, "Goal preempted by a new goal" );
   active_trajectory->setCanceled( std::make_shared<WaypointNav::Result>( res_msg ) );
 
-  action_monitor_timer_->cancel();
-  action_monitor_timer_ = nullptr;
+  // action_monitor_timer_->cancel();
+  // action_monitor_timer_ = nullptr;
 
   trajectory_gh_buffer_.writeFromNonRT( std::shared_ptr<RtGhWayNav>() );
   trajectory_buffer_.writeFromNonRT( nullptr );
@@ -325,7 +326,6 @@ void WaypointControllerBase::preempt_active_goal(
 void WaypointControllerBase::goal_accepted_callback(
     std::shared_ptr<rclcpp_action::ServerGoalHandle<WaypointNav>> goal_handle )
 {
-
   canceled_.store( true );
 
   const auto active_trajectory = *trajectory_gh_buffer_.readFromNonRT();
@@ -335,14 +335,19 @@ void WaypointControllerBase::goal_accepted_callback(
   }
 
   // Update the active goal handle
-  std::shared_ptr<RtGhWayNav> rt_goal = std::make_shared<RtGhWayNav>( goal_handle );
+  std::shared_ptr<RtGhWayNav> rt_goal =
+      std::make_shared<RtGhWayNav>( goal_handle, get_node()->get_logger() );
   rt_goal->execute();
   trajectory_gh_buffer_.writeFromNonRT( rt_goal );
 
   // Update ttrajectory
   trajectory_buffer_.writeFromNonRT( goal_handle->get_goal() );
 
-  // Setup goal status checking timer
+  // Delete previous timer
+  // Timer is kept to keep previous gh in scope until cancelation/success/aborting is processed
+  if ( action_monitor_timer_ )
+    action_monitor_timer_->reset();
+
   action_monitor_timer_ = get_node()->create_wall_timer(
       action_monitor_period_, std::bind( &RtGhWayNav::runNonRealtime, rt_goal ) );
 
@@ -356,7 +361,7 @@ bool WaypointControllerBase::stop_base() { return set_base_velocities( MoveComma
 
 bool WaypointControllerBase::set_base_velocities( const MoveCommand &cmd )
 {
-
+  bool success = true;
   if ( use_cmd_vel_ ) {
     auto twist_msg = geometry_msgs::msg::TwistStamped();
     twist_msg.header.stamp = this->get_node()->now();
@@ -364,11 +369,12 @@ bool WaypointControllerBase::set_base_velocities( const MoveCommand &cmd )
     twist_msg.twist.angular.z = cmd.angual_vel_cmd;
     vel_pub_->publish( twist_msg );
   } else {
-    // Implement real base command setting logic here
+    success = success && command_interfaces_[0].set_value( cmd.linear_vel_cmd ); // linear velocity
+    success = success && command_interfaces_[1].set_value( cmd.angual_vel_cmd ); // angular velocity
   }
 
   // Implement command setting logic here
-  return true;
+  return success;
 }
 
 controller_interface::return_type
