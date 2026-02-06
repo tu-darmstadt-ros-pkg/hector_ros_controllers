@@ -6,8 +6,12 @@ waypoint_controller_base_parameters:
 
   base_link_frame_name: {type: string, default_value: base_link, description: The name of the robot's base link frame.}
 
+  pose_reference_frame_name: {type: string, default_value: map, description: The name of the reference frame for the robot's pose.}
+
   action_monitior_period: {type: int, default_value: 10, description: Time period in milli seconds for monitoring the action goal status.}
 
-  goal_completion_tolerance: {type: double, default_value: 0.1, description: Distance tolerance in meters to consider a waypoint goal as reached.}
+  point_completion_tolerance: {type: double, default_value: 0.1, description: Distance tolerance in meters to consider a waypoint goal as reached.}
+
+  heading_completion_tolerance: {type: double, default_value: 0.1, description: Heading tolerance in radians to consider a waypoint goal as reached.}
 
   e_stop_topic: {type: string, default_value: estop_board/hard_estop, description: 'Topic to subscribe to for emergency stop messages. If set, the controller will stop all commands when an emergency stop message is received.'}

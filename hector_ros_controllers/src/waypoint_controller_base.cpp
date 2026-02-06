@@ -1,4 +1,4 @@
-#include "waypoint_controller_base/waypoint_controller_base.hpp"
+#include "waypoint_controller/waypoint_controller_base.hpp"
 
 #include <chrono>
 #include <memory>
@@ -10,7 +10,7 @@
 #include "rclcpp/logging.hpp"
 #include "rclcpp/qos.hpp"
 
-namespace waypoint_controller_base
+namespace waypoint_controller
 {
 WaypointControllerBase::WaypointControllerBase() : controller_interface::ControllerInterface() { }
 
@@ -28,6 +28,12 @@ controller_interface::CallbackReturn WaypointControllerBase::read_parameters()
   }
   base_link_frame_ = base_params_.base_link_frame_name;
 
+  if ( base_params_.pose_reference_frame_name.empty() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Pose reference frame name cannot be empty" );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+  pose_reference_frame_ = base_params_.pose_reference_frame_name;
+
   try {
     action_monitor_period_ = std::chrono::milliseconds( base_params_.action_monitior_period );
   } catch ( const std::exception &e ) {
@@ -41,16 +47,19 @@ controller_interface::CallbackReturn WaypointControllerBase::read_parameters()
     // Define the command and state interface types based on the specified prefix
     command_interface_names_.push_back( velocity_interfaces_prefix_ + "/linear/velocity" );
     command_interface_names_.push_back( velocity_interfaces_prefix_ + "/angular/velocity" );
-
-    // state_interface_names_.push_back( velocity_interfaces_prefix_ + "/linear/velocity" );
-    // state_interface_names_.push_back( velocity_interfaces_prefix_ + "/angular/velocity" );
   }
 
-  if ( base_params_.goal_completion_tolerance < 0 ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "Goal completion tolerance must be non-negative" );
+  if ( base_params_.point_completion_tolerance < 0 ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Point completion tolerance must be non-negative" );
     return controller_interface::CallbackReturn::ERROR;
   }
-  goal_completion_tolerance_ = base_params_.goal_completion_tolerance;
+  point_completion_tolerance_ = base_params_.point_completion_tolerance;
+
+  if ( base_params_.heading_completion_tolerance < 0 ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Heading completion tolerance must be non-negative" );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+  heading_completion_tolerance_ = base_params_.heading_completion_tolerance;
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -79,10 +88,10 @@ void WaypointControllerBase::update_pose_cb()
   geometry_msgs::msg::TransformStamped t;
 
   try {
-    t = tf_buffer_->lookupTransform( "map", base_link_frame_, tf2::TimePointZero );
+    t = tf_buffer_->lookupTransform( pose_reference_frame_, base_link_frame_, tf2::TimePointZero );
   } catch ( const tf2::TransformException &ex ) {
-    RCLCPP_ERROR( get_node()->get_logger(), "Could not transform the base link frame to map: %s",
-                  ex.what() );
+    RCLCPP_ERROR( get_node()->get_logger(), "Could not transform the base link frame to %s: %s",
+                  pose_reference_frame_.c_str(), ex.what() );
   }
   const auto pose = Pose( t.transform.translation.x, t.transform.translation.y,
                           tf2::getYaw( t.transform.rotation ) );
@@ -193,47 +202,19 @@ WaypointControllerBase::on_deactivate( const rclcpp_lifecycle::State & /*previou
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-bool WaypointControllerBase::check_goal_completion( const Waypoint &goal, const Pose &current_pose )
+bool WaypointControllerBase::check_goal_completion( const Waypoint &goal, const Pose &current_pose,
+                                                    bool is_final_goal )
 {
   // Use euclidean distance to check if goal is reached
-  return std::sqrt( std::pow( goal.x - current_pose.x, 2 ) +
-                    std::pow( goal.y - current_pose.y, 2 ) ) <= goal_completion_tolerance_;
-}
+  bool goal_reached =
+      std::sqrt( std::pow( goal.x - current_pose.x, 2 ) + std::pow( goal.y - current_pose.y, 2 ) ) <=
+      point_completion_tolerance_;
 
-// Simple placeholder implementation for testing. Proper controllers should override this method.
-MoveCommand WaypointControllerBase::computeCommand( const Waypoint &goal, const Pose &pose,
-                                                    const double &curr_linear_vel,
-                                                    const double &curr_angular_vel )
-{
-  MoveCommand cmd;
+  if ( is_final_goal )
+    goal_reached = goal_reached && ( std::abs( goal.heading - current_pose.heading ) <=
+                                     heading_completion_tolerance_ );
 
-  // Gains (tune these)
-  const double k_rho = 0.8;
-  const double k_alpha = 2.0;
-
-  // Velocity limits
-  const double v_max = 0.5;     // m/s
-  const double omega_max = 1.5; // rad/s
-
-  // Position error
-  double dx = goal.x - pose.x;
-  double dy = goal.y - pose.y;
-
-  // Distance to goal
-  double rho = std::sqrt( dx * dx + dy * dy );
-
-  // Desired heading
-  double theta_des = std::atan2( dy, dx );
-
-  // Heading error
-  double alpha = ( theta_des - pose.heading );
-  alpha = std::atan2( std::sin( alpha ), std::cos( alpha ) );
-
-  // Control law
-  cmd.linear_vel_cmd = std::clamp( k_rho * rho, -v_max, v_max );
-  cmd.angual_vel_cmd = std::clamp( k_alpha * alpha, -omega_max, omega_max );
-
-  return cmd;
+  return goal_reached;
 }
 
 rclcpp_action::CancelResponse WaypointControllerBase::goal_cancelled_callback(
@@ -278,7 +259,7 @@ WaypointControllerBase::goal_received_callback( const rclcpp_action::GoalUUID &,
     return rclcpp_action::GoalResponse::REJECT;
   }
 
-  if ( !validate_trajectory( goal->waypoint_trajectory ) ) {
+  if ( !validate_trajectory( goal->waypoint_trajectory, goal->heading_trajectory ) ) {
 
     return rclcpp_action::GoalResponse::REJECT;
   }
@@ -286,20 +267,31 @@ WaypointControllerBase::goal_received_callback( const rclcpp_action::GoalUUID &,
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
-bool WaypointControllerBase::validate_trajectory( const std::vector<geometry_msgs::msg::Point> &trajectory )
+bool WaypointControllerBase::validate_trajectory(
+    const std::vector<geometry_msgs::msg::Point> &point_trajectory,
+    const std::vector<double> &heading_trajectory )
 {
-  if ( trajectory.empty() ) {
+  if ( point_trajectory.empty() || heading_trajectory.empty() ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Received empty trajectory, rejecting goal" );
+    return false;
+  }
+
+  if ( point_trajectory.size() != heading_trajectory.size() ) {
+    RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "Received trajectory with different number of waypoints and headings, rejecting goal" );
     return false;
   }
 
   const auto current_pose = current_pose_.readFromNonRT();
   // compute distance from current position to first waypoint
-  double total_distance = std::sqrt( std::pow( trajectory[0].x - current_pose->x, 2 ) +
-                                     std::pow( trajectory[0].y - current_pose->y, 2 ) );
-  for ( size_t i = 1; i < trajectory.size(); ++i ) {
-    total_distance += std::sqrt( std::pow( trajectory[i].x - trajectory[i - 1].x, 2 ) +
-                                 std::pow( trajectory[i].y - trajectory[i - 1].y, 2 ) );
+  double total_distance = std::sqrt( std::pow( point_trajectory[0].x - current_pose->x, 2 ) +
+                                     std::pow( point_trajectory[0].y - current_pose->y, 2 ) ) +
+                          std::abs( heading_trajectory[0] - current_pose->heading );
+  for ( size_t i = 1; i < point_trajectory.size(); ++i ) {
+    total_distance += std::sqrt( std::pow( point_trajectory[i].x - point_trajectory[i - 1].x, 2 ) +
+                                 std::pow( point_trajectory[i].y - point_trajectory[i - 1].y, 2 ) ) +
+                      std::abs( heading_trajectory[i] - heading_trajectory[i - 1] );
   }
   if ( total_distance <= 0.0 ) {
     RCLCPP_ERROR( get_node()->get_logger(),
@@ -310,14 +302,10 @@ bool WaypointControllerBase::validate_trajectory( const std::vector<geometry_msg
   return true;
 }
 
-void WaypointControllerBase::preempt_active_goal(
-    std::shared_ptr<waypoint_controller_base::RtGhWayNav> active_trajectory )
+void WaypointControllerBase::preempt_active_goal( std::shared_ptr<RtGhWayNav> active_trajectory )
 {
   const auto res_msg = get_result_msg( false, "Goal preempted by a new goal" );
   active_trajectory->setCanceled( std::make_shared<WaypointNav::Result>( res_msg ) );
-
-  // action_monitor_timer_->cancel();
-  // action_monitor_timer_ = nullptr;
 
   trajectory_gh_buffer_.writeFromNonRT( std::shared_ptr<RtGhWayNav>() );
   trajectory_buffer_.writeFromNonRT( nullptr );
@@ -373,7 +361,6 @@ bool WaypointControllerBase::set_base_velocities( const MoveCommand &cmd )
     success = success && command_interfaces_[1].set_value( cmd.angual_vel_cmd ); // angular velocity
   }
 
-  // Implement command setting logic here
   return success;
 }
 
@@ -386,7 +373,8 @@ WaypointControllerBase::update( const rclcpp::Time & /*time*/, const rclcpp::Dur
     active_trajectory_ = *trajectory_buffer_.readFromRT();
 
     current_goal_idx_ = 0;
-    current_goal_ = active_trajectory_->waypoint_trajectory[0];
+    current_goal_ = Waypoint( active_trajectory_->waypoint_trajectory[0],
+                              active_trajectory_->heading_trajectory[0] );
     active_ = true;
   }
 
@@ -401,7 +389,9 @@ WaypointControllerBase::update( const rclcpp::Time & /*time*/, const rclcpp::Dur
 
   update_feedback();
 
-  if ( check_goal_completion( current_goal_, *current_pose_.readFromRT() ) ) {
+  if ( check_goal_completion( current_goal_, *current_pose_.readFromRT(),
+                              current_goal_idx_ ==
+                                  active_trajectory_->waypoint_trajectory.size() - 1 ) ) {
     current_goal_idx_ += 1;
 
     if ( current_goal_idx_ == active_trajectory_->waypoint_trajectory.size() ) {
@@ -418,7 +408,8 @@ WaypointControllerBase::update( const rclcpp::Time & /*time*/, const rclcpp::Dur
       }
     } else {
       // proceed to next goal
-      current_goal_ = active_trajectory_->waypoint_trajectory[current_goal_idx_];
+      current_goal_ = Waypoint( active_trajectory_->waypoint_trajectory[current_goal_idx_],
+                                active_trajectory_->heading_trajectory[current_goal_idx_] );
     }
   }
 
@@ -457,12 +448,9 @@ WaypointNav::Result WaypointControllerBase::get_result_msg( bool success,
   result.success = success;
   result.final_position.x = pose->x;
   result.final_position.y = pose->y;
+  result.final_heading = pose->heading;
   result.failure_report = failure_report;
 
   return result;
 }
-} // namespace waypoint_controller_base
-
-#include "pluginlib/class_list_macros.hpp"
-PLUGINLIB_EXPORT_CLASS( waypoint_controller_base::WaypointControllerBase,
-                        controller_interface::ControllerInterface )
+} // namespace waypoint_controller
