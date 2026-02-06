@@ -1,0 +1,11 @@
+geometry_msgs/Point[] waypoint_trajectory
+float64[] heading_trajectory
+---
+bool success
+string failure_report
+geometry_msgs/Point final_position
+float64 final_heading
+---
+geometry_msgs/Point current_goal
+geometry_msgs/Point current_position
+float64 current_heading
