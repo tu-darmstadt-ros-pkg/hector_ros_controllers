@@ -306,14 +306,15 @@ void VelocityToPositionControllersBase::update_sync_offsets()
 
 double VelocityToPositionControllersBase::sync_pd_control( const size_t &joint_idx )
 {
+  // TODO: write
   double sync_pos_command = 0.0;
   for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
     sync_pos_command +=
-        ( joint_position_states_[synced_joints_[joint_idx][i]] - joint_position_states_[joint_idx] -
-          sync_offsets_[joint_idx][i] ) *
-            kp_sync_ +
-        ( joint_velocity_states_[synced_joints_[joint_idx][i]] - joint_velocity_states_[joint_idx] ) *
-            kd_sync_; // dampen swinging by using velocity difference between joints
+        kp_sync_ * ( joint_position_states_[synced_joints_[joint_idx][i]] -
+                     joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i] ) +
+        kd_sync_ *
+            ( joint_velocity_states_[synced_joints_[joint_idx][i]] -
+              joint_velocity_states_[joint_idx] ); // dampen swinging by using velocity difference between joints
   }
   return sync_pos_command / (double)synced_joints_[joint_idx].size();
 }
