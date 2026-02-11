@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<package format="3">
+  <name>hector_ros_controllers</name>
+  <version>1.0.0</version>
+  <description>Various custom ros2 controllers</description>
+  <maintainer email="marekdaniv@googlemail.com">Marek Daniv</maintainer>
+  <license>Apache License 2.0</license>
+  <url type="website">https://control.ros.org</url>
+  <url type="repository">https://github.com/ros-controls/ros2_controllers/</url>
+  <url type="bugtracker">https://github.com/ros-controls/ros2_controllers/issues</url>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ad_kinematics</depend>
+  <depend>backward_ros</depend>
+  <depend>controller_interface</depend>
+  <depend>generate_parameter_library</depend>
+  <depend>hardware_interface</depend>
+  <depend>hpp-fcl</depend>
+  <depend>libfcl-dev</depend>
+  <depend>pinocchio</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>realtime_tools</depend>
+  <depend>srdfdom</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>visualization_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

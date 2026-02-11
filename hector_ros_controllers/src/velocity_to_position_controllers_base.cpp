@@ -36,6 +36,9 @@ VelocityToPositionControllersBase::setPIDGains( const rclcpp::Parameter &p )
     if ( p.get_name() == "kp_sync" ) {
       kp_sync_ = val;
     }
+    if ( p.get_name() == "kd_sync" ) {
+      kd_sync_ = val;
+    }
 
     RCLCPP_INFO( get_node()->get_logger(), "Reconfigured %s to %f", p.get_name().c_str(), val );
   }
@@ -61,6 +64,11 @@ controller_interface::CallbackReturn VelocityToPositionControllersBase::on_init(
 
     cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
         "kp_sync",
+        std::bind( &VelocityToPositionControllersBase::setPIDGains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_kd_ = param_subscriber_->add_parameter_callback(
+        "kd_sync",
         std::bind( &VelocityToPositionControllersBase::setPIDGains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -296,13 +304,16 @@ void VelocityToPositionControllersBase::update_sync_offsets()
   }
 }
 
-double VelocityToPositionControllersBase::sync_p_control( const size_t &joint_idx )
+double VelocityToPositionControllersBase::sync_pd_control( const size_t &joint_idx )
 {
   double sync_pos_command = 0.0;
   for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
-    sync_pos_command += ( joint_position_states_[synced_joints_[joint_idx][i]] -
-                          joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i] ) *
-                        kp_sync_;
+    sync_pos_command +=
+        ( joint_position_states_[synced_joints_[joint_idx][i]] - joint_position_states_[joint_idx] -
+          sync_offsets_[joint_idx][i] ) *
+            kp_sync_ +
+        ( joint_velocity_states_[synced_joints_[joint_idx][i]] - joint_velocity_states_[joint_idx] ) *
+            kd_sync_; // dampen swinging by using velocity difference between joints
   }
   return sync_pos_command / (double)synced_joints_[joint_idx].size();
 }

@@ -1,0 +1,1 @@
+#pragma message("#include \"safety_forward_controller_parameters.hpp\" is deprecated. Use #include <hector_ros_controllers/safety_forward_controller_parameters.hpp> instead.")

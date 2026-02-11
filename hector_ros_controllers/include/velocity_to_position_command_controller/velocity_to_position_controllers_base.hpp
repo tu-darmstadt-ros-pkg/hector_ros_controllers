@@ -110,7 +110,7 @@ protected:
 
   void update_sync_offsets();
 
-  double sync_p_control( const size_t &joint_idx );
+  double sync_pd_control( const size_t &joint_idx );
 
   double pos_pd_control( const size_t &joint_idx, const double &vel_command,
                          const rclcpp::Duration &p );
@@ -151,12 +151,14 @@ protected:
   bool interfaces_valid_;
 
   double kp_sync_;
+  double kd_sync_; 
   double kp_;
   double kd_;
 
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_kp_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_kd_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_kp_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_kd_;
 
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
 

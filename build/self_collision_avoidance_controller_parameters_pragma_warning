@@ -1,0 +1,1 @@
+#pragma message("#include \"self_collision_avoidance_controller_parameters.hpp\" is deprecated. Use #include <hector_ros_controllers/self_collision_avoidance_controller_parameters.hpp> instead.")
