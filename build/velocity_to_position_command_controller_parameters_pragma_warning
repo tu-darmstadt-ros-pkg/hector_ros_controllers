@@ -1,1 +1,0 @@
-#pragma message("#include \"velocity_to_position_command_controller_parameters.hpp\" is deprecated. Use #include <hector_ros_controllers/velocity_to_position_command_controller_parameters.hpp> instead.")
