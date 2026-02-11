@@ -75,6 +75,40 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
         } );
   }
 
+  // Service to temporarily bypass safety checks (collision + relaxed joint limits)
+  bypass_safety_checks_service_ = node->create_service<std_srvs::srv::SetBool>(
+      "~/bypass_safety_checks",
+      [this]( const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+              std::shared_ptr<std_srvs::srv::SetBool::Response> response ) {
+        if ( request->data ) {
+          // Enable bypass: start timer to auto-disable
+          safety_bypass_active_.store( true, std::memory_order_relaxed );
+          const double timeout_sec = params_.safety_bypass_timeout;
+          safety_bypass_timer_ =
+              get_node()->create_wall_timer( std::chrono::duration<double>( timeout_sec ), [this]() {
+                safety_bypass_active_.store( false, std::memory_order_relaxed );
+                safety_bypass_timer_->cancel();
+                RCLCPP_WARN( get_node()->get_logger(),
+                             "Safety bypass timeout expired. Safety checks re-enabled." );
+              } );
+          response->success = true;
+          response->message = "Safety bypass ENABLED. Collision checks disabled, joint limits "
+                              "relaxed. Will auto-disable after " +
+                              std::to_string( timeout_sec ) + " seconds.";
+          RCLCPP_WARN( get_node()->get_logger(), "%s", response->message.c_str() );
+        } else {
+          // Disable bypass: cancel timer and re-enable safety
+          safety_bypass_active_.store( false, std::memory_order_relaxed );
+          if ( safety_bypass_timer_ ) {
+            safety_bypass_timer_->cancel();
+            safety_bypass_timer_.reset();
+          }
+          response->success = true;
+          response->message = "Safety bypass DISABLED. Normal safety checks restored.";
+          RCLCPP_INFO( get_node()->get_logger(), "%s", response->message.c_str() );
+        }
+      } );
+
   // Debug joint state publishers
   if ( params_.publish_debug_joint_states ) {
     debug_in_js_pub_ =
@@ -328,8 +362,16 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     success &= write_current_limits();
   }
 
-  // check collisions with the new commands
-  if ( !params_.check_self_collisions || !collision_checker_ ) {
+  // check collisions with the new commands (skip if bypass is active)
+  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+  const bool skip_collision_check =
+      bypass_active || !params_.check_self_collisions || !collision_checker_;
+
+  if ( skip_collision_check ) {
+    if ( bypass_active && params_.check_self_collisions && collision_checker_ ) {
+      RCLCPP_DEBUG_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                             throttle_logging_msg, "Safety bypass active: skipping collision check" );
+    }
     write_position_commands( cmd_positions_ );
   } else {
     // prepare collision checker input
@@ -400,6 +442,8 @@ bool SafetyPositionController::write_position_commands( const std::vector<double
 
 void SafetyPositionController::enforce_limits()
 {
+  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+
   // enforce limits and write updated commands into cmd_positions_
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     const double target_wrapped = reference_interfaces_[i];
@@ -409,12 +453,13 @@ void SafetyPositionController::enforce_limits()
 
     double commanded = target_wrapped;
     if ( kinds_[i] == JointType::CONTINUOUS ) {
+      // Joint wrapping is ALWAYS active, even during bypass
       if ( params_.unwrap_continuous_joints ) {
         commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
       }
     } else {
       if ( params_.enforce_position_limits ) {
-        commanded = clamp( i, commanded ); // checks if the joint has limits
+        commanded = clamp( i, commanded, bypass_active ); // checks if the joint has limits
       }
     }
 
@@ -482,22 +527,30 @@ double SafetyPositionController::get_signed_distance( double value_a, double val
   return diff;
 }
 
-double SafetyPositionController::clamp( const size_t i, const double value ) const
+double SafetyPositionController::clamp( const size_t i, const double value,
+                                        const bool bypass_active ) const
 {
   if ( !has_limits_[i] ) {
     return value;
   }
 
-  const double lo = std::min( lower_limits_[i], current_positions_[i] );
-  const double hi = std::max( upper_limits_[i], current_positions_[i] );
+  // Calculate tolerance: when bypass is active, extend limits by the configured tolerance factor
+  const double range = upper_limits_[i] - lower_limits_[i];
+  const double tolerance =
+      bypass_active ? ( range * params_.safety_bypass_joint_limit_tolerance ) : 0.0;
+
+  const double lo = std::min( lower_limits_[i] - tolerance, current_positions_[i] );
+  const double hi = std::max( upper_limits_[i] + tolerance, current_positions_[i] );
   if ( value < lo ) {
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                          "Clamping joint '%s' to lower limit %.3f", params_.joints[i].c_str(), lo );
+                          "Clamping joint '%s' to lower limit %.3f%s", params_.joints[i].c_str(),
+                          lo, bypass_active ? " (bypass active, tolerance applied)" : "" );
     return lo;
   }
   if ( value > hi ) {
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                          "Clamping joint '%s' to upper limit %.3f", params_.joints[i].c_str(), hi );
+                          "Clamping joint '%s' to upper limit %.3f%s", params_.joints[i].c_str(),
+                          hi, bypass_active ? " (bypass active, tolerance applied)" : "" );
     return hi;
   }
   return value;

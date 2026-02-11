@@ -67,3 +67,13 @@ safety_position_controller:
         type: double
         default_value: 5.0
         description: Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off.
+
+  safety_bypass_timeout:
+    type: double
+    default_value: 60.0
+    description: Time in seconds after which safety checks are automatically re-enabled when bypassed via service. Must be positive.
+
+  safety_bypass_joint_limit_tolerance:
+    type: double
+    default_value: 0.03
+    description: Tolerance factor (0.0-1.0) added to joint limits when safety bypass is active. E.g., 0.03 means 3% tolerance beyond normal limits.

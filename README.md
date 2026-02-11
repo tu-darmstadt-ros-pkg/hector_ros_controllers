@@ -94,6 +94,13 @@ A **safety layer for joint position commands**, usable both
 
     * Subscribes to `~/safety_estop` (`std_msgs/Bool`).
     * On activation → records current positions and *holds them* (no limit/collision checks) until E-Stop is released.
+* **Safety Bypass Mode** (for folded arm positions):
+
+    * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) to temporarily disable collision checks and relax joint limits.
+    * Useful when driving the arm into folded positions where intentional collisions must be made.
+    * Adds configurable tolerance to joint limits (default 3%).
+    * Auto-disables after configurable timeout (default 60 seconds) for safety.
+    * **Note:** Joint wrapping for continuous joints remains **always active** even during bypass.
 * **Optional current-limit control**:
 
     * Per-joint compliant/stiff current limits, written to `<joint>/current`.
@@ -119,6 +126,8 @@ A **safety layer for joint position commands**, usable both
 | `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint current limit in **compliant** mode [A].                                                                  |
 | `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint current limit in **stiff** mode [A].                                                                      |
 | `publish_debug_joint_states`       | `bool`     | `false` | If `true`, publishes debug `JointState` messages for incoming references and outgoing commands.                     |
+| `safety_bypass_timeout`            | `double`   | `60.0`  | Time in seconds after which safety bypass auto-disables. Must be positive.                                          |
+| `safety_bypass_joint_limit_tolerance` | `double` | `0.03`  | Tolerance factor (0.0-1.0) added to joint limits during bypass. E.g., 0.03 = 3% beyond normal limits.               |
 
 > **Note:** Parameters are read/updated at `on_activate()`. To apply runtime changes reliably, deactivate and reactivate the controller.
 
@@ -148,6 +157,7 @@ Enabled if `publish_debug_joint_states = true`:
 | Service                    | Type               | Description                                                                                          |
 | -------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------- |
 | `~/enforce_current_limits` | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) compliant mode (switch between compliant/stiff current limits). |
+| `~/bypass_safety_checks`   | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) safety bypass mode. Disables collision checks and relaxes joint limits. Auto-disables after `safety_bypass_timeout` seconds. Joint wrapping remains active. |
 
 
 ## Example Configuration

@@ -158,9 +158,10 @@ private:
    * @brief Clamp value to [lower, upper] (with validity checks); logs on clamp.
    * @param i joint index in params_.joints
    * @param value requested value
+   * @param bypass_active if true, applies tolerance extension to limits
    * @return clamped value
    */
-  double clamp( size_t i, double value ) const;
+  double clamp( size_t i, double value, bool bypass_active = false ) const;
 
   /**
    * @brief Parse URDF, collect joint names (non-fixed) and limits for params_.joints.
@@ -192,6 +193,13 @@ private:
   // ---- E-stop ----
   std::atomic<bool> estop_active_{ false };  ///< last requested E-stop state
   std::atomic<bool> estop_engaged_{ false }; ///< actually engaged in update loop
+
+  // ---- Safety bypass (for folded arm positions etc.) ----
+  std::atomic<bool> safety_bypass_active_{
+      false }; ///< when true, collision checks and strict limits are relaxed
+  rclcpp::TimerBase::SharedPtr safety_bypass_timer_; ///< auto re-enables safety checks after timeout
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr
+      bypass_safety_checks_service_; ///< service to toggle bypass
 
   // ---- Interface bookkeeping ----
   std::vector<int> joint_index_; ///< index in all_joint_names per params_.joints
