@@ -63,6 +63,9 @@ generate_parameter_library(waypoint_controller_base_parameters
 generate_parameter_library(safety_position_controller_parameters
                            params/safety_position_controller_parameters.yaml)
 
+generate_parameter_library(lqr_controller_parameters
+params/lqr_controller_parameters.yaml)
+
 # Add controllers here Define Controllers as Shared Libraries
 add_library(
   controllers SHARED
@@ -87,6 +90,7 @@ target_link_libraries(
   PUBLIC fcl
          hpp-fcl::hpp-fcl
          pinocchio::pinocchio
+         lqr_controller_parameters
          velocity_to_position_command_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
@@ -104,6 +108,7 @@ pluginlib_export_plugin_description_file(controller_interface
 install(DIRECTORY include/ DESTINATION include/)
 install(
   TARGETS controllers
+          lqr_controller_parameters
           velocity_to_position_command_controller_parameters
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters

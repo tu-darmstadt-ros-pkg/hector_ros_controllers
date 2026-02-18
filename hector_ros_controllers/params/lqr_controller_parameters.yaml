@@ -1,0 +1,4 @@
+lqr_controller: 
+  q11: {type: double, default_value: 1000, description: lateral error weight}
+  q22: {type: double, default_value: 1.0, description: heading error weight}
+  r: {type: double, default_value: 1.0, description: control effort weight}
