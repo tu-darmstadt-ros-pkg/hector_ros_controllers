@@ -5,3 +5,4 @@ CMakeLists.txt.user
 .vscode
 __pycache__/
 **/__pycache__/
+build/
