@@ -66,6 +66,7 @@ generate_parameter_library(safety_position_controller_parameters
 # Add controllers here Define Controllers as Shared Libraries
 add_library(
   controllers SHARED
+  src/lqr_controller.cpp
   src/simple_waypoint_controller.cpp
   src/waypoint_controller_base.cpp
   src/velocity_to_position_controllers_base.cpp
