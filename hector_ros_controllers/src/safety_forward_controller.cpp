@@ -112,9 +112,12 @@ SafetyForwardController::on_configure( const rclcpp_lifecycle::State & /*previou
   joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
       "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
         rt_command_ptr_.writeFromNonRT( msg );
-        safety_engaged_.store( false );
+        const bool was_engaged = safety_engaged_.exchange( false );
         if ( safety_timer_ ) {
           safety_timer_->reset();
+        }
+        if ( was_engaged ) {
+          publish_status();
         }
       } );
 
@@ -127,9 +130,16 @@ SafetyForwardController::on_configure( const rclcpp_lifecycle::State & /*previou
             safety_engaged_.store( true );
             RCLCPP_WARN( get_node()->get_logger(),
                          "Safety engaged, stopping all commands (timeout)" );
+            publish_status();
           }
         } );
   }
+
+  // Status publisher (latched)
+  auto qos_latched = rclcpp::QoS( 1 ).transient_local().reliable();
+  status_pub_ =
+      get_node()->create_publisher<hector_ros_controllers_msgs::msg::SafetyForwardControllerStatus>(
+          "~/status", qos_latched );
 
   RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
 
@@ -179,9 +189,12 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
   joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
       "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
         rt_command_ptr_.writeFromNonRT( msg );
-        safety_engaged_.store( false );
+        const bool was_engaged = safety_engaged_.exchange( false );
         if ( safety_timer_ ) {
           safety_timer_->reset();
+        }
+        if ( was_engaged ) {
+          publish_status();
         }
       } );
 
@@ -195,6 +208,8 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
                        estop_active_ ? "ENGAGED" : "DISENGAGED" );
         }
       } );
+
+  publish_status();
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
@@ -291,7 +306,7 @@ void SafetyForwardController::record_hold_positions()
   hold_positions_.assign( joints_.size(), 0.0 );
 
   for ( const auto &state_iface : state_interfaces_ ) {
-    const auto &joint_name = state_iface.get_name();
+    const auto &joint_name = state_iface.get_prefix_name();
     const auto &iface_name = state_iface.get_interface_name();
 
     if ( iface_name == "position" ) {
@@ -338,12 +353,14 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
 
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: latching positions for %zu joints",
                    hold_positions_.size() );
+      publish_status();
     } else {
       // -------- E-STOP RELEASE --------
       estop_engaged_.store( false );
       estop_engaged = false;
 
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming command output" );
+      publish_status();
       // on e-stop release, invalidate commands once
       for ( auto &ref : reference_interfaces_ ) ref = std::numeric_limits<double>::quiet_NaN();
       return controller_interface::return_type::OK;
@@ -406,6 +423,18 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
   }
 
   return controller_interface::return_type::OK;
+}
+
+void SafetyForwardController::publish_status()
+{
+  if ( !status_pub_ ) {
+    return;
+  }
+  hector_ros_controllers_msgs::msg::SafetyForwardControllerStatus msg;
+  msg.header.stamp = get_node()->now();
+  msg.estop_engaged = estop_engaged_.load();
+  msg.safety_timer_engaged = safety_engaged_.load();
+  status_pub_->publish( msg );
 }
 
 } // namespace safety_forward_controller

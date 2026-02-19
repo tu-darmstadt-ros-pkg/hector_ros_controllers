@@ -72,6 +72,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
           response->message = std::string( "Set enforce_current_limits to " ) +
                               ( in_compliant_mode_ ? "true" : "false" );
           RCLCPP_INFO( get_node()->get_logger(), "%s", response->message.c_str() );
+          publish_status();
         } );
   }
 
@@ -90,12 +91,14 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
                 safety_bypass_timer_->cancel();
                 RCLCPP_WARN( get_node()->get_logger(),
                              "Safety bypass timeout expired. Safety checks re-enabled." );
+                publish_status();
               } );
           response->success = true;
           response->message = "Safety bypass ENABLED. Collision checks disabled, joint limits "
                               "relaxed. Will auto-disable after " +
                               std::to_string( timeout_sec ) + " seconds.";
           RCLCPP_WARN( get_node()->get_logger(), "%s", response->message.c_str() );
+          publish_status();
         } else {
           // Disable bypass: cancel timer and re-enable safety
           safety_bypass_active_.store( false, std::memory_order_relaxed );
@@ -106,8 +109,15 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
           response->success = true;
           response->message = "Safety bypass DISABLED. Normal safety checks restored.";
           RCLCPP_INFO( get_node()->get_logger(), "%s", response->message.c_str() );
+          publish_status();
         }
       } );
+
+  // Status publisher (latched)
+  auto qos_latched = rclcpp::QoS( 1 ).transient_local().reliable();
+  status_pub_ =
+      node->create_publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>(
+          "~/status", qos_latched );
 
   // Debug joint state publishers
   if ( params_.publish_debug_joint_states ) {
@@ -220,6 +230,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   estop_engaged_.store( false, std::memory_order_relaxed );
 
+  publish_status();
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -327,10 +339,12 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       estop_engaged_.store( true, std::memory_order_relaxed );
       estop_engaged = true;
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints", n );
+      publish_status();
     } else {
       // release E-stop
       estop_engaged_.store( false, std::memory_order_relaxed );
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming normal commands" );
+      publish_status();
       // on release, invalidate old commands once
       for ( auto &ref : reference_interfaces_ ) ref = std::numeric_limits<double>::quiet_NaN();
       return controller_interface::return_type::OK;
@@ -692,6 +706,22 @@ void SafetyPositionController::publish_debug_joint_state_out( const std::vector<
   msg.name = params_.joints;
   msg.position = positions;
   debug_out_js_pub_->publish( msg );
+}
+
+void SafetyPositionController::publish_status()
+{
+  if ( !status_pub_ ) {
+    return;
+  }
+  hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus msg;
+  msg.header.stamp = get_node()->now();
+  msg.safety_bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+  msg.compliant_mode = in_compliant_mode_;
+  msg.current_limits_enabled = params_.set_current_limits;
+  msg.collision_check_enabled = params_.check_self_collisions;
+  msg.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
+  msg.position_limits_enforced = params_.enforce_position_limits;
+  status_pub_->publish( msg );
 }
 
 } // namespace safety_position_controller

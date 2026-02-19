@@ -23,6 +23,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     visualization_msgs
     generate_parameter_library
     hardware_interface
+    hector_ros_controllers_msgs
     pluginlib
     hpp-fcl
     pinocchio
@@ -106,4 +107,59 @@ install(
 
 ament_export_targets(export_hector_ros_controllers HAS_LIBRARY_TARGET)
 ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gmock REQUIRED)
+  find_package(GTest CONFIG REQUIRED COMPONENTS GTest GMock)
+  find_package(rtest REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  find_package(ament_index_cpp REQUIRED)
+
+  install(DIRECTORY test/config DESTINATION share/${PROJECT_NAME}/test)
+
+  test_tools_add_doubles(
+    controllers
+    AMENT_DEPENDENCIES
+    ${std_msgs_TARGETS}
+    ${std_srvs_TARGETS}
+    ${sensor_msgs_TARGETS}
+    ${hector_ros_controllers_msgs_TARGETS}
+    ${visualization_msgs_TARGETS}
+    rclcpp::rclcpp
+    rclcpp_lifecycle::rclcpp_lifecycle
+    controller_interface::controller_interface
+    hardware_interface::hardware_interface
+    realtime_tools::realtime_tools
+    pluginlib::pluginlib
+    ${srdfdom_TARGETS}
+    fcl
+    hpp-fcl::hpp-fcl
+    pinocchio::pinocchio
+    ad_kinematics::ad_kinematics
+    velocity_to_position_command_controller_parameters
+    self_collision_avoidance_controller_parameters
+    safety_forward_controller_parameters
+    safety_position_controller_parameters)
+
+  ament_add_gmock(test_safety_forward_controller
+                  test/test_safety_forward_controller.cpp)
+  target_include_directories(
+    test_safety_forward_controller PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                           ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_safety_forward_controller ${PROJECT_NAME}::controllers_test_doubles
+    ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_safety_forward_controller PRIVATE ${DEFS})
+
+  ament_add_gmock(test_safety_position_controller
+                  test/test_safety_position_controller.cpp)
+  target_include_directories(
+    test_safety_position_controller PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                            ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_safety_position_controller ${PROJECT_NAME}::controllers_test_doubles
+    ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_safety_position_controller PRIVATE ${DEFS})
+endif()
+
 ament_package()
