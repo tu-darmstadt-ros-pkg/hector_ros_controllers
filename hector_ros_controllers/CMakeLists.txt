@@ -60,7 +60,6 @@ generate_parameter_library(safety_position_controller_parameters
 
 add_library(
   controllers SHARED
-  src/velocity_to_position_controllers_base.cpp
   src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
   src/self_collision_avoidance_controller.cpp
@@ -160,6 +159,17 @@ if(BUILD_TESTING)
     test_safety_position_controller ${PROJECT_NAME}::controllers_test_doubles
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_safety_position_controller PRIVATE ${DEFS})
+
+  ament_add_gmock(test_velocity_to_position_command_controller
+                  test/test_velocity_to_position_command_controller.cpp)
+  target_include_directories(
+    test_velocity_to_position_command_controller
+    PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_velocity_to_position_command_controller
+    ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_velocity_to_position_command_controller
+                             PRIVATE ${DEFS})
 endif()
 
 ament_package()

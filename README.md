@@ -58,13 +58,65 @@ Monitors joint states and **prevents the robot from moving into a configuration 
 Acts as a motion gatekeeper in real-time.
 
 ---
-Here’s an updated, self-contained README section for the **Safety Position Controller**, adapted to your current implementation (non-chained mode, E-Stop, debug JS pubs).
 
-You can drop this in instead of your existing section starting at `## 3. Safety Position Controller`.
+## 3. Velocity-to-Position Command Controller
+
+Converts **velocity references** into **position commands** for joint hardware. Useful when an upstream controller outputs velocity commands but the hardware only accepts position commands.
+
+### Features
+
+* **Feedforward integration with PD velocity tracking:**
+    * Integrates velocity commands into a desired position trajectory.
+    * A proportional term corrects for velocity tracking error (commanded vs actual).
+    * A derivative term damps acceleration to prevent overshoot and oscillation.
+* **Desired position tracking:**
+    * Maintains an internal `desired_positions` trajectory, providing implicit position error correction.
+    * On state transitions (STOPPED/STOPPING → MOVING), the desired position re-syncs to the actual joint position to prevent jumps.
+* **State machine** (per joint):
+    * **MOVING** – actively integrating velocity commands.
+    * **STOPPING** – velocity command is zero but joint is still moving.
+    * **STOPPED** – joint is below velocity threshold; holds the last desired position.
+* **Joint synchronization:**
+    * Joints in the same synchronization group are kept aligned via P-control on position offsets.
+* **E-Stop support:**
+    * Subscribes to an E-Stop topic; freezes all joints at their current positions when engaged.
+* **Chainable controller:**
+    * Can receive velocity references from an upstream controller or from a `~/commands` topic.
+* **Dynamic PID reconfiguration:**
+    * `kp`, `kd`, and `kp_sync` can be changed at runtime via ROS parameter callbacks.
+
+### Control Law
+
+```
+desired_pos[i] += vel_cmd * dt                          // feedforward integration
+vel_p = kp * (vel_cmd - vel_actual) * dt                // velocity P-term
+vel_d = kd * vel_actual * dt                            // velocity D-term (damping)
+pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
+```
+
+### Parameters
+
+| Name                            | Type           | Default                    | Description                                                                    |
+|---------------------------------|----------------|----------------------------|--------------------------------------------------------------------------------|
+| **joints**                      | `string_array` | `[]`                       | Names of the joints to control.                                                |
+| **kp**                          | `double`       | `2.0`                      | Proportional gain for velocity tracking.                                       |
+| **kd**                          | `double`       | `0.1`                      | Derivative gain for acceleration damping.                                      |
+| **kp_sync**                     | `double`       | `1.0`                      | Proportional gain for synchronization of synced joints.                        |
+| **stopping_velocity_threshold** | `double`       | `0.005`                    | Velocity threshold below which a joint is considered stopped.                  |
+| **synchronous_groups**          | `string_array` | `[]`                       | Group names per joint for synchronization (empty = no sync).                   |
+| **passthrough_controller**      | `string`       | `""`                       | Prefix for the lower-level controller exposing command interfaces.             |
+| **e_stop_topic**                | `string`       | `estop_board/hard_estop`   | Topic for emergency stop messages (`std_msgs/Bool`).                           |
+
+### Topics
+
+| Topic          | Type                | Description                                            |
+|----------------|---------------------|--------------------------------------------------------|
+| `~/commands`   | `Float64MultiArray` | Velocity commands (not used in chained mode).          |
+| E-Stop topic   | `Bool`              | Engages (`true`) or releases (`false`) the e-stop.     |
 
 ---
 
-## 3. Safety Position Controller
+## 4. Safety Position Controller
 
 A **safety layer for joint position commands**, usable both
 

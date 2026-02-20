@@ -1,31 +1,29 @@
-// Copyright 2020 PAL Robotics S.L.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "velocity_to_position_command_controller/velocity_to_position_command_controller.hpp"
 
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "controller_interface/helpers.hpp"
+#include "hardware_interface/loaned_command_interface.hpp"
 #include "rclcpp/logging.hpp"
+#include "rclcpp/qos.hpp"
 
 namespace velocity_to_position_command_controller
 {
+
 VelocityToPositionCommandController::VelocityToPositionCommandController()
-    : VelocityToPositionControllersBase()
+    : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
+      e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
+      rt_buffer_ptr_( nullptr )
 {
 }
+
+// ---------------------------------------------------------------------------
+// Parameter utilities
+// ---------------------------------------------------------------------------
 
 void VelocityToPositionCommandController::declare_parameters()
 {
@@ -45,24 +43,22 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  std::string interface_prefix = "";
-
+  std::string interface_prefix;
   if ( !params_.passthrough_controller.empty() )
     interface_prefix = params_.passthrough_controller + "/";
 
   for ( const auto &joint : params_.joints ) {
     joints_.push_back( joint );
     command_interface_types_.push_back( interface_prefix + joint + "/position" );
-    state_interface_types_.push_back( joint + "/" + "position" );
-    state_interface_types_.push_back( joint + "/" + "velocity" );
-    reference_interface_names_.push_back( joint + "/" + "velocity" );
+    state_interface_types_.push_back( joint + "/position" );
+    state_interface_types_.push_back( joint + "/velocity" );
+    reference_interface_names_.push_back( joint + "/velocity" );
 
     joint_position_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
     joint_velocity_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
-    joint_prev_vel_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
   }
 
-  if ( params_.synchronous_groups.size() != 0 && params_.synchronous_groups.size() != joints_.size() ) {
+  if ( !params_.synchronous_groups.empty() && params_.synchronous_groups.size() != joints_.size() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
                   "Need to either specify a sync group for each joint or none at all" );
     return controller_interface::CallbackReturn::ERROR;
@@ -94,19 +90,412 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     }
   }
 
-  reference_interfaces_.resize( reference_interface_names_.size() );
-  hold_positions_.resize( reference_interface_names_.size() );
-  move_states_.resize( reference_interface_names_.size() );
+  const size_t num_joints = reference_interface_names_.size();
+  reference_interfaces_.resize( num_joints );
+  hold_positions_.resize( num_joints );
+  desired_positions_.resize( num_joints );
+  move_states_.resize( num_joints );
 
   e_stop_topic_ = params_.e_stop_topic;
-
-  kp_sync_ = params_.kp_sync;
   kp_ = params_.kp;
   kd_ = params_.kd;
-
+  kp_sync_ = params_.kp_sync;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
 
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic parameter reconfiguration
+// ---------------------------------------------------------------------------
+
+rcl_interfaces::msg::SetParametersResult
+VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
+{
+  auto result = rcl_interfaces::msg::SetParametersResult();
+  const double val = p.as_double();
+
+  if ( val < 0 ) {
+    result.successful = false;
+  } else {
+    result.successful = true;
+    if ( p.get_name() == "kp" ) {
+      kp_ = val;
+    } else if ( p.get_name() == "kd" ) {
+      kd_ = val;
+    } else if ( p.get_name() == "kp_sync" ) {
+      kp_sync_ = val;
+    }
+    RCLCPP_INFO( get_node()->get_logger(), "Reconfigured %s to %f", p.get_name().c_str(), val );
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle callbacks
+// ---------------------------------------------------------------------------
+
+controller_interface::CallbackReturn VelocityToPositionCommandController::on_init()
+{
+  try {
+    declare_parameters();
+
+    param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( get_node() );
+    cb_handle_kp_ = param_subscriber_->add_parameter_callback(
+        "kp",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_kd_ = param_subscriber_->add_parameter_callback(
+        "kd",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
+        "kp_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+  } catch ( const std::exception &e ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Exception thrown during init: %s", e.what() );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn
+VelocityToPositionCommandController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
+{
+  auto ret = read_parameters();
+  if ( ret != controller_interface::CallbackReturn::SUCCESS ) {
+    return ret;
+  }
+
+  RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn
+VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
+{
+  std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_interfaces;
+  if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_types_,
+                                                      std::string( "" ), ordered_interfaces ) ||
+       command_interface_types_.size() != ordered_interfaces.size() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Expected %zu command interfaces, got %zu",
+                  command_interface_types_.size(), ordered_interfaces.size() );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  // Reset command buffer
+  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  e_stop_active_.initRT( false );
+
+  auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
+  qos.transient_local();
+  hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
+      e_stop_topic_, qos, [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
+        if ( msg->data ) {
+          RCLCPP_WARN(
+              get_node()->get_logger(),
+              "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
+          e_stop_active_.writeFromNonRT( true );
+        } else {
+          e_stop_active_.writeFromNonRT( false );
+        }
+      } );
+
+  update_joint_states_if_valid();
+
+  for ( size_t i = 0; i < joints_.size(); i++ ) {
+    move_states_[i] = STOPPED;
+
+    if ( interfaces_valid_ ) {
+      hold_positions_[i] = joint_position_states_[i];
+      desired_positions_[i] = joint_position_states_[i];
+    } else {
+      hold_positions_[i] = std::numeric_limits<double>::quiet_NaN();
+      desired_positions_[i] = std::numeric_limits<double>::quiet_NaN();
+    }
+
+    sync_states_[i] = false;
+  }
+  update_sync_offsets();
+
+  RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn
+VelocityToPositionCommandController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
+{
+  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  hard_estop_sub_.reset();
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Chainable controller interface
+// ---------------------------------------------------------------------------
+
+controller_interface::InterfaceConfiguration
+VelocityToPositionCommandController::command_interface_configuration() const
+{
+  controller_interface::InterfaceConfiguration config;
+  config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  config.names = command_interface_types_;
+  return config;
+}
+
+controller_interface::InterfaceConfiguration
+VelocityToPositionCommandController::state_interface_configuration() const
+{
+  controller_interface::InterfaceConfiguration config;
+  config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  config.names = state_interface_types_;
+  return config;
+}
+
+std::vector<hardware_interface::CommandInterface>
+VelocityToPositionCommandController::on_export_reference_interfaces()
+{
+  std::vector<hardware_interface::CommandInterface> reference_interfaces;
+  RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interfaces" );
+  for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
+    RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interface %s",
+                 reference_interface_names_[i].c_str() );
+    reference_interfaces.emplace_back( get_node()->get_name(), reference_interface_names_[i],
+                                       &reference_interfaces_[i] );
+  }
+  return reference_interfaces;
+}
+
+controller_interface::return_type VelocityToPositionCommandController::update_reference_from_subscribers(
+    const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
+{
+  auto joint_commands = rt_buffer_ptr_.readFromRT();
+  if ( joint_commands && *joint_commands ) {
+    if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
+      RCLCPP_ERROR_THROTTLE(
+          get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+          "command size (%zu) does not match number of reference interfaces (%zu)",
+          ( *joint_commands )->data.size(), reference_interfaces_.size() );
+      return controller_interface::return_type::ERROR;
+    }
+    reference_interfaces_ = ( *joint_commands )->data;
+  }
+
+  return controller_interface::return_type::OK;
+}
+
+bool VelocityToPositionCommandController::on_set_chained_mode( bool /*chained_mode*/ )
+{
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// State reading
+// ---------------------------------------------------------------------------
+
+static bool is_valid( const std::optional<double> &v_opt )
+{
+  return v_opt.has_value() && !std::isnan( v_opt.value() );
+}
+
+void VelocityToPositionCommandController::update_joint_states_if_valid()
+{
+  bool all_joints_valid = true;
+  for ( size_t i = 0; i < joints_.size(); ++i ) {
+    const auto &pos_state = state_interfaces_[2 * i].get_optional();
+    const auto &vel_state = state_interfaces_[2 * i + 1].get_optional();
+
+    bool states_valid = is_valid( pos_state ) && is_valid( vel_state );
+    all_joints_valid &= states_valid;
+    if ( states_valid ) {
+      joint_position_states_[i] = pos_state.value();
+      joint_velocity_states_[i] = vel_state.value();
+    } else {
+      joint_position_states_[i] = std::numeric_limits<double>::quiet_NaN();
+      joint_velocity_states_[i] = std::numeric_limits<double>::quiet_NaN();
+    }
+  }
+
+  interfaces_valid_ = all_joints_valid;
+}
+
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::update_move_states( double vel_command, size_t joint_idx )
+{
+  switch ( move_states_[joint_idx] ) {
+  case MOVING:
+    if ( vel_command == 0.0 )
+      move_states_[joint_idx] = STOPPING;
+    break;
+
+  case STOPPING:
+    if ( vel_command != 0.0 ) {
+      move_states_[joint_idx] = MOVING;
+      desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+    } else {
+      if ( std::abs( joint_velocity_states_[joint_idx] ) <= stopping_vel_threshold_ )
+        move_states_[joint_idx] = STOPPED;
+    }
+    break;
+
+  case STOPPED:
+    if ( vel_command != 0.0 ) {
+      move_states_[joint_idx] = MOVING;
+      desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+    }
+    break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Synchronization
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::update_sync_states( const std::vector<double> &vel_commands )
+{
+  for ( auto &group : groups_ ) {
+    const std::vector<size_t> &group_indices = group.second;
+
+    if ( group_indices.size() == 1 ) {
+      sync_states_[group_indices[0]] = false;
+      continue;
+    }
+
+    bool group_is_synchronized = true;
+    const double &common_vel_command = vel_commands[group_indices[0]];
+    for ( size_t i = 1; i < group_indices.size(); i++ ) {
+      group_is_synchronized &= common_vel_command == vel_commands[group_indices[i]];
+    }
+
+    for ( size_t i = 0; i < group_indices.size(); i++ ) {
+      sync_states_[group_indices[i]] = group_is_synchronized;
+    }
+  }
+}
+
+void VelocityToPositionCommandController::update_sync_offsets()
+{
+  for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
+    if ( !sync_states_[joint_idx] ) {
+      for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+        sync_offsets_[joint_idx][i] =
+            joint_position_states_[synced_joints_[joint_idx][i]] - joint_position_states_[joint_idx];
+      }
+    }
+  }
+}
+
+double VelocityToPositionCommandController::sync_p_control( size_t joint_idx )
+{
+  double sync_pos_command = 0.0;
+  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+    sync_pos_command += ( joint_position_states_[synced_joints_[joint_idx][i]] -
+                          joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i] ) *
+                        kp_sync_;
+  }
+  return sync_pos_command / static_cast<double>( synced_joints_[joint_idx].size() );
+}
+
+// ---------------------------------------------------------------------------
+// Control law
+// ---------------------------------------------------------------------------
+
+double VelocityToPositionCommandController::pos_pd_control( size_t joint_idx, double vel_command,
+                                                            const rclcpp::Duration &period )
+{
+  const double dt = period.seconds();
+
+  // Integrate desired position along velocity command trajectory
+  desired_positions_[joint_idx] += vel_command * dt;
+
+  // P-term: velocity tracking correction
+  const double vel_p = kp_ * ( vel_command - joint_velocity_states_[joint_idx] ) * dt;
+
+  // D-term: damp position changes proportional to measured velocity.
+  // This acts as a classical derivative-of-position damper: when the joint
+  // moves fast the command is pulled back, preventing overshoot and oscillation.
+  const double vel_d = kd_ * joint_velocity_states_[joint_idx] * dt;
+
+  return desired_positions_[joint_idx] + vel_p - vel_d;
+}
+
+double VelocityToPositionCommandController::position_control( size_t joint_idx, double vel_command,
+                                                              const rclcpp::Duration &period )
+{
+  double next_position = pos_pd_control( joint_idx, vel_command, period );
+  if ( sync_states_[joint_idx] )
+    next_position += sync_p_control( joint_idx );
+
+  return next_position;
+}
+
+// ---------------------------------------------------------------------------
+// Main update
+// ---------------------------------------------------------------------------
+
+controller_interface::return_type
+VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Time & /*time*/,
+                                                                const rclcpp::Duration &period )
+{
+  update_joint_states_if_valid();
+  if ( !interfaces_valid_ )
+    return controller_interface::return_type::OK;
+
+  bool successful = true;
+  if ( *( e_stop_active_.readFromRT() ) ) {
+    for ( size_t index = 0; index < command_interfaces_.size(); index++ ) {
+      hold_positions_[index] = joint_position_states_[index];
+      desired_positions_[index] = joint_position_states_[index];
+      move_states_[index] = STOPPED;
+    }
+    return controller_interface::return_type::OK;
+  }
+
+  update_sync_states( reference_interfaces_ );
+  update_sync_offsets();
+
+  for ( size_t joint_idx = 0; joint_idx < command_interfaces_.size(); joint_idx++ ) {
+
+    // Skip if no command received from high level controller
+    if ( std::isnan( reference_interfaces_[joint_idx] ) )
+      continue;
+
+    const double vel_command = reference_interfaces_[joint_idx];
+
+    update_move_states( vel_command, joint_idx );
+
+    double pos_command = std::numeric_limits<double>::quiet_NaN();
+    switch ( move_states_[joint_idx] ) {
+    case STOPPED:
+      pos_command = hold_positions_[joint_idx];
+      break;
+
+    // Position command calculation is the same for MOVING and STOPPING states
+    default:
+      pos_command = position_control( joint_idx, vel_command, period );
+      // Update hold position to desired position (where joint *should* be)
+      hold_positions_[joint_idx] = desired_positions_[joint_idx];
+    }
+
+    if ( std::isnan( pos_command ) )
+      continue;
+
+    successful &= command_interfaces_[joint_idx].set_value( pos_command );
+  }
+
+  if ( !successful )
+    return controller_interface::return_type::ERROR;
+
+  return controller_interface::return_type::OK;
 }
 
 } // namespace velocity_to_position_command_controller

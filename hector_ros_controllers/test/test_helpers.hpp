@@ -13,6 +13,7 @@
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <safety_forward_controller/safety_forward_controller.hpp>
 #include <safety_position_controller/safety_position_controller.hpp>
+#include <velocity_to_position_command_controller/velocity_to_position_command_controller.hpp>
 #undef protected
 #undef private
 

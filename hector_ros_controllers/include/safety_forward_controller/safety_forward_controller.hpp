@@ -2,7 +2,6 @@
 #define SAFETY_FORWARD_CONTROLLER__SAFETY_FORWARD_CONTROLLER_HPP_
 
 #include <atomic>
-#include <float.h>
 #include <memory>
 #include <string>
 #include <vector>
