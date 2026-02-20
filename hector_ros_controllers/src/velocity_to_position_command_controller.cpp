@@ -499,13 +499,17 @@ bool VelocityToPositionCommandController::all_group_partners_braking_done( size_
 void VelocityToPositionCommandController::update_sync_offsets()
 {
   for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
-    if ( !sync_states_[joint_idx] && !std::isnan( joint_position_states_[joint_idx] ) ) {
-      for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
-        const size_t partner = synced_joints_[joint_idx][i];
-        if ( !std::isnan( joint_position_states_[partner] ) ) {
-          sync_offsets_[joint_idx][i] =
-              joint_position_states_[partner] - joint_position_states_[joint_idx];
-        }
+    // Only update offsets for joints that are actively MOVING and not currently synced.
+    // STOPPING/STOPPED joints keep their offsets to preserve synchronization across stop cycles.
+    if ( move_states_[joint_idx] != MOVING )
+      continue;
+    if ( sync_states_[joint_idx] || std::isnan( joint_position_states_[joint_idx] ) )
+      continue;
+    for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+      const size_t partner = synced_joints_[joint_idx][i];
+      if ( !std::isnan( joint_position_states_[partner] ) ) {
+        sync_offsets_[joint_idx][i] =
+            joint_position_states_[partner] - joint_position_states_[joint_idx];
       }
     }
   }
@@ -711,18 +715,22 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
         stopping_velocities_[joint_idx] = 0.0;
 
         if ( !synced_braking_[joint_idx] || all_group_partners_braking_done( joint_idx ) ) {
-          // Non-synced: transition immediately. Synced: wait for all partners.
+          // Transition to STOPPED — hold at actual position to avoid jumps
           move_states_[joint_idx] = STOPPED;
-          hold_positions_[joint_idx] = desired_positions_[joint_idx];
+          hold_positions_[joint_idx] = joint_position_states_[joint_idx];
+          desired_positions_[joint_idx] = joint_position_states_[joint_idx];
           pos_command = hold_positions_[joint_idx];
           synced_braking_[joint_idx] = false;
         } else {
-          // This joint is done braking but partners are still braking — hold position
-          pos_command = desired_positions_[joint_idx];
-          hold_positions_[joint_idx] = desired_positions_[joint_idx];
+          // This joint is done braking but partners are still braking — hold at actual position
+          hold_positions_[joint_idx] = joint_position_states_[joint_idx];
+          desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+          pos_command = hold_positions_[joint_idx];
         }
       } else {
-        pos_command = pos_pd_control( joint_idx, stopping_velocities_[joint_idx], period );
+        // Integrate desired position along deceleration ramp (no PD — just trajectory)
+        desired_positions_[joint_idx] += stopping_velocities_[joint_idx] * dt;
+        pos_command = desired_positions_[joint_idx];
         hold_positions_[joint_idx] = desired_positions_[joint_idx];
       }
       break;
