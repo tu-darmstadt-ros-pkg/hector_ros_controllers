@@ -377,6 +377,10 @@ void VelocityToPositionCommandController::update_joint_states_if_valid()
     } else {
       joint_position_states_[i] = std::numeric_limits<double>::quiet_NaN();
       joint_velocity_states_[i] = std::numeric_limits<double>::quiet_NaN();
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "Joint '%s' has invalid state interfaces (pos=%s, vel=%s)",
+                            joints_[i].c_str(), is_valid( pos_state ) ? "ok" : "NaN/missing",
+                            is_valid( vel_state ) ? "ok" : "NaN/missing" );
     }
   }
 
@@ -555,14 +559,13 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
 
   publish_debug_joint_state_in();
 
-  if ( !interfaces_valid_ )
-    return controller_interface::return_type::OK;
-
   bool successful = true;
   if ( *( e_stop_active_.readFromRT() ) ) {
     for ( size_t index = 0; index < command_interfaces_.size(); index++ ) {
-      hold_positions_[index] = joint_position_states_[index];
-      desired_positions_[index] = joint_position_states_[index];
+      if ( !std::isnan( joint_position_states_[index] ) ) {
+        hold_positions_[index] = joint_position_states_[index];
+        desired_positions_[index] = joint_position_states_[index];
+      }
       move_states_[index] = STOPPED;
     }
     return controller_interface::return_type::OK;
@@ -576,6 +579,16 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
     // Skip if no command received from high level controller
     if ( std::isnan( reference_interfaces_[joint_idx] ) )
       continue;
+    // Skip joints with invalid state interfaces
+    if ( std::isnan( joint_position_states_[joint_idx] ) ||
+         std::isnan( joint_velocity_states_[joint_idx] ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "Joint '%s' has invalid state interfaces (pos=%s, vel=%s)",
+                            joints_[joint_idx].c_str(),
+                            std::isnan( joint_position_states_[joint_idx] ) ? "NaN" : "ok",
+                            std::isnan( joint_velocity_states_[joint_idx] ) ? "NaN" : "ok" );
+      continue;
+    }
 
     const double vel_command = reference_interfaces_[joint_idx];
 
@@ -594,8 +607,11 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       hold_positions_[joint_idx] = desired_positions_[joint_idx];
     }
 
-    if ( std::isnan( pos_command ) )
+    if ( std::isnan( pos_command ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "Position command is NaN for joint '%s'", joints_[joint_idx].c_str() );
       continue;
+    }
 
     // Clamp to URDF position limits for revolute/prismatic joints
     if ( !std::isnan( joint_lower_limits_[joint_idx] ) ) {
