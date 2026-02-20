@@ -249,10 +249,9 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
 
   // Reset command buffer
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
-  e_stop_active_.initRT( false );
+  e_stop_active_.writeFromNonRT( false );
 
   auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
-  qos.transient_local();
   hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
       e_stop_topic_, qos, [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
         if ( msg->data ) {
@@ -560,18 +559,19 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
   publish_debug_joint_state_in();
 
   bool successful = true;
-  if ( *( e_stop_active_.readFromRT() ) ) {
-    for ( size_t index = 0; index < command_interfaces_.size(); index++ ) {
-      if ( !std::isnan( joint_position_states_[index] ) ) {
-        hold_positions_[index] = joint_position_states_[index];
-        desired_positions_[index] = joint_position_states_[index];
-      }
-      move_states_[index] = STOPPED;
-    }
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
-                          "E-Stop active, holding current joint positions" );
-    return controller_interface::return_type::OK;
-  }
+  // TODO: e-stop
+  // if ( *( e_stop_active_.readFromRT() ) ) {
+  //   for ( size_t index = 0; index < command_interfaces_.size(); index++ ) {
+  //     if ( !std::isnan( joint_position_states_[index] ) ) {
+  //       hold_positions_[index] = joint_position_states_[index];
+  //       desired_positions_[index] = joint_position_states_[index];
+  //     }
+  //     move_states_[index] = STOPPED;
+  //   }
+  //   RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+  //                         "E-Stop active, holding current joint positions" );
+  //   return controller_interface::return_type::OK;
+  // }
 
   update_sync_states( reference_interfaces_ );
   update_sync_offsets();
