@@ -49,7 +49,6 @@ safety_position_controller:
     type: bool
     default_value: false
     description: If true, the controller publishes the received target command states and the computed states as separate joint state msgs
-    read_only: true
 
   set_current_limits:
     type: bool

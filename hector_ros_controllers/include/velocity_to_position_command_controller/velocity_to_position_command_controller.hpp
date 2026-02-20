@@ -142,8 +142,10 @@ private:
   // Debug publishers
   void publish_debug_joint_state_in();
   void publish_debug_joint_state_out( const std::vector<double> &positions );
+  void update_debug_publishers( bool enable );
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_debug_pubs_;
 
   // RT-safe command buffer and subscriptions
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;

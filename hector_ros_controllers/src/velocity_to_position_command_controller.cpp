@@ -206,13 +206,12 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
-    // Debug joint state publishers
-    if ( param_listener_->get_params().publish_debug_joint_states ) {
-      debug_in_js_pub_ =
-          get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
-      debug_out_js_pub_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
-          "~/debug_out_joint_states", 10 );
-    }
+    // Debug joint state publishers (dynamically reconfigurable)
+    update_debug_publishers( param_listener_->get_params().publish_debug_joint_states );
+    cb_handle_debug_pubs_ = param_subscriber_->add_parameter_callback(
+        "publish_debug_joint_states",
+        [this]( const rclcpp::Parameter &p ) { update_debug_publishers( p.as_bool() ); },
+        get_node()->get_name() );
 
   } catch ( const std::exception &e ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Exception thrown during init: %s", e.what() );
@@ -501,6 +500,24 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
 // Debug publishers
 // ---------------------------------------------------------------------------
 
+void VelocityToPositionCommandController::update_debug_publishers( bool enable )
+{
+  if ( enable ) {
+    if ( !debug_in_js_pub_ ) {
+      debug_in_js_pub_ =
+          get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
+    }
+    if ( !debug_out_js_pub_ ) {
+      debug_out_js_pub_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
+          "~/debug_out_joint_states", 10 );
+    }
+    RCLCPP_INFO( get_node()->get_logger(), "Debug joint state publishers enabled" );
+  } else {
+    debug_in_js_pub_.reset();
+    debug_out_js_pub_.reset();
+  }
+}
+
 void VelocityToPositionCommandController::publish_debug_joint_state_in()
 {
   if ( !debug_in_js_pub_ )
@@ -535,6 +552,9 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
                                                                 const rclcpp::Duration &period )
 {
   update_joint_states_if_valid();
+
+  publish_debug_joint_state_in();
+
   if ( !interfaces_valid_ )
     return controller_interface::return_type::OK;
 
@@ -547,8 +567,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
     }
     return controller_interface::return_type::OK;
   }
-
-  publish_debug_joint_state_in();
 
   update_sync_states( reference_interfaces_ );
   update_sync_offsets();

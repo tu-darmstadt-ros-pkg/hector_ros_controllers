@@ -187,6 +187,7 @@ private:
 
   void publish_debug_joint_state_in();
   void publish_debug_joint_state_out( const std::vector<double> &positions );
+  void update_debug_publishers( bool enable );
   void publish_status();
 
   // ---- Configuration / mode ----
@@ -231,6 +232,7 @@ private:
   // ---- Parameters ----
   std::shared_ptr<ParamListener> param_listener_;
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_debug_pubs_;
   Params params_;
 
   // ---- ROS I/F ----

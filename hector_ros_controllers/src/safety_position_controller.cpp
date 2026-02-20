@@ -119,13 +119,13 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       node->create_publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>(
           "~/status", qos_latched );
 
-  // Debug joint state publishers
-  if ( params_.publish_debug_joint_states ) {
-    debug_in_js_pub_ =
-        node->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
-    debug_out_js_pub_ =
-        node->create_publisher<sensor_msgs::msg::JointState>( "~/debug_out_joint_states", 10 );
-  }
+  // Debug joint state publishers (dynamically reconfigurable)
+  param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( node );
+  update_debug_publishers( params_.publish_debug_joint_states );
+  cb_handle_debug_pubs_ = param_subscriber_->add_parameter_callback(
+      "publish_debug_joint_states",
+      [this]( const rclcpp::Parameter &p ) { update_debug_publishers( p.as_bool() ); },
+      node->get_name() );
 
   // Non-chained command subscriber (RT buffer)
   joints_command_subscriber_ = node->create_subscription<CmdType>(
@@ -682,9 +682,27 @@ bool SafetyPositionController::wait_for_srdf()
   return true;
 }
 
+void SafetyPositionController::update_debug_publishers( bool enable )
+{
+  if ( enable ) {
+    if ( !debug_in_js_pub_ ) {
+      debug_in_js_pub_ =
+          get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
+    }
+    if ( !debug_out_js_pub_ ) {
+      debug_out_js_pub_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
+          "~/debug_out_joint_states", 10 );
+    }
+    RCLCPP_INFO( get_node()->get_logger(), "Debug joint state publishers enabled" );
+  } else {
+    debug_in_js_pub_.reset();
+    debug_out_js_pub_.reset();
+  }
+}
+
 void SafetyPositionController::publish_debug_joint_state_in()
 {
-  if ( !params_.publish_debug_joint_states || !debug_in_js_pub_ ) {
+  if ( !debug_in_js_pub_ ) {
     return;
   }
 
@@ -697,7 +715,7 @@ void SafetyPositionController::publish_debug_joint_state_in()
 
 void SafetyPositionController::publish_debug_joint_state_out( const std::vector<double> &positions )
 {
-  if ( !params_.publish_debug_joint_states || !debug_out_js_pub_ ) {
+  if ( !debug_out_js_pub_ ) {
     return;
   }
 
