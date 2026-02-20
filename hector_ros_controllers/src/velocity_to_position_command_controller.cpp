@@ -96,6 +96,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   hold_positions_.resize( num_joints );
   desired_positions_.resize( num_joints );
   move_states_.resize( num_joints );
+  stopping_velocities_.assign( num_joints, 0.0 );
 
   // Initialize limits to NaN (= no limit) by default
   joint_lower_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
@@ -106,6 +107,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
+  braking_deceleration_ = params_.braking_deceleration;
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -174,6 +176,8 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
       kd_ = val;
     } else if ( p.get_name() == "kp_sync" ) {
       kp_sync_ = val;
+    } else if ( p.get_name() == "braking_deceleration" ) {
+      braking_deceleration_ = val;
     }
     RCLCPP_INFO( get_node()->get_logger(), "Reconfigured %s to %f", p.get_name().c_str(), val );
   }
@@ -203,6 +207,11 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
 
     cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
         "kp_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_braking_decel_ = param_subscriber_->add_parameter_callback(
+        "braking_deceleration",
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -394,12 +403,18 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
 {
   switch ( move_states_[joint_idx] ) {
   case MOVING:
-  case STOPPING:
     if ( vel_command == 0.0 ) {
-      // Immediately snap to current position — no coasting
-      move_states_[joint_idx] = STOPPED;
+      move_states_[joint_idx] = STOPPING;
+      // Capture the last commanded velocity direction for deceleration
+      stopping_velocities_[joint_idx] = joint_velocity_states_[joint_idx];
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-      hold_positions_[joint_idx] = joint_position_states_[joint_idx];
+    }
+    break;
+
+  case STOPPING:
+    if ( vel_command != 0.0 ) {
+      move_states_[joint_idx] = MOVING;
+      desired_positions_[joint_idx] = joint_position_states_[joint_idx];
     }
     break;
 
@@ -606,9 +621,28 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
     double pos_command = std::numeric_limits<double>::quiet_NaN();
     switch ( move_states_[joint_idx] ) {
     case STOPPED:
-    case STOPPING:
       pos_command = hold_positions_[joint_idx];
       break;
+
+    case STOPPING: {
+      // Decelerate the stopping velocity toward zero
+      const double dt = period.seconds();
+      const double sign = ( stopping_velocities_[joint_idx] > 0.0 ) ? 1.0 : -1.0;
+      stopping_velocities_[joint_idx] -= sign * braking_deceleration_ * dt;
+
+      // Check if we crossed zero or reached threshold (deceleration complete)
+      if ( std::abs( stopping_velocities_[joint_idx] ) <= stopping_vel_threshold_ ||
+           sign * stopping_velocities_[joint_idx] < 0.0 ) {
+        stopping_velocities_[joint_idx] = 0.0;
+        move_states_[joint_idx] = STOPPED;
+        hold_positions_[joint_idx] = desired_positions_[joint_idx];
+        pos_command = hold_positions_[joint_idx];
+      } else {
+        pos_command = position_control( joint_idx, stopping_velocities_[joint_idx], period );
+        hold_positions_[joint_idx] = desired_positions_[joint_idx];
+      }
+      break;
+    }
 
     case MOVING:
       pos_command = position_control( joint_idx, vel_command, period );

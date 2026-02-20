@@ -114,7 +114,9 @@ private:
 
   // State machine
   std::vector<MoveState> move_states_;
+  std::vector<double> stopping_velocities_; ///< per-joint velocity used during braking deceleration
   double stopping_vel_threshold_;
+  double braking_deceleration_;
 
   // Synchronization
   std::vector<std::vector<double>> sync_offsets_;
@@ -137,6 +139,7 @@ private:
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_kp_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_kd_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_kp_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_braking_decel_;
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
 
   // Debug publishers

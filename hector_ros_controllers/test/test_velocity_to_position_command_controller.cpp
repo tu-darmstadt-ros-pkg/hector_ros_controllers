@@ -358,8 +358,8 @@ TEST_F( VelocityToPositionCommandControllerTest, StoppedHoldsPosition )
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
 }
 
-// Verify state machine transition MOVING -> STOPPED immediately on zero velocity
-TEST_F( VelocityToPositionCommandControllerTest, MovingToStoppedImmediatelyOnZeroVelocity )
+// Verify state machine transition MOVING -> STOPPING -> STOPPED with braking deceleration
+TEST_F( VelocityToPositionCommandControllerTest, MovingToStoppingWithBrakingDeceleration )
 {
   initController();
   configureController();
@@ -375,16 +375,25 @@ TEST_F( VelocityToPositionCommandControllerTest, MovingToStoppedImmediatelyOnZer
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
 
-  // Simulate joint has moved and still has velocity
+  // Simulate joint has moved and has velocity
   setPosition( 0, 0.5 );
   setVelocity( 0, 0.5 );
 
-  // Stop commanding -> should immediately go to STOPPED and snap to current position
+  // Stop commanding -> should enter STOPPING and begin braking
   controller_->reference_interfaces_[0] = 0.0;
   callUpdate();
+  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
+  // desired_positions was re-synced to current position on entering STOPPING
+  // Then position_control integrated with the decelerating stopping velocity
+  // stopping_vel starts at 0.5, after one cycle: 0.5 - 5.0*0.01 = 0.45
+  EXPECT_NEAR( controller_->stopping_velocities_[0], 0.45, 1e-9 );
+
+  // Continue braking until stopped. At 5.0 rad/s^2 and starting at 0.5 rad/s,
+  // it takes 0.5/5.0 = 0.1s = 10 cycles to stop.
+  // We already did 1 cycle, so 9 more should bring it to STOPPED.
+  for ( int i = 0; i < 9; i++ ) { callUpdate(); }
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
-  EXPECT_DOUBLE_EQ( controller_->desired_positions_[0], 0.5 );
-  EXPECT_DOUBLE_EQ( controller_->hold_positions_[0], 0.5 );
+  EXPECT_DOUBLE_EQ( controller_->stopping_velocities_[0], 0.0 );
 }
 
 // Verify desired_positions re-syncs to actual position on STOPPED -> MOVING transition
@@ -416,8 +425,8 @@ TEST_F( VelocityToPositionCommandControllerTest, StoppedToMovingResyncsDesiredPo
   EXPECT_NEAR( controller_->desired_positions_[0], 1.505, 1e-9 );
 }
 
-// Verify stop then resume re-syncs desired_positions to current position
-TEST_F( VelocityToPositionCommandControllerTest, StopAndResumeResyncsDesiredPosition )
+// Verify resuming from STOPPING re-syncs desired_positions
+TEST_F( VelocityToPositionCommandControllerTest, ResumeFromStoppingResyncsDesiredPosition )
 {
   initController();
   configureController();
@@ -431,22 +440,21 @@ TEST_F( VelocityToPositionCommandControllerTest, StopAndResumeResyncsDesiredPosi
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
 
-  // Stop -> goes immediately to STOPPED, snaps to current position
+  // Stop -> enters STOPPING (braking)
   setPosition( 0, 0.7 );
+  setVelocity( 0, 0.3 );
   controller_->reference_interfaces_[0] = 0.0;
   callUpdate();
-  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
-  EXPECT_DOUBLE_EQ( controller_->desired_positions_[0], 0.7 );
+  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
 
-  // Simulate external perturbation while stopped
-  setPosition( 0, 1.0 );
-
-  // Resume moving -> desired_positions should re-sync to actual position (1.0)
+  // Resume moving from STOPPING -> should re-sync to actual position
+  setPosition( 0, 0.8 );
   controller_->reference_interfaces_[0] = 1.0;
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
-  // desired_pos = 1.0 + 1.0 * 0.01 = 1.01
-  EXPECT_NEAR( controller_->desired_positions_[0], 1.01, 1e-9 );
+  // desired_positions was re-synced to 0.8 before integration
+  // desired_pos = 0.8 + 1.0 * 0.01 = 0.81
+  EXPECT_NEAR( controller_->desired_positions_[0], 0.81, 1e-9 );
 }
 
 // Verify hold_positions tracks desired_positions (not actual joint state)
