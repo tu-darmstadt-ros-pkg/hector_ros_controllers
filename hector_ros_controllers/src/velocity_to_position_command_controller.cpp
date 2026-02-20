@@ -394,17 +394,12 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
 {
   switch ( move_states_[joint_idx] ) {
   case MOVING:
-    if ( vel_command == 0.0 )
-      move_states_[joint_idx] = STOPPING;
-    break;
-
   case STOPPING:
-    if ( vel_command != 0.0 ) {
-      move_states_[joint_idx] = MOVING;
+    if ( vel_command == 0.0 ) {
+      // Immediately snap to current position — no coasting
+      move_states_[joint_idx] = STOPPED;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-    } else {
-      if ( std::abs( joint_velocity_states_[joint_idx] ) <= stopping_vel_threshold_ )
-        move_states_[joint_idx] = STOPPED;
+      hold_positions_[joint_idx] = joint_position_states_[joint_idx];
     }
     break;
 
@@ -446,10 +441,13 @@ void VelocityToPositionCommandController::update_sync_states( const std::vector<
 void VelocityToPositionCommandController::update_sync_offsets()
 {
   for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
-    if ( !sync_states_[joint_idx] ) {
+    if ( !sync_states_[joint_idx] && !std::isnan( joint_position_states_[joint_idx] ) ) {
       for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
-        sync_offsets_[joint_idx][i] =
-            joint_position_states_[synced_joints_[joint_idx][i]] - joint_position_states_[joint_idx];
+        const size_t partner = synced_joints_[joint_idx][i];
+        if ( !std::isnan( joint_position_states_[partner] ) ) {
+          sync_offsets_[joint_idx][i] =
+              joint_position_states_[partner] - joint_position_states_[joint_idx];
+        }
       }
     }
   }
@@ -458,12 +456,17 @@ void VelocityToPositionCommandController::update_sync_offsets()
 double VelocityToPositionCommandController::sync_p_control( size_t joint_idx )
 {
   double sync_pos_command = 0.0;
+  size_t valid_count = 0;
   for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
-    sync_pos_command += ( joint_position_states_[synced_joints_[joint_idx][i]] -
-                          joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i] ) *
+    const size_t partner = synced_joints_[joint_idx][i];
+    if ( std::isnan( joint_position_states_[partner] ) || std::isnan( sync_offsets_[joint_idx][i] ) )
+      continue;
+    sync_pos_command += ( joint_position_states_[partner] - joint_position_states_[joint_idx] -
+                          sync_offsets_[joint_idx][i] ) *
                         kp_sync_;
+    ++valid_count;
   }
-  return sync_pos_command / static_cast<double>( synced_joints_[joint_idx].size() );
+  return valid_count > 0 ? sync_pos_command / static_cast<double>( valid_count ) : 0.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -603,14 +606,15 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
     double pos_command = std::numeric_limits<double>::quiet_NaN();
     switch ( move_states_[joint_idx] ) {
     case STOPPED:
+    case STOPPING:
       pos_command = hold_positions_[joint_idx];
       break;
 
-    // Position command calculation is the same for MOVING and STOPPING states
-    default:
+    case MOVING:
       pos_command = position_control( joint_idx, vel_command, period );
       // Update hold position to desired position (where joint *should* be)
       hold_positions_[joint_idx] = desired_positions_[joint_idx];
+      break;
     }
 
     if ( std::isnan( pos_command ) ) {
