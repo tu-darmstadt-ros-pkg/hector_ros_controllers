@@ -74,16 +74,23 @@ Converts **velocity references** into **position commands** for joint hardware. 
     * On state transitions (STOPPED/STOPPING → MOVING), the desired position re-syncs to the actual joint position to prevent jumps.
 * **State machine** (per joint):
     * **MOVING** – actively integrating velocity commands.
-    * **STOPPING** – velocity command is zero but joint is still moving.
-    * **STOPPED** – joint is below velocity threshold; holds the last desired position.
+    * **STOPPING** – velocity command is zero; joint decelerates at `braking_deceleration` rad/s² until stopped.
+    * **STOPPED** – joint velocity has reached zero; holds the last desired position.
+* **Braking deceleration:**
+    * Configurable deceleration ramp (`braking_deceleration`) for smooth stopping.
 * **Joint synchronization:**
     * Joints in the same synchronization group are kept aligned via P-control on position offsets.
+    * **Synced braking:** When synced joints stop together, the faster-stopping joint reduces its braking to maintain the position difference with the weaker joint (controlled by `kp_braking_sync`). Both joints transition to STOPPED only when all group partners have finished braking.
+* **URDF position limit clamping:**
+    * Position commands are clamped to URDF joint limits for revolute/prismatic joints. Continuous joints are unclamped.
 * **E-Stop support:**
     * Subscribes to an E-Stop topic; freezes all joints at their current positions when engaged.
 * **Chainable controller:**
     * Can receive velocity references from an upstream controller or from a `~/commands` topic.
-* **Dynamic PID reconfiguration:**
-    * `kp`, `kd`, and `kp_sync` can be changed at runtime via ROS parameter callbacks.
+* **Debug joint state publishers:**
+    * Optionally publishes incoming velocity references and outgoing position commands as `sensor_msgs/JointState` (dynamically togglable).
+* **Dynamic parameter reconfiguration:**
+    * `kp`, `kd`, `kp_sync`, `kp_braking_sync`, and `braking_deceleration` can be changed at runtime via ROS parameter callbacks.
 
 ### Control Law
 
@@ -96,23 +103,28 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 
 ### Parameters
 
-| Name                            | Type           | Default                    | Description                                                                    |
-|---------------------------------|----------------|----------------------------|--------------------------------------------------------------------------------|
-| **joints**                      | `string_array` | `[]`                       | Names of the joints to control.                                                |
-| **kp**                          | `double`       | `2.0`                      | Proportional gain for velocity tracking.                                       |
-| **kd**                          | `double`       | `0.1`                      | Derivative gain for acceleration damping.                                      |
-| **kp_sync**                     | `double`       | `1.0`                      | Proportional gain for synchronization of synced joints.                        |
-| **stopping_velocity_threshold** | `double`       | `0.005`                    | Velocity threshold below which a joint is considered stopped.                  |
-| **synchronous_groups**          | `string_array` | `[]`                       | Group names per joint for synchronization (empty = no sync).                   |
-| **passthrough_controller**      | `string`       | `""`                       | Prefix for the lower-level controller exposing command interfaces.             |
-| **e_stop_topic**                | `string`       | `estop_board/hard_estop`   | Topic for emergency stop messages (`std_msgs/Bool`).                           |
+| Name                            | Type           | Default                  | Description                                                                                                                                     |
+|---------------------------------|----------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| **joints**                      | `string_array` | `[]`                     | Names of the joints to control.                                                                                                                 |
+| **kp**                          | `double`       | `1.0`                    | Proportional gain for velocity tracking.                                                                                                        |
+| **kd**                          | `double`       | `0.1`                    | Derivative gain for acceleration damping.                                                                                                       |
+| **kp_sync**                     | `double`       | `1.0`                    | Proportional gain for synchronization of synced joints during movement.                                                                         |
+| **kp_braking_sync**             | `double`       | `1.0`                    | Proportional gain for synced braking correction. Controls how aggressively the faster joint slows its braking to maintain the position offset.  |
+| **stopping_velocity_threshold** | `double`       | `0.005`                  | Velocity threshold below which a joint is considered stopped.                                                                                   |
+| **braking_deceleration**        | `double`       | `5.0`                    | Deceleration in rad/s² used to smoothly bring joints to a stop when velocity command becomes zero.                                              |
+| **synchronous_groups**          | `string_array` | `[]`                     | Group names per joint for synchronization (empty = no sync).                                                                                    |
+| **passthrough_controller**      | `string`       | `""`                     | Prefix for the lower-level controller exposing command interfaces.                                                                              |
+| **e_stop_topic**                | `string`       | `estop_board/hard_estop` | Topic for emergency stop messages (`std_msgs/Bool`).                                                                                            |
+| **publish_debug_joint_states**  | `bool`         | `false`                  | If `true`, publishes `~/debug_in_joint_states` (velocity refs) and `~/debug_out_joint_states` (position cmds) as `sensor_msgs/JointState`.     |
 
 ### Topics
 
-| Topic          | Type                | Description                                            |
-|----------------|---------------------|--------------------------------------------------------|
-| `~/commands`   | `Float64MultiArray` | Velocity commands (not used in chained mode).          |
-| E-Stop topic   | `Bool`              | Engages (`true`) or releases (`false`) the e-stop.     |
+| Topic                      | Type                     | Description                                                            |
+|----------------------------|--------------------------|------------------------------------------------------------------------|
+| `~/commands`               | `Float64MultiArray`      | Velocity commands (not used in chained mode).                          |
+| E-Stop topic               | `Bool`                   | Engages (`true`) or releases (`false`) the e-stop.                     |
+| `~/debug_in_joint_states`  | `sensor_msgs/JointState` | Incoming velocity references (only when `publish_debug_joint_states`). |
+| `~/debug_out_joint_states` | `sensor_msgs/JointState` | Outgoing position commands (only when `publish_debug_joint_states`).   |
 
 ---
 
