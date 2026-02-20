@@ -415,6 +415,7 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
     if ( vel_command != 0.0 ) {
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      reset_sync_offsets( joint_idx );
     }
     break;
 
@@ -422,6 +423,7 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
     if ( vel_command != 0.0 ) {
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      reset_sync_offsets( joint_idx );
     }
     break;
   }
@@ -449,6 +451,19 @@ void VelocityToPositionCommandController::update_sync_states( const std::vector<
 
     for ( size_t i = 0; i < group_indices.size(); i++ ) {
       sync_states_[group_indices[i]] = group_is_synchronized;
+    }
+  }
+}
+
+void VelocityToPositionCommandController::reset_sync_offsets( size_t joint_idx )
+{
+  if ( std::isnan( joint_position_states_[joint_idx] ) )
+    return;
+  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+    const size_t partner = synced_joints_[joint_idx][i];
+    if ( !std::isnan( joint_position_states_[partner] ) ) {
+      sync_offsets_[joint_idx][i] =
+          joint_position_states_[partner] - joint_position_states_[joint_idx];
     }
   }
 }

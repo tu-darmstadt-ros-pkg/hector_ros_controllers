@@ -89,6 +89,7 @@ private:
   // Synchronization
   void update_sync_states( const std::vector<double> &vel_commands );
   void update_sync_offsets();
+  void reset_sync_offsets( size_t joint_idx );
   double sync_p_control( size_t joint_idx );
 
   // Control law
