@@ -568,6 +568,8 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       }
       move_states_[index] = STOPPED;
     }
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                          "E-Stop active, holding current joint positions" );
     return controller_interface::return_type::OK;
   }
 
@@ -577,8 +579,12 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
   for ( size_t joint_idx = 0; joint_idx < command_interfaces_.size(); joint_idx++ ) {
 
     // Skip if no command received from high level controller
-    if ( std::isnan( reference_interfaces_[joint_idx] ) )
+    if ( std::isnan( reference_interfaces_[joint_idx] ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "No velocity command received for joint '%s'",
+                            joints_[joint_idx].c_str() );
       continue;
+    }
     // Skip joints with invalid state interfaces
     if ( std::isnan( joint_position_states_[joint_idx] ) ||
          std::isnan( joint_velocity_states_[joint_idx] ) ) {
