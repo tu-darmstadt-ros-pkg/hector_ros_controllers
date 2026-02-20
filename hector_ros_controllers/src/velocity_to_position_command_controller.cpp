@@ -709,10 +709,7 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
           move_states_[joint_idx] = STOPPED;
           hold_positions_[joint_idx] = desired_positions_[joint_idx];
           pos_command = hold_positions_[joint_idx];
-          if ( synced_braking_[joint_idx] ) {
-            synced_braking_[joint_idx] = false;
-            reset_sync_offsets( joint_idx );
-          }
+          synced_braking_[joint_idx] = false;
         } else {
           // This joint is done braking but partners are still braking — hold position
           pos_command = desired_positions_[joint_idx];
