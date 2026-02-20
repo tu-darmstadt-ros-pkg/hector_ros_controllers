@@ -97,6 +97,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   desired_positions_.resize( num_joints );
   move_states_.resize( num_joints );
   stopping_velocities_.assign( num_joints, 0.0 );
+  synced_braking_.assign( num_joints, false );
 
   // Initialize limits to NaN (= no limit) by default
   joint_lower_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
@@ -106,6 +107,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   kp_ = params_.kp;
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
+  kp_braking_sync_ = params_.kp_braking_sync;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
   braking_deceleration_ = params_.braking_deceleration;
 
@@ -176,6 +178,8 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
       kd_ = val;
     } else if ( p.get_name() == "kp_sync" ) {
       kp_sync_ = val;
+    } else if ( p.get_name() == "kp_braking_sync" ) {
+      kp_braking_sync_ = val;
     } else if ( p.get_name() == "braking_deceleration" ) {
       braking_deceleration_ = val;
     }
@@ -207,6 +211,11 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
 
     cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
         "kp_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_braking_sync_kp_ = param_subscriber_->add_parameter_callback(
+        "kp_braking_sync",
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -408,6 +417,8 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
       // Capture the last commanded velocity direction for deceleration
       stopping_velocities_[joint_idx] = joint_velocity_states_[joint_idx];
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      // Synced braking if this joint was in a sync group (all got vel=0 together)
+      synced_braking_[joint_idx] = sync_states_[joint_idx];
     }
     break;
 
@@ -415,6 +426,7 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
     if ( vel_command != 0.0 ) {
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      synced_braking_[joint_idx] = false;
       reset_sync_offsets( joint_idx );
     }
     break;
@@ -466,6 +478,16 @@ void VelocityToPositionCommandController::reset_sync_offsets( size_t joint_idx )
           joint_position_states_[partner] - joint_position_states_[joint_idx];
     }
   }
+}
+
+bool VelocityToPositionCommandController::all_group_partners_braking_done( size_t joint_idx ) const
+{
+  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+    const size_t partner = synced_joints_[joint_idx][i];
+    if ( move_states_[partner] == STOPPING && stopping_velocities_[partner] != 0.0 )
+      return false;
+  }
+  return true;
 }
 
 void VelocityToPositionCommandController::update_sync_offsets()
@@ -640,20 +662,63 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       break;
 
     case STOPPING: {
-      // Decelerate the stopping velocity toward zero
       const double dt = period.seconds();
       const double sign = ( stopping_velocities_[joint_idx] > 0.0 ) ? 1.0 : -1.0;
-      stopping_velocities_[joint_idx] -= sign * braking_deceleration_ * dt;
+
+      // Determine effective deceleration, potentially reduced for synced braking
+      double effective_decel = braking_deceleration_;
+
+      if ( synced_braking_[joint_idx] ) {
+        // For each sync partner, check if this joint is "ahead" (decelerated
+        // more than its partner relative to the offset captured at braking start).
+        // If so, reduce deceleration so the weaker partner can catch up.
+        for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+          const size_t partner = synced_joints_[joint_idx][i];
+          if ( std::isnan( joint_position_states_[partner] ) ||
+               std::isnan( sync_offsets_[joint_idx][i] ) )
+            continue;
+
+          // Expected: partner_pos - my_pos == sync_offset
+          // position_error > 0 means partner moved more than expected relative to me
+          //   -> I am "ahead" (decelerated more), should slow down my braking
+          // position_error < 0 means I moved more than expected relative to partner
+          //   -> partner is ahead, I brake normally
+          const double position_error =
+              ( joint_position_states_[partner] - joint_position_states_[joint_idx] -
+                sync_offsets_[joint_idx][i] ) *
+              sign;
+
+          if ( position_error > 0.0 ) {
+            // Scale deceleration down proportional to how far ahead we are.
+            // kp_sync_ controls how aggressively we correct.
+            const double scale = std::max( 0.0, 1.0 - kp_braking_sync_ * position_error );
+            effective_decel = std::min( effective_decel, braking_deceleration_ * scale );
+          }
+        }
+      }
+
+      stopping_velocities_[joint_idx] -= sign * effective_decel * dt;
 
       // Check if we crossed zero or reached threshold (deceleration complete)
       if ( std::abs( stopping_velocities_[joint_idx] ) <= stopping_vel_threshold_ ||
            sign * stopping_velocities_[joint_idx] < 0.0 ) {
         stopping_velocities_[joint_idx] = 0.0;
-        move_states_[joint_idx] = STOPPED;
-        hold_positions_[joint_idx] = desired_positions_[joint_idx];
-        pos_command = hold_positions_[joint_idx];
+
+        if ( !synced_braking_[joint_idx] || all_group_partners_braking_done( joint_idx ) ) {
+          // Non-synced: transition immediately. Synced: wait for all partners.
+          move_states_[joint_idx] = STOPPED;
+          hold_positions_[joint_idx] = desired_positions_[joint_idx];
+          pos_command = hold_positions_[joint_idx];
+          if ( synced_braking_[joint_idx] ) {
+            synced_braking_[joint_idx] = false;
+            reset_sync_offsets( joint_idx );
+          }
+        } else {
+          // This joint is done braking but partners are still braking — hold position
+          pos_command = desired_positions_[joint_idx];
+          hold_positions_[joint_idx] = desired_positions_[joint_idx];
+        }
       } else {
-        // Use pos_pd_control directly — no sync correction during braking
         pos_command = pos_pd_control( joint_idx, stopping_velocities_[joint_idx], period );
         hold_positions_[joint_idx] = desired_positions_[joint_idx];
       }
