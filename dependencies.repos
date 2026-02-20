@@ -7,3 +7,7 @@ repositories:
     type: git
     url: https://github.com/tu-darmstadt-ros-pkg/hector_ros2_utils.git
     version: jazzy
+  rtest:
+    type: git
+    url: https://github.com/Beam-and-Spyrosoft/rtest.git
+    version: jazzy

@@ -50,8 +50,6 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     name_to_id_.clear();
     for ( pinocchio::JointIndex jid = 1; jid < model_.joints.size(); ++jid ) {
       name_to_id_[model_.names[jid]] = jid;
-      RCLCPP_INFO_STREAM( node_->get_logger(),
-                          "Joint Index: " << jid << " Name: " << model_.names[jid] );
     }
     // Filter collision pairs based on controlled joints
     filterCollisionPairs( controlled_joints );

@@ -24,7 +24,6 @@
 #include <vector>
 
 #include "ad_kinematics/tree.h"
-#include "boost/shared_ptr.hpp"
 #include "controller_interface/chainable_controller_interface.hpp"
 #include "fcl/geometry/collision_geometry.h"
 #include "fcl/narrowphase/collision.h"
@@ -42,8 +41,8 @@ namespace self_collision_avoidance_controller
 {
 using DataType = std_msgs::msg::Float64MultiArray;
 
-typedef std::tuple<std::shared_ptr<fcl::CollisionObjectd>, std::shared_ptr<fcl::Transform3d>, int>
-    CollisionPrimitive;
+using CollisionPrimitive =
+    std::tuple<std::shared_ptr<fcl::CollisionObjectd>, std::shared_ptr<fcl::Transform3d>, int>;
 
 class SelfCollisionAvoidanceController : public controller_interface::ChainableControllerInterface
 {
@@ -102,7 +101,7 @@ protected:
 
   bool write_valid_reference_commands( std::vector<bool> &collision_results );
 
-  bool block_joint( const size_t &joint_idx );
+  bool block_joint( size_t joint_idx );
 
   std::shared_ptr<ParamListener> param_listener_;
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;

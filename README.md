@@ -58,13 +58,77 @@ Monitors joint states and **prevents the robot from moving into a configuration 
 Acts as a motion gatekeeper in real-time.
 
 ---
-Here’s an updated, self-contained README section for the **Safety Position Controller**, adapted to your current implementation (non-chained mode, E-Stop, debug JS pubs).
 
-You can drop this in instead of your existing section starting at `## 3. Safety Position Controller`.
+## 3. Velocity-to-Position Command Controller
+
+Converts **velocity references** into **position commands** for joint hardware. Useful when an upstream controller outputs velocity commands but the hardware only accepts position commands.
+
+### Features
+
+* **Feedforward integration with PD velocity tracking:**
+    * Integrates velocity commands into a desired position trajectory.
+    * A proportional term corrects for velocity tracking error (commanded vs actual).
+    * A derivative term damps acceleration to prevent overshoot and oscillation.
+* **Desired position tracking:**
+    * Maintains an internal `desired_positions` trajectory, providing implicit position error correction.
+    * On state transitions (STOPPED/STOPPING → MOVING), the desired position re-syncs to the actual joint position to prevent jumps.
+* **State machine** (per joint):
+    * **MOVING** – actively integrating velocity commands.
+    * **STOPPING** – velocity command is zero; joint decelerates at `braking_deceleration` rad/s² until stopped.
+    * **STOPPED** – joint velocity has reached zero; holds the last desired position.
+* **Braking deceleration:**
+    * Configurable deceleration ramp (`braking_deceleration`) for smooth stopping.
+* **Joint synchronization:**
+    * Joints in the same synchronization group are kept aligned via P-control on position offsets.
+    * **Synced braking:** When synced joints stop together, the faster-stopping joint reduces its braking to maintain the position difference with the weaker joint (controlled by `kp_braking_sync`). Both joints transition to STOPPED only when all group partners have finished braking.
+* **URDF position limit clamping:**
+    * Position commands are clamped to URDF joint limits for revolute/prismatic joints. Continuous joints are unclamped.
+* **E-Stop support:**
+    * Subscribes to an E-Stop topic; freezes all joints at their current positions when engaged.
+* **Chainable controller:**
+    * Can receive velocity references from an upstream controller or from a `~/commands` topic.
+* **Debug joint state publishers:**
+    * Optionally publishes incoming velocity references and outgoing position commands as `sensor_msgs/JointState` (dynamically togglable).
+* **Dynamic parameter reconfiguration:**
+    * `kp`, `kd`, `kp_sync`, `kp_braking_sync`, and `braking_deceleration` can be changed at runtime via ROS parameter callbacks.
+
+### Control Law
+
+```
+desired_pos[i] += vel_cmd * dt                          // feedforward integration
+vel_p = kp * (vel_cmd - vel_actual) * dt                // velocity P-term
+vel_d = kd * vel_actual * dt                            // velocity D-term (damping)
+pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
+```
+
+### Parameters
+
+| Name                            | Type           | Default                  | Description                                                                                                                                     |
+|---------------------------------|----------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| **joints**                      | `string_array` | `[]`                     | Names of the joints to control.                                                                                                                 |
+| **kp**                          | `double`       | `1.0`                    | Proportional gain for velocity tracking.                                                                                                        |
+| **kd**                          | `double`       | `0.1`                    | Derivative gain for acceleration damping.                                                                                                       |
+| **kp_sync**                     | `double`       | `1.0`                    | Proportional gain for synchronization of synced joints during movement.                                                                         |
+| **kp_braking_sync**             | `double`       | `1.0`                    | Proportional gain for synced braking correction. Controls how aggressively the faster joint slows its braking to maintain the position offset.  |
+| **stopping_velocity_threshold** | `double`       | `0.005`                  | Velocity threshold below which a joint is considered stopped.                                                                                   |
+| **braking_deceleration**        | `double`       | `5.0`                    | Deceleration in rad/s² used to smoothly bring joints to a stop when velocity command becomes zero.                                              |
+| **synchronous_groups**          | `string_array` | `[]`                     | Group names per joint for synchronization (empty = no sync).                                                                                    |
+| **passthrough_controller**      | `string`       | `""`                     | Prefix for the lower-level controller exposing command interfaces.                                                                              |
+| **e_stop_topic**                | `string`       | `estop_board/hard_estop` | Topic for emergency stop messages (`std_msgs/Bool`).                                                                                            |
+| **publish_debug_joint_states**  | `bool`         | `false`                  | If `true`, publishes `~/debug_in_joint_states` (velocity refs) and `~/debug_out_joint_states` (position cmds) as `sensor_msgs/JointState`.     |
+
+### Topics
+
+| Topic                      | Type                     | Description                                                            |
+|----------------------------|--------------------------|------------------------------------------------------------------------|
+| `~/commands`               | `Float64MultiArray`      | Velocity commands (not used in chained mode).                          |
+| E-Stop topic               | `Bool`                   | Engages (`true`) or releases (`false`) the e-stop.                     |
+| `~/debug_in_joint_states`  | `sensor_msgs/JointState` | Incoming velocity references (only when `publish_debug_joint_states`). |
+| `~/debug_out_joint_states` | `sensor_msgs/JointState` | Outgoing position commands (only when `publish_debug_joint_states`).   |
 
 ---
 
-## 3. Safety Position Controller
+## 4. Safety Position Controller
 
 A **safety layer for joint position commands**, usable both
 
@@ -94,6 +158,13 @@ A **safety layer for joint position commands**, usable both
 
     * Subscribes to `~/safety_estop` (`std_msgs/Bool`).
     * On activation → records current positions and *holds them* (no limit/collision checks) until E-Stop is released.
+* **Safety Bypass Mode** (for folded arm positions):
+
+    * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) to temporarily disable collision checks and relax joint limits.
+    * Useful when driving the arm into folded positions where intentional collisions must be made.
+    * Adds configurable tolerance to joint limits (default 3%).
+    * Auto-disables after configurable timeout (default 60 seconds) for safety.
+    * **Note:** Joint wrapping for continuous joints remains **always active** even during bypass.
 * **Optional current-limit control**:
 
     * Per-joint compliant/stiff current limits, written to `<joint>/current`.
@@ -119,6 +190,8 @@ A **safety layer for joint position commands**, usable both
 | `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint current limit in **compliant** mode [A].                                                                  |
 | `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint current limit in **stiff** mode [A].                                                                      |
 | `publish_debug_joint_states`       | `bool`     | `false` | If `true`, publishes debug `JointState` messages for incoming references and outgoing commands.                     |
+| `safety_bypass_timeout`            | `double`   | `60.0`  | Time in seconds after which safety bypass auto-disables. Must be positive.                                          |
+| `safety_bypass_joint_limit_tolerance` | `double` | `0.03`  | Tolerance factor (0.0-1.0) added to joint limits during bypass. E.g., 0.03 = 3% beyond normal limits.               |
 
 > **Note:** Parameters are read/updated at `on_activate()`. To apply runtime changes reliably, deactivate and reactivate the controller.
 
@@ -148,6 +221,7 @@ Enabled if `publish_debug_joint_states = true`:
 | Service                    | Type               | Description                                                                                          |
 | -------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------- |
 | `~/enforce_current_limits` | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) compliant mode (switch between compliant/stiff current limits). |
+| `~/bypass_safety_checks`   | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) safety bypass mode. Disables collision checks and relaxes joint limits. Auto-disables after `safety_bypass_timeout` seconds. Joint wrapping remains active. |
 
 
 ## Example Configuration

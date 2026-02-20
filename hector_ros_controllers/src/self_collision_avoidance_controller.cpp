@@ -37,7 +37,7 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::on_init()
         std::bind( &SelfCollisionAvoidanceController::setParamCb, this, std::placeholders::_1 ) );
 
   } catch ( const std::exception &e ) {
-    fprintf( stderr, "Exception thrown during init stage with message: %s \n", e.what() );
+    RCLCPP_ERROR( get_node()->get_logger(), "Exception thrown during init: %s", e.what() );
     return controller_interface::CallbackReturn::ERROR;
   }
   return controller_interface::CallbackReturn::SUCCESS;
@@ -70,8 +70,7 @@ controller_interface::return_type SelfCollisionAvoidanceController::update_refer
     const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
 {
   auto joint_commands = rt_buffer_ptr_.readFromRT();
-  // message is valid
-  if ( !( !joint_commands || !( *joint_commands ) ) ) {
+  if ( joint_commands && *joint_commands ) {
     if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
       RCLCPP_ERROR_THROTTLE(
           get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
@@ -126,7 +125,7 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
     passthrough_controller_ = params_.passthrough_controller + "/";
   }
 
-  velocity_look_ahead_factor_ = (int)params_.velocity_look_ahead_factor;
+  velocity_look_ahead_factor_ = static_cast<int>( params_.velocity_look_ahead_factor );
 
   if ( params_.joint_groups.empty() ) {
 
@@ -316,7 +315,7 @@ void SelfCollisionAvoidanceController::update_joint_angles()
   }
 }
 
-bool SelfCollisionAvoidanceController::block_joint( const size_t &joint_idx )
+bool SelfCollisionAvoidanceController::block_joint( size_t joint_idx )
 {
   if ( interface_types_[joint_idx] == "position" )
     return command_interfaces_[joint_idx].set_value( prev_command_vals_[joint_idx] );

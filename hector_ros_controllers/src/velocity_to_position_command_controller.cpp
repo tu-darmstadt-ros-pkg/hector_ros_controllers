@@ -1,31 +1,30 @@
-// Copyright 2020 PAL Robotics S.L.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "velocity_to_position_command_controller/velocity_to_position_command_controller.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "controller_interface/helpers.hpp"
+#include "hardware_interface/loaned_command_interface.hpp"
 #include "rclcpp/logging.hpp"
+#include "rclcpp/qos.hpp"
 
 namespace velocity_to_position_command_controller
 {
+
 VelocityToPositionCommandController::VelocityToPositionCommandController()
-    : VelocityToPositionControllersBase()
+    : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
+      e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
+      rt_buffer_ptr_( nullptr )
 {
 }
+
+// ---------------------------------------------------------------------------
+// Parameter utilities
+// ---------------------------------------------------------------------------
 
 void VelocityToPositionCommandController::declare_parameters()
 {
@@ -40,29 +39,37 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   }
   params_ = param_listener_->get_params();
 
+  // Clear vectors to prevent duplicates if on_configure() is called multiple times
+  joints_.clear();
+  command_interface_types_.clear();
+  state_interface_types_.clear();
+  reference_interface_names_.clear();
+  joint_position_states_.clear();
+  joint_velocity_states_.clear();
+  joint_groups_.clear();
+  groups_.clear();
+
   if ( params_.joints.empty() ) {
     RCLCPP_ERROR( get_node()->get_logger(), "'joints' parameter was empty" );
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  std::string interface_prefix = "";
-
+  std::string interface_prefix;
   if ( !params_.passthrough_controller.empty() )
     interface_prefix = params_.passthrough_controller + "/";
 
   for ( const auto &joint : params_.joints ) {
     joints_.push_back( joint );
     command_interface_types_.push_back( interface_prefix + joint + "/position" );
-    state_interface_types_.push_back( joint + "/" + "position" );
-    state_interface_types_.push_back( joint + "/" + "velocity" );
-    reference_interface_names_.push_back( joint + "/" + "velocity" );
+    state_interface_types_.push_back( joint + "/position" );
+    state_interface_types_.push_back( joint + "/velocity" );
+    reference_interface_names_.push_back( joint + "/velocity" );
 
     joint_position_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
     joint_velocity_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
-    joint_prev_vel_states_.push_back( std::numeric_limits<double>::quiet_NaN() );
   }
 
-  if ( params_.synchronous_groups.size() != 0 && params_.synchronous_groups.size() != joints_.size() ) {
+  if ( !params_.synchronous_groups.empty() && params_.synchronous_groups.size() != joints_.size() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
                   "Need to either specify a sync group for each joint or none at all" );
     return controller_interface::CallbackReturn::ERROR;
@@ -94,19 +101,693 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     }
   }
 
-  reference_interfaces_.resize( reference_interface_names_.size() );
-  hold_positions_.resize( reference_interface_names_.size() );
-  move_states_.resize( reference_interface_names_.size() );
+  const size_t num_joints = reference_interface_names_.size();
+  reference_interfaces_.resize( num_joints );
+  hold_positions_.resize( num_joints );
+  desired_positions_.resize( num_joints );
+  move_states_.resize( num_joints );
+  stopping_velocities_.assign( num_joints, 0.0 );
+  synced_braking_.assign( num_joints, false );
+
+  // Initialize limits to NaN (= no limit) by default
+  joint_lower_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
+  joint_upper_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
 
   e_stop_topic_ = params_.e_stop_topic;
-
-  kp_sync_ = params_.kp_sync;
   kp_ = params_.kp;
   kd_ = params_.kd;
-
+  kp_sync_ = params_.kp_sync;
+  kp_braking_sync_ = params_.kp_braking_sync;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
+  braking_deceleration_ = params_.braking_deceleration;
 
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// URDF joint limit parsing
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::parse_joint_limits_from_urdf()
+{
+  const std::string &urdf_string = this->get_robot_description();
+  if ( urdf_string.empty() ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "Robot description is empty, position limits will not be enforced" );
+    return;
+  }
+
+  urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF( urdf_string );
+  if ( !urdf_model ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "Failed to parse URDF, position limits will not be enforced" );
+    return;
+  }
+
+  for ( size_t i = 0; i < joints_.size(); ++i ) {
+    auto urdf_joint = urdf_model->getJoint( joints_[i] );
+    if ( !urdf_joint ) {
+      RCLCPP_WARN( get_node()->get_logger(), "Joint '%s' not found in URDF, no limits applied",
+                   joints_[i].c_str() );
+      continue;
+    }
+
+    if ( urdf_joint->type == urdf::Joint::CONTINUOUS ) {
+      RCLCPP_DEBUG( get_node()->get_logger(), "Joint '%s' is continuous, no position limits",
+                    joints_[i].c_str() );
+      continue;
+    }
+
+    if ( ( urdf_joint->type == urdf::Joint::REVOLUTE || urdf_joint->type == urdf::Joint::PRISMATIC ) &&
+         urdf_joint->limits ) {
+      joint_lower_limits_[i] = urdf_joint->limits->lower;
+      joint_upper_limits_[i] = urdf_joint->limits->upper;
+      RCLCPP_INFO( get_node()->get_logger(), "Joint '%s': position limits [%f, %f]",
+                   joints_[i].c_str(), joint_lower_limits_[i], joint_upper_limits_[i] );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic parameter reconfiguration
+// ---------------------------------------------------------------------------
+
+rcl_interfaces::msg::SetParametersResult
+VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
+{
+  auto result = rcl_interfaces::msg::SetParametersResult();
+  const double val = p.as_double();
+
+  if ( val < 0 ) {
+    result.successful = false;
+  } else {
+    result.successful = true;
+    if ( p.get_name() == "kp" ) {
+      kp_ = val;
+    } else if ( p.get_name() == "kd" ) {
+      kd_ = val;
+    } else if ( p.get_name() == "kp_sync" ) {
+      kp_sync_ = val;
+    } else if ( p.get_name() == "kp_braking_sync" ) {
+      kp_braking_sync_ = val;
+    } else if ( p.get_name() == "braking_deceleration" ) {
+      braking_deceleration_ = val;
+    }
+    RCLCPP_INFO( get_node()->get_logger(), "Reconfigured %s to %f", p.get_name().c_str(), val );
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle callbacks
+// ---------------------------------------------------------------------------
+
+controller_interface::CallbackReturn VelocityToPositionCommandController::on_init()
+{
+  try {
+    declare_parameters();
+
+    param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( get_node() );
+    cb_handle_kp_ = param_subscriber_->add_parameter_callback(
+        "kp",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_kd_ = param_subscriber_->add_parameter_callback(
+        "kd",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
+        "kp_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_braking_sync_kp_ = param_subscriber_->add_parameter_callback(
+        "kp_braking_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_braking_decel_ = param_subscriber_->add_parameter_callback(
+        "braking_deceleration",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    // Debug joint state publishers (dynamically reconfigurable)
+    update_debug_publishers( param_listener_->get_params().publish_debug_joint_states );
+    cb_handle_debug_pubs_ = param_subscriber_->add_parameter_callback(
+        "publish_debug_joint_states",
+        [this]( const rclcpp::Parameter &p ) { update_debug_publishers( p.as_bool() ); },
+        get_node()->get_name() );
+
+  } catch ( const std::exception &e ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Exception thrown during init: %s", e.what() );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn
+VelocityToPositionCommandController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
+{
+  auto ret = read_parameters();
+  if ( ret != controller_interface::CallbackReturn::SUCCESS ) {
+    return ret;
+  }
+
+  parse_joint_limits_from_urdf();
+
+  RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn
+VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
+{
+  std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_interfaces;
+  if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_types_,
+                                                      std::string( "" ), ordered_interfaces ) ||
+       command_interface_types_.size() != ordered_interfaces.size() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Expected %zu command interfaces, got %zu",
+                  command_interface_types_.size(), ordered_interfaces.size() );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  // Reset command buffer and reference interfaces to prevent stale velocity commands
+  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
+             std::numeric_limits<double>::quiet_NaN() );
+  e_stop_active_.writeFromNonRT( false );
+
+  // Topic subscriber for non-chained mode
+  auto cmd_qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
+  cmd_sub_ = get_node()->create_subscription<CmdType>(
+      "~/commands", cmd_qos,
+      [this]( const CmdType::SharedPtr msg ) { rt_buffer_ptr_.writeFromNonRT( msg ); } );
+
+  auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
+  hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
+      e_stop_topic_, qos, [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
+        if ( msg->data ) {
+          RCLCPP_WARN(
+              get_node()->get_logger(),
+              "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
+          e_stop_active_.writeFromNonRT( true );
+        } else {
+          e_stop_active_.writeFromNonRT( false );
+        }
+      } );
+
+  update_joint_states_if_valid();
+
+  for ( size_t i = 0; i < joints_.size(); i++ ) {
+    move_states_[i] = STOPPED;
+
+    if ( interfaces_valid_ ) {
+      hold_positions_[i] = joint_position_states_[i];
+      desired_positions_[i] = joint_position_states_[i];
+    } else {
+      hold_positions_[i] = std::numeric_limits<double>::quiet_NaN();
+      desired_positions_[i] = std::numeric_limits<double>::quiet_NaN();
+    }
+
+    sync_states_[i] = false;
+  }
+  for ( size_t i = 0; i < joints_.size(); i++ ) { reset_sync_offsets( i ); }
+
+  RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn
+VelocityToPositionCommandController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
+{
+  rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  cmd_sub_.reset();
+  hard_estop_sub_.reset();
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Chainable controller interface
+// ---------------------------------------------------------------------------
+
+controller_interface::InterfaceConfiguration
+VelocityToPositionCommandController::command_interface_configuration() const
+{
+  controller_interface::InterfaceConfiguration config;
+  config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  config.names = command_interface_types_;
+  return config;
+}
+
+controller_interface::InterfaceConfiguration
+VelocityToPositionCommandController::state_interface_configuration() const
+{
+  controller_interface::InterfaceConfiguration config;
+  config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  config.names = state_interface_types_;
+  return config;
+}
+
+std::vector<hardware_interface::CommandInterface>
+VelocityToPositionCommandController::on_export_reference_interfaces()
+{
+  std::vector<hardware_interface::CommandInterface> reference_interfaces;
+  RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interfaces" );
+  for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
+    RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interface %s",
+                 reference_interface_names_[i].c_str() );
+    reference_interfaces.emplace_back( get_node()->get_name(), reference_interface_names_[i],
+                                       &reference_interfaces_[i] );
+  }
+  return reference_interfaces;
+}
+
+controller_interface::return_type VelocityToPositionCommandController::update_reference_from_subscribers(
+    const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
+{
+  auto joint_commands = rt_buffer_ptr_.readFromRT();
+  if ( joint_commands && *joint_commands ) {
+    if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
+      RCLCPP_ERROR_THROTTLE(
+          get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+          "command size (%zu) does not match number of reference interfaces (%zu)",
+          ( *joint_commands )->data.size(), reference_interfaces_.size() );
+      return controller_interface::return_type::ERROR;
+    }
+    std::copy( ( *joint_commands )->data.begin(), ( *joint_commands )->data.end(),
+               reference_interfaces_.begin() );
+  }
+
+  return controller_interface::return_type::OK;
+}
+
+bool VelocityToPositionCommandController::on_set_chained_mode( bool /*chained_mode*/ )
+{
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// State reading
+// ---------------------------------------------------------------------------
+
+static bool is_valid( const std::optional<double> &v_opt )
+{
+  return v_opt.has_value() && !std::isnan( v_opt.value() );
+}
+
+void VelocityToPositionCommandController::update_joint_states_if_valid()
+{
+  bool all_joints_valid = true;
+  for ( size_t i = 0; i < joints_.size(); ++i ) {
+    const auto &pos_state = state_interfaces_[2 * i].get_optional();
+    const auto &vel_state = state_interfaces_[2 * i + 1].get_optional();
+
+    bool states_valid = is_valid( pos_state ) && is_valid( vel_state );
+    all_joints_valid &= states_valid;
+    if ( states_valid ) {
+      joint_position_states_[i] = pos_state.value();
+      joint_velocity_states_[i] = vel_state.value();
+    } else {
+      joint_position_states_[i] = std::numeric_limits<double>::quiet_NaN();
+      joint_velocity_states_[i] = std::numeric_limits<double>::quiet_NaN();
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "Joint '%s' has invalid state interfaces (pos=%s, vel=%s)",
+                            joints_[i].c_str(), is_valid( pos_state ) ? "ok" : "NaN/missing",
+                            is_valid( vel_state ) ? "ok" : "NaN/missing" );
+    }
+  }
+
+  interfaces_valid_ = all_joints_valid;
+}
+
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::update_move_states( double vel_command, size_t joint_idx )
+{
+  switch ( move_states_[joint_idx] ) {
+  case MOVING:
+    if ( vel_command == 0.0 ) {
+      move_states_[joint_idx] = STOPPING;
+      // Capture the last commanded velocity direction for deceleration
+      stopping_velocities_[joint_idx] = joint_velocity_states_[joint_idx];
+      desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      // Synced braking if this joint was in a sync group (all got vel=0 together)
+      synced_braking_[joint_idx] = sync_states_[joint_idx];
+    }
+    break;
+
+  case STOPPING:
+    if ( vel_command != 0.0 ) {
+      move_states_[joint_idx] = MOVING;
+      desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      synced_braking_[joint_idx] = false;
+    }
+    break;
+
+  case STOPPED:
+    if ( vel_command != 0.0 ) {
+      move_states_[joint_idx] = MOVING;
+      desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+    }
+    break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Synchronization
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::update_sync_states( const std::vector<double> &vel_commands )
+{
+  for ( auto &group : groups_ ) {
+    const std::vector<size_t> &group_indices = group.second;
+
+    if ( group_indices.size() == 1 ) {
+      sync_states_[group_indices[0]] = false;
+      continue;
+    }
+
+    bool group_is_synchronized = true;
+    const double &common_vel_command = vel_commands[group_indices[0]];
+    for ( size_t i = 1; i < group_indices.size(); i++ ) {
+      group_is_synchronized &= common_vel_command == vel_commands[group_indices[i]];
+    }
+
+    for ( size_t i = 0; i < group_indices.size(); i++ ) {
+      sync_states_[group_indices[i]] = group_is_synchronized;
+    }
+  }
+}
+
+void VelocityToPositionCommandController::reset_sync_offsets( size_t joint_idx )
+{
+  if ( std::isnan( joint_position_states_[joint_idx] ) )
+    return;
+  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+    const size_t partner = synced_joints_[joint_idx][i];
+    if ( !std::isnan( joint_position_states_[partner] ) ) {
+      sync_offsets_[joint_idx][i] =
+          joint_position_states_[partner] - joint_position_states_[joint_idx];
+    }
+  }
+}
+
+bool VelocityToPositionCommandController::all_group_partners_braking_done( size_t joint_idx ) const
+{
+  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+    const size_t partner = synced_joints_[joint_idx][i];
+    if ( move_states_[partner] == STOPPING && stopping_velocities_[partner] != 0.0 )
+      return false;
+  }
+  return true;
+}
+
+void VelocityToPositionCommandController::update_sync_offsets()
+{
+  for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
+    // Update offsets for MOVING joints that are NOT currently synced.
+    // When joints move independently (different velocity commands), the offset must track
+    // their diverging positions so that when they re-sync, the new baseline is correct.
+    // Synced joints keep their offsets fixed so sync_p_control() can measure and correct drift.
+    if ( move_states_[joint_idx] != MOVING )
+      continue;
+    if ( sync_states_[joint_idx] || std::isnan( joint_position_states_[joint_idx] ) )
+      continue;
+    for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+      const size_t partner = synced_joints_[joint_idx][i];
+      if ( !std::isnan( joint_position_states_[partner] ) ) {
+        sync_offsets_[joint_idx][i] =
+            joint_position_states_[partner] - joint_position_states_[joint_idx];
+      }
+    }
+  }
+}
+
+double VelocityToPositionCommandController::sync_p_control( size_t joint_idx )
+{
+  double sync_pos_command = 0.0;
+  size_t valid_count = 0;
+  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+    const size_t partner = synced_joints_[joint_idx][i];
+    if ( std::isnan( joint_position_states_[partner] ) || std::isnan( sync_offsets_[joint_idx][i] ) )
+      continue;
+    sync_pos_command += ( joint_position_states_[partner] - joint_position_states_[joint_idx] -
+                          sync_offsets_[joint_idx][i] ) *
+                        kp_sync_;
+    ++valid_count;
+  }
+  return valid_count > 0 ? sync_pos_command / static_cast<double>( valid_count ) : 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// Control law
+// ---------------------------------------------------------------------------
+
+double VelocityToPositionCommandController::pos_pd_control( size_t joint_idx, double vel_command,
+                                                            const rclcpp::Duration &period )
+{
+  const double dt = period.seconds();
+
+  // Integrate desired position along velocity command trajectory
+  desired_positions_[joint_idx] += vel_command * dt;
+
+  // P-term: velocity tracking correction
+  const double vel_p = kp_ * ( vel_command - joint_velocity_states_[joint_idx] ) * dt;
+
+  // D-term: damp position changes proportional to measured velocity.
+  // This acts as a classical derivative-of-position damper: when the joint
+  // moves fast the command is pulled back, preventing overshoot and oscillation.
+  const double vel_d = kd_ * joint_velocity_states_[joint_idx] * dt;
+
+  return desired_positions_[joint_idx] + vel_p - vel_d;
+}
+
+double VelocityToPositionCommandController::position_control( size_t joint_idx, double vel_command,
+                                                              const rclcpp::Duration &period )
+{
+  double next_position = pos_pd_control( joint_idx, vel_command, period );
+  if ( sync_states_[joint_idx] )
+    next_position += sync_p_control( joint_idx );
+
+  return next_position;
+}
+
+// ---------------------------------------------------------------------------
+// Debug publishers
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::update_debug_publishers( bool enable )
+{
+  if ( enable ) {
+    if ( !debug_in_js_pub_ ) {
+      debug_in_js_pub_ =
+          get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
+    }
+    if ( !debug_out_js_pub_ ) {
+      debug_out_js_pub_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
+          "~/debug_out_joint_states", 10 );
+    }
+    RCLCPP_INFO( get_node()->get_logger(), "Debug joint state publishers enabled" );
+  } else {
+    debug_in_js_pub_.reset();
+    debug_out_js_pub_.reset();
+  }
+}
+
+void VelocityToPositionCommandController::publish_debug_joint_state_in()
+{
+  if ( !debug_in_js_pub_ )
+    return;
+
+  sensor_msgs::msg::JointState msg;
+  msg.header.stamp = get_node()->now();
+  msg.name = joints_;
+  msg.velocity = reference_interfaces_;
+  debug_in_js_pub_->publish( msg );
+}
+
+void VelocityToPositionCommandController::publish_debug_joint_state_out(
+    const std::vector<double> &positions )
+{
+  if ( !debug_out_js_pub_ )
+    return;
+
+  sensor_msgs::msg::JointState msg;
+  msg.header.stamp = get_node()->now();
+  msg.name = joints_;
+  msg.position = positions;
+  debug_out_js_pub_->publish( msg );
+}
+
+// ---------------------------------------------------------------------------
+// Main update
+// ---------------------------------------------------------------------------
+
+controller_interface::return_type
+VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Time & /*time*/,
+                                                                const rclcpp::Duration &period )
+{
+  update_joint_states_if_valid();
+
+  publish_debug_joint_state_in();
+
+  bool successful = true;
+  // TODO: e-stop
+  // if ( *( e_stop_active_.readFromRT() ) ) {
+  //   for ( size_t index = 0; index < command_interfaces_.size(); index++ ) {
+  //     if ( !std::isnan( joint_position_states_[index] ) ) {
+  //       hold_positions_[index] = joint_position_states_[index];
+  //       desired_positions_[index] = joint_position_states_[index];
+  //     }
+  //     move_states_[index] = STOPPED;
+  //   }
+  //   RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+  //                         "E-Stop active, holding current joint positions" );
+  //   return controller_interface::return_type::OK;
+  // }
+
+  update_sync_states( reference_interfaces_ );
+  update_sync_offsets();
+
+  for ( size_t joint_idx = 0; joint_idx < command_interfaces_.size(); joint_idx++ ) {
+
+    // Skip if no command received from high level controller
+    if ( std::isnan( reference_interfaces_[joint_idx] ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "No velocity command received for joint '%s'",
+                            joints_[joint_idx].c_str() );
+      continue;
+    }
+    // Skip joints with invalid state interfaces
+    if ( std::isnan( joint_position_states_[joint_idx] ) ||
+         std::isnan( joint_velocity_states_[joint_idx] ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "Joint '%s' has invalid state interfaces (pos=%s, vel=%s)",
+                            joints_[joint_idx].c_str(),
+                            std::isnan( joint_position_states_[joint_idx] ) ? "NaN" : "ok",
+                            std::isnan( joint_velocity_states_[joint_idx] ) ? "NaN" : "ok" );
+      continue;
+    }
+
+    const double vel_command = reference_interfaces_[joint_idx];
+
+    update_move_states( vel_command, joint_idx );
+
+    double pos_command = std::numeric_limits<double>::quiet_NaN();
+    switch ( move_states_[joint_idx] ) {
+    case STOPPED:
+      pos_command = hold_positions_[joint_idx];
+      break;
+
+    case STOPPING: {
+      // Already decelerated to zero — hold position while waiting for synced partners
+      if ( stopping_velocities_[joint_idx] == 0.0 ) {
+        pos_command = hold_positions_[joint_idx];
+        if ( !synced_braking_[joint_idx] || all_group_partners_braking_done( joint_idx ) ) {
+          move_states_[joint_idx] = STOPPED;
+          synced_braking_[joint_idx] = false;
+        }
+        break;
+      }
+
+      const double dt = period.seconds();
+      const double sign = ( stopping_velocities_[joint_idx] > 0.0 ) ? 1.0 : -1.0;
+
+      // Determine effective deceleration, potentially reduced for synced braking
+      double effective_decel = braking_deceleration_;
+
+      if ( synced_braking_[joint_idx] ) {
+        // For each sync partner, check if this joint is "ahead" (decelerated
+        // more than its partner relative to the offset captured at braking start).
+        // If so, reduce deceleration so the weaker partner can catch up.
+        for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
+          const size_t partner = synced_joints_[joint_idx][i];
+          if ( std::isnan( joint_position_states_[partner] ) ||
+               std::isnan( sync_offsets_[joint_idx][i] ) )
+            continue;
+
+          // Expected: partner_pos - my_pos == sync_offset
+          // position_error > 0 means partner moved more than expected relative to me
+          //   -> I am "ahead" (decelerated more), should slow down my braking
+          // position_error < 0 means I moved more than expected relative to partner
+          //   -> partner is ahead, I brake normally
+          const double position_error =
+              ( joint_position_states_[partner] - joint_position_states_[joint_idx] -
+                sync_offsets_[joint_idx][i] ) *
+              sign;
+
+          if ( position_error > 0.0 ) {
+            // Scale deceleration down proportional to how far ahead we are.
+            const double scale = std::max( 0.0, 1.0 - kp_braking_sync_ * position_error );
+            effective_decel = std::min( effective_decel, braking_deceleration_ * scale );
+          }
+        }
+      }
+
+      stopping_velocities_[joint_idx] -= sign * effective_decel * dt;
+
+      // Check if we crossed zero or reached threshold (deceleration complete)
+      if ( std::abs( stopping_velocities_[joint_idx] ) <= stopping_vel_threshold_ ||
+           sign * stopping_velocities_[joint_idx] < 0.0 ) {
+        stopping_velocities_[joint_idx] = 0.0;
+        // Capture hold position once at the moment deceleration finishes
+        hold_positions_[joint_idx] = joint_position_states_[joint_idx];
+        desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+        pos_command = hold_positions_[joint_idx];
+
+        if ( !synced_braking_[joint_idx] || all_group_partners_braking_done( joint_idx ) ) {
+          move_states_[joint_idx] = STOPPED;
+          synced_braking_[joint_idx] = false;
+        }
+      } else {
+        // Integrate desired position along deceleration ramp (no PD — just trajectory)
+        desired_positions_[joint_idx] += stopping_velocities_[joint_idx] * dt;
+        pos_command = desired_positions_[joint_idx];
+        hold_positions_[joint_idx] = desired_positions_[joint_idx];
+      }
+      break;
+    }
+
+    case MOVING:
+      pos_command = position_control( joint_idx, vel_command, period );
+      // Update hold position to desired position (where joint *should* be)
+      hold_positions_[joint_idx] = desired_positions_[joint_idx];
+      break;
+    }
+
+    if ( std::isnan( pos_command ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                            "Position command is NaN for joint '%s'", joints_[joint_idx].c_str() );
+      continue;
+    }
+
+    // Clamp to URDF position limits for revolute/prismatic joints
+    if ( !std::isnan( joint_lower_limits_[joint_idx] ) ) {
+      pos_command =
+          std::clamp( pos_command, joint_lower_limits_[joint_idx], joint_upper_limits_[joint_idx] );
+      desired_positions_[joint_idx] =
+          std::clamp( desired_positions_[joint_idx], joint_lower_limits_[joint_idx],
+                      joint_upper_limits_[joint_idx] );
+      hold_positions_[joint_idx] =
+          std::clamp( hold_positions_[joint_idx], joint_lower_limits_[joint_idx],
+                      joint_upper_limits_[joint_idx] );
+    }
+
+    successful &= command_interfaces_[joint_idx].set_value( pos_command );
+  }
+
+  publish_debug_joint_state_out( desired_positions_ );
+
+  if ( !successful )
+    return controller_interface::return_type::ERROR;
+
+  return controller_interface::return_type::OK;
 }
 
 } // namespace velocity_to_position_command_controller
