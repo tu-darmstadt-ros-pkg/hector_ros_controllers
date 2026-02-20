@@ -157,6 +157,7 @@ private:
 
   // RT-safe command buffer and subscriptions
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;
+  rclcpp::Subscription<CmdType>::SharedPtr cmd_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hard_estop_sub_;
 
   // Parameters

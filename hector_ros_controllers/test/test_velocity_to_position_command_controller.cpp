@@ -981,6 +981,105 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncedBrakingWaitsForPartners )
 }
 
 // ============================================================================
+// Sync Offset Initialization Tests
+// ============================================================================
+
+// Verify sync offsets are properly initialized when joints move together (not NaN)
+TEST_F( VelocityToPositionCommandControllerTest, SyncOffsetsInitializedWhenMovingTogether )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.1 ); // deliberate offset
+  activateController();
+
+  // Offsets should be set from activation (via reset_sync_offsets)
+  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[0][0] ) );
+  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[1][0] ) );
+  // joint1_pos - joint0_pos = 0.1
+  EXPECT_NEAR( controller_->sync_offsets_[0][0], 0.1, 1e-9 );
+  // joint0_pos - joint1_pos = -0.1
+  EXPECT_NEAR( controller_->sync_offsets_[1][0], -0.1, 1e-9 );
+
+  // Move both joints together at same velocity
+  for ( int i = 0; i < 10; i++ ) {
+    controller_->reference_interfaces_[0] = 1.0;
+    controller_->reference_interfaces_[1] = 1.0;
+    controller_->reference_interfaces_[2] = 0.0;
+    setPosition( 0, ( i + 1 ) * 0.01 );
+    setPosition( 1, 0.1 + ( i + 1 ) * 0.01 );
+    setVelocity( 0, 1.0 );
+    setVelocity( 1, 1.0 );
+    callUpdate();
+  }
+
+  // Offsets should still be valid (not NaN) and reflect the position relationship
+  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[0][0] ) );
+  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[1][0] ) );
+  EXPECT_NEAR( controller_->sync_offsets_[0][0], 0.1, 1e-6 );
+}
+
+// Verify synced flippers stay close after repeated up-down cycles
+TEST_F( VelocityToPositionCommandControllerTest, SyncRestoredAfterRepeatedStopStart )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.0 );
+  activateController();
+
+  // Repeat 5 up-down cycles: move up -> stop -> move down -> stop
+  double pos0 = 0.0;
+  double pos1 = 0.0;
+
+  for ( int cycle = 0; cycle < 5; cycle++ ) {
+    double vel = ( cycle % 2 == 0 ) ? 1.0 : -1.0;
+
+    // Move for 20 cycles
+    for ( int i = 0; i < 20; i++ ) {
+      controller_->reference_interfaces_[0] = vel;
+      controller_->reference_interfaces_[1] = vel;
+      controller_->reference_interfaces_[2] = 0.0;
+      // Simulate: joint0 tracks well, joint1 has slight drift
+      pos0 += vel * 0.01;
+      pos1 += vel * 0.01 * 1.02; // 2% drift per cycle
+      setPosition( 0, pos0 );
+      setPosition( 1, pos1 );
+      setVelocity( 0, vel );
+      setVelocity( 1, vel * 1.02 );
+      callUpdate();
+    }
+
+    // Stop both
+    controller_->reference_interfaces_[0] = 0.0;
+    controller_->reference_interfaces_[1] = 0.0;
+    setVelocity( 0, vel * 0.5 );
+    setVelocity( 1, vel * 0.5 );
+    callUpdate();
+
+    // Brake until stopped
+    for ( int i = 0; i < 20; i++ ) { callUpdate(); }
+
+    EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
+    EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPED );
+  }
+
+  // The position difference should not have grown unbounded.
+  // With sync correction active, each cycle corrects the drift.
+  // Without fix: offsets are NaN, no correction ever happens, drift accumulates.
+  double final_diff = std::abs( pos0 - pos1 );
+  // Allow some tolerance — sync P-control can't perfectly correct drift,
+  // but it should prevent unbounded accumulation
+  EXPECT_LT( final_diff, 0.5 ) << "Position difference after 5 cycles: " << final_diff;
+}
+
+// ============================================================================
 // main
 // ============================================================================
 

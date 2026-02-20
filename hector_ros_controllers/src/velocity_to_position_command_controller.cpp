@@ -39,6 +39,16 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   }
   params_ = param_listener_->get_params();
 
+  // Clear vectors to prevent duplicates if on_configure() is called multiple times
+  joints_.clear();
+  command_interface_types_.clear();
+  state_interface_types_.clear();
+  reference_interface_names_.clear();
+  joint_position_states_.clear();
+  joint_velocity_states_.clear();
+  joint_groups_.clear();
+  groups_.clear();
+
   if ( params_.joints.empty() ) {
     RCLCPP_ERROR( get_node()->get_logger(), "'joints' parameter was empty" );
     return controller_interface::CallbackReturn::ERROR;
@@ -265,9 +275,17 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // Reset command buffer
+  // Reset command buffer and reference interfaces to prevent stale velocity commands
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
+             std::numeric_limits<double>::quiet_NaN() );
   e_stop_active_.writeFromNonRT( false );
+
+  // Topic subscriber for non-chained mode
+  auto cmd_qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
+  cmd_sub_ = get_node()->create_subscription<CmdType>(
+      "~/commands", cmd_qos,
+      [this]( const CmdType::SharedPtr msg ) { rt_buffer_ptr_.writeFromNonRT( msg ); } );
 
   auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
   hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
@@ -297,7 +315,7 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
 
     sync_states_[i] = false;
   }
-  update_sync_offsets();
+  for ( size_t i = 0; i < joints_.size(); i++ ) { reset_sync_offsets( i ); }
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
@@ -307,6 +325,7 @@ controller_interface::CallbackReturn
 VelocityToPositionCommandController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  cmd_sub_.reset();
   hard_estop_sub_.reset();
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -427,10 +446,7 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
       synced_braking_[joint_idx] = false;
-      // Only reset sync offsets when resuming independently (not in sync with group)
-      if ( !sync_states_[joint_idx] ) {
-        reset_sync_offsets( joint_idx );
-      }
+      reset_sync_offsets( joint_idx );
     }
     break;
 
@@ -438,10 +454,7 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
     if ( vel_command != 0.0 ) {
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-      // Only reset sync offsets when resuming independently (not in sync with group)
-      if ( !sync_states_[joint_idx] ) {
-        reset_sync_offsets( joint_idx );
-      }
+      reset_sync_offsets( joint_idx );
     }
     break;
   }
@@ -499,8 +512,10 @@ bool VelocityToPositionCommandController::all_group_partners_braking_done( size_
 void VelocityToPositionCommandController::update_sync_offsets()
 {
   for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
-    // Only update offsets for joints that are actively MOVING and not currently synced.
-    // STOPPING/STOPPED joints keep their offsets to preserve synchronization across stop cycles.
+    // Update offsets for MOVING joints that are NOT currently synced.
+    // When joints move independently (different velocity commands), the offset must track
+    // their diverging positions so that when they re-sync, the new baseline is correct.
+    // Synced joints keep their offsets fixed so sync_p_control() can measure and correct drift.
     if ( move_states_[joint_idx] != MOVING )
       continue;
     if ( sync_states_[joint_idx] || std::isnan( joint_position_states_[joint_idx] ) )
@@ -672,6 +687,16 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       break;
 
     case STOPPING: {
+      // Already decelerated to zero — hold position while waiting for synced partners
+      if ( stopping_velocities_[joint_idx] == 0.0 ) {
+        pos_command = hold_positions_[joint_idx];
+        if ( !synced_braking_[joint_idx] || all_group_partners_braking_done( joint_idx ) ) {
+          move_states_[joint_idx] = STOPPED;
+          synced_braking_[joint_idx] = false;
+        }
+        break;
+      }
+
       const double dt = period.seconds();
       const double sign = ( stopping_velocities_[joint_idx] > 0.0 ) ? 1.0 : -1.0;
 
@@ -700,7 +725,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
 
           if ( position_error > 0.0 ) {
             // Scale deceleration down proportional to how far ahead we are.
-            // kp_sync_ controls how aggressively we correct.
             const double scale = std::max( 0.0, 1.0 - kp_braking_sync_ * position_error );
             effective_decel = std::min( effective_decel, braking_deceleration_ * scale );
           }
@@ -713,19 +737,14 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       if ( std::abs( stopping_velocities_[joint_idx] ) <= stopping_vel_threshold_ ||
            sign * stopping_velocities_[joint_idx] < 0.0 ) {
         stopping_velocities_[joint_idx] = 0.0;
+        // Capture hold position once at the moment deceleration finishes
+        hold_positions_[joint_idx] = joint_position_states_[joint_idx];
+        desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+        pos_command = hold_positions_[joint_idx];
 
         if ( !synced_braking_[joint_idx] || all_group_partners_braking_done( joint_idx ) ) {
-          // Transition to STOPPED — hold at actual position to avoid jumps
           move_states_[joint_idx] = STOPPED;
-          hold_positions_[joint_idx] = joint_position_states_[joint_idx];
-          desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-          pos_command = hold_positions_[joint_idx];
           synced_braking_[joint_idx] = false;
-        } else {
-          // This joint is done braking but partners are still braking — hold at actual position
-          hold_positions_[joint_idx] = joint_position_states_[joint_idx];
-          desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-          pos_command = hold_positions_[joint_idx];
         }
       } else {
         // Integrate desired position along deceleration ramp (no PD — just trajectory)
