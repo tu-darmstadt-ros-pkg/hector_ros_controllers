@@ -638,7 +638,8 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
         hold_positions_[joint_idx] = desired_positions_[joint_idx];
         pos_command = hold_positions_[joint_idx];
       } else {
-        pos_command = position_control( joint_idx, stopping_velocities_[joint_idx], period );
+        // Use pos_pd_control directly — no sync correction during braking
+        pos_command = pos_pd_control( joint_idx, stopping_velocities_[joint_idx], period );
         hold_positions_[joint_idx] = desired_positions_[joint_idx];
       }
       break;
