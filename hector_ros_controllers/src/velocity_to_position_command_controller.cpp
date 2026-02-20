@@ -378,7 +378,8 @@ controller_interface::return_type VelocityToPositionCommandController::update_re
           ( *joint_commands )->data.size(), reference_interfaces_.size() );
       return controller_interface::return_type::ERROR;
     }
-    reference_interfaces_ = ( *joint_commands )->data;
+    std::copy( ( *joint_commands )->data.begin(), ( *joint_commands )->data.end(),
+               reference_interfaces_.begin() );
   }
 
   return controller_interface::return_type::OK;
@@ -446,7 +447,6 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
       synced_braking_[joint_idx] = false;
-      reset_sync_offsets( joint_idx );
     }
     break;
 
@@ -454,7 +454,6 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
     if ( vel_command != 0.0 ) {
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-      reset_sync_offsets( joint_idx );
     }
     break;
   }
