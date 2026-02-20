@@ -676,6 +676,120 @@ TEST_F( VelocityToPositionCommandControllerTest, MultiCyclePositionTracking )
 }
 
 // ============================================================================
+// Position Limit Clamping Tests
+// ============================================================================
+
+// Verify joint limits are parsed from URDF during configure
+TEST_F( VelocityToPositionCommandControllerTest, JointLimitsParsedFromUrdf )
+{
+  initController();
+  configureController();
+
+  // joint1: revolute, limits [-3.14159, 3.14159]
+  EXPECT_DOUBLE_EQ( controller_->joint_lower_limits_[0], -3.14159 );
+  EXPECT_DOUBLE_EQ( controller_->joint_upper_limits_[0], 3.14159 );
+
+  // joint2: revolute, limits [-1.5, 1.5]
+  EXPECT_DOUBLE_EQ( controller_->joint_lower_limits_[1], -1.5 );
+  EXPECT_DOUBLE_EQ( controller_->joint_upper_limits_[1], 1.5 );
+
+  // joint3: revolute, limits [-2.0, 2.0]
+  EXPECT_DOUBLE_EQ( controller_->joint_lower_limits_[2], -2.0 );
+  EXPECT_DOUBLE_EQ( controller_->joint_upper_limits_[2], 2.0 );
+}
+
+// Verify position command is clamped at the upper limit
+TEST_F( VelocityToPositionCommandControllerTest, PositionClampedAtUpperLimit )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+
+  // Start joint2 near its upper limit (1.5)
+  setPosition( 1, 1.49 );
+  activateController();
+
+  // Command large positive velocity on joint2 to push past the limit
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 10.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  // Run multiple cycles to integrate well past the limit
+  for ( int i = 0; i < 50; i++ ) { callUpdate(); }
+
+  // Position command must be clamped at the upper limit
+  EXPECT_LE( hw_cmd_values_[1], 1.5 );
+  EXPECT_NEAR( hw_cmd_values_[1], 1.5, 1e-9 );
+}
+
+// Verify position command is clamped at the lower limit
+TEST_F( VelocityToPositionCommandControllerTest, PositionClampedAtLowerLimit )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+
+  // Start joint2 near its lower limit (-1.5)
+  setPosition( 1, -1.49 );
+  activateController();
+
+  // Command large negative velocity on joint2 to push past the limit
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = -10.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 50; i++ ) { callUpdate(); }
+
+  // Position command must be clamped at the lower limit
+  EXPECT_GE( hw_cmd_values_[1], -1.5 );
+  EXPECT_NEAR( hw_cmd_values_[1], -1.5, 1e-9 );
+}
+
+// Verify continuous joints are NOT clamped
+TEST_F( VelocityToPositionCommandControllerTest, ContinuousJointNotClamped )
+{
+  // Use joint4 which is continuous in the test URDF
+  joints_ = { "joint4" };
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // Limits should be NaN for continuous joints
+  EXPECT_TRUE( std::isnan( controller_->joint_lower_limits_[0] ) );
+  EXPECT_TRUE( std::isnan( controller_->joint_upper_limits_[0] ) );
+
+  // Command high velocity for many cycles -> should exceed any typical limit
+  controller_->reference_interfaces_[0] = 10.0;
+  for ( int i = 0; i < 200; i++ ) { callUpdate(); }
+
+  // Should have integrated freely past any typical revolute limit
+  EXPECT_GT( hw_cmd_values_[0], 3.14159 );
+}
+
+// Verify desired_positions_ does not wind up past joint limits
+TEST_F( VelocityToPositionCommandControllerTest, DesiredPositionClampedPreventsWindup )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 1, 1.4 );
+  activateController();
+
+  // Drive joint2 into the upper limit for many cycles
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 10.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 100; i++ ) { callUpdate(); }
+
+  // desired_positions_ must be clamped too (no integrator windup)
+  EXPECT_LE( controller_->desired_positions_[1], 1.5 );
+  EXPECT_LE( controller_->hold_positions_[1], 1.5 );
+}
+
+// ============================================================================
 // main
 // ============================================================================
 

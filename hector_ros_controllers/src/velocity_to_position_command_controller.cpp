@@ -1,5 +1,6 @@
 #include "velocity_to_position_command_controller/velocity_to_position_command_controller.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -96,6 +97,10 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   desired_positions_.resize( num_joints );
   move_states_.resize( num_joints );
 
+  // Initialize limits to NaN (= no limit) by default
+  joint_lower_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
+  joint_upper_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
+
   e_stop_topic_ = params_.e_stop_topic;
   kp_ = params_.kp;
   kd_ = params_.kd;
@@ -103,6 +108,50 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
 
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// URDF joint limit parsing
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::parse_joint_limits_from_urdf()
+{
+  const std::string &urdf_string = this->get_robot_description();
+  if ( urdf_string.empty() ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "Robot description is empty, position limits will not be enforced" );
+    return;
+  }
+
+  urdf::ModelInterfaceSharedPtr urdf_model = urdf::parseURDF( urdf_string );
+  if ( !urdf_model ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "Failed to parse URDF, position limits will not be enforced" );
+    return;
+  }
+
+  for ( size_t i = 0; i < joints_.size(); ++i ) {
+    auto urdf_joint = urdf_model->getJoint( joints_[i] );
+    if ( !urdf_joint ) {
+      RCLCPP_WARN( get_node()->get_logger(), "Joint '%s' not found in URDF, no limits applied",
+                   joints_[i].c_str() );
+      continue;
+    }
+
+    if ( urdf_joint->type == urdf::Joint::CONTINUOUS ) {
+      RCLCPP_DEBUG( get_node()->get_logger(), "Joint '%s' is continuous, no position limits",
+                    joints_[i].c_str() );
+      continue;
+    }
+
+    if ( ( urdf_joint->type == urdf::Joint::REVOLUTE || urdf_joint->type == urdf::Joint::PRISMATIC ) &&
+         urdf_joint->limits ) {
+      joint_lower_limits_[i] = urdf_joint->limits->lower;
+      joint_upper_limits_[i] = urdf_joint->limits->upper;
+      RCLCPP_INFO( get_node()->get_logger(), "Joint '%s': position limits [%f, %f]",
+                   joints_[i].c_str(), joint_lower_limits_[i], joint_upper_limits_[i] );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +221,8 @@ VelocityToPositionCommandController::on_configure( const rclcpp_lifecycle::State
   if ( ret != controller_interface::CallbackReturn::SUCCESS ) {
     return ret;
   }
+
+  parse_joint_limits_from_urdf();
 
   RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
   return controller_interface::CallbackReturn::SUCCESS;
@@ -488,6 +539,18 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
 
     if ( std::isnan( pos_command ) )
       continue;
+
+    // Clamp to URDF position limits for revolute/prismatic joints
+    if ( !std::isnan( joint_lower_limits_[joint_idx] ) ) {
+      pos_command =
+          std::clamp( pos_command, joint_lower_limits_[joint_idx], joint_upper_limits_[joint_idx] );
+      desired_positions_[joint_idx] =
+          std::clamp( desired_positions_[joint_idx], joint_lower_limits_[joint_idx],
+                      joint_upper_limits_[joint_idx] );
+      hold_positions_[joint_idx] =
+          std::clamp( hold_positions_[joint_idx], joint_lower_limits_[joint_idx],
+                      joint_upper_limits_[joint_idx] );
+    }
 
     successful &= command_interfaces_[joint_idx].set_value( pos_command );
   }
