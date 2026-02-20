@@ -12,3 +12,5 @@ velocity_to_position_command_controller:
   kp_sync: {type: double, default_value: 1.0, description: Proportional gain for the synchronization of synced joints}
 
   stopping_velocity_threshold: {type: double, default_value: 0.005, description: Velocity threshold below which a joint is considered stopped}
+
+  publish_debug_joint_states: {type: bool, default_value: false, description: 'If true, publishes ~/debug_in_joint_states (velocity references) and ~/debug_out_joint_states (position commands) as sensor_msgs/JointState', read_only: true}

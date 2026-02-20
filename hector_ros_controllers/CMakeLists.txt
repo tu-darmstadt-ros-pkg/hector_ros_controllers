@@ -30,6 +30,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     rclcpp
     rclcpp_lifecycle
     realtime_tools
+    sensor_msgs
     std_msgs
     std_srvs
     fcl
@@ -111,7 +112,6 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gmock REQUIRED)
   find_package(GTest CONFIG REQUIRED COMPONENTS GTest GMock)
   find_package(rtest REQUIRED)
-  find_package(sensor_msgs REQUIRED)
   find_package(ament_index_cpp REQUIRED)
 
   install(DIRECTORY test/config DESTINATION share/${PROJECT_NAME}/test)

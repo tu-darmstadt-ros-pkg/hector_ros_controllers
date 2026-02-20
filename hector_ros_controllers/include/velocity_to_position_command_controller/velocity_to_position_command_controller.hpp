@@ -10,6 +10,7 @@
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "urdf_parser/urdf_parser.h"
@@ -137,6 +138,12 @@ private:
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_kd_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_kp_;
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
+
+  // Debug publishers
+  void publish_debug_joint_state_in();
+  void publish_debug_joint_state_out( const std::vector<double> &positions );
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
 
   // RT-safe command buffer and subscriptions
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;

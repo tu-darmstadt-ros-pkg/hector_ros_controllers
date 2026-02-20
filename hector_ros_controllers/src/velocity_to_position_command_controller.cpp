@@ -206,6 +206,14 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
+    // Debug joint state publishers
+    if ( param_listener_->get_params().publish_debug_joint_states ) {
+      debug_in_js_pub_ =
+          get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
+      debug_out_js_pub_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
+          "~/debug_out_joint_states", 10 );
+    }
+
   } catch ( const std::exception &e ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Exception thrown during init: %s", e.what() );
     return controller_interface::CallbackReturn::ERROR;
@@ -490,6 +498,35 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
 }
 
 // ---------------------------------------------------------------------------
+// Debug publishers
+// ---------------------------------------------------------------------------
+
+void VelocityToPositionCommandController::publish_debug_joint_state_in()
+{
+  if ( !debug_in_js_pub_ )
+    return;
+
+  sensor_msgs::msg::JointState msg;
+  msg.header.stamp = get_node()->now();
+  msg.name = joints_;
+  msg.velocity = reference_interfaces_;
+  debug_in_js_pub_->publish( msg );
+}
+
+void VelocityToPositionCommandController::publish_debug_joint_state_out(
+    const std::vector<double> &positions )
+{
+  if ( !debug_out_js_pub_ )
+    return;
+
+  sensor_msgs::msg::JointState msg;
+  msg.header.stamp = get_node()->now();
+  msg.name = joints_;
+  msg.position = positions;
+  debug_out_js_pub_->publish( msg );
+}
+
+// ---------------------------------------------------------------------------
 // Main update
 // ---------------------------------------------------------------------------
 
@@ -510,6 +547,8 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
     }
     return controller_interface::return_type::OK;
   }
+
+  publish_debug_joint_state_in();
 
   update_sync_states( reference_interfaces_ );
   update_sync_offsets();
@@ -554,6 +593,8 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
 
     successful &= command_interfaces_[joint_idx].set_value( pos_command );
   }
+
+  publish_debug_joint_state_out( desired_positions_ );
 
   if ( !successful )
     return controller_interface::return_type::ERROR;
