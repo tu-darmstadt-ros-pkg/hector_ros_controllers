@@ -534,8 +534,8 @@ double VelocityToPositionCommandController::pos_pd_control( size_t joint_idx, do
   // feedforward position from velocity command
   desired_positions_[joint_idx] += vel_command * dt;
   // PD control to achieve desired velocity
-  const double vel_p = kp_ * ( vel_command - joint_velocity_states_[joint_idx] );
-  const double vel_d = kd_ * joint_velocity_states_[joint_idx];
+  const double vel_p = kp_ * ( vel_command - joint_velocity_states_[joint_idx] ) * dt;
+  const double vel_d = kd_ * joint_velocity_states_[joint_idx] * dt;
 
   return desired_positions_[joint_idx] + vel_p - vel_d;
 }
