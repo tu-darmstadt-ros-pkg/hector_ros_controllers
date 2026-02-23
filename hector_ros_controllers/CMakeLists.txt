@@ -170,6 +170,19 @@ if(BUILD_TESTING)
     ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_velocity_to_position_command_controller
                              PRIVATE ${DEFS})
+
+  find_package(lifecycle_msgs REQUIRED)
+
+  ament_add_gmock(test_vel_to_pos_integration
+                  test/test_vel_to_pos_integration.cpp)
+  target_include_directories(
+    test_vel_to_pos_integration PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                        ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_vel_to_pos_integration ${PROJECT_NAME}::controllers_test_doubles
+    ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_vel_to_pos_integration PRIVATE ${DEFS})
+  ament_target_dependencies(test_vel_to_pos_integration lifecycle_msgs)
 endif()
 
 ament_package()
