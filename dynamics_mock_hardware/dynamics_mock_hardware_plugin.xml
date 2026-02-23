@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<library path="dynamics_mock_hardware">
+  <class name="dynamics_mock_hardware/DynamicsMockHardware" type="dynamics_mock_hardware::DynamicsMockHardware" base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Pinocchio-based mock hardware with forward dynamics, per-joint torque
+      limits, and PD/P internal controllers for position/velocity modes.
+    </description>
+  </class>
+</library>

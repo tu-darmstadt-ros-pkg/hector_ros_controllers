@@ -1,0 +1,111 @@
+# Controller configuration for dynamics_mock_hardware simulation.
+# Simplified chain: no safety_position_controllers (need SRDF/MoveIt).
+# Flipper chain: flipper_velocity_controller -> vel_to_pos_controller -> hardware
+# Arm chain: arm_trajectory_controller -> hardware
+/**:
+  controller_manager:
+    ros__parameters:
+      update_rate: 50 # Hz
+
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+
+      # --------- Flipper Controllers ----------
+      flipper_velocity_controller:
+        type: safety_forward_controller/SafetyForwardController
+
+      flipper_trajectory_controller:
+        type: joint_trajectory_controller/JointTrajectoryController
+
+      vel_to_pos_controller:
+        type: velocity_to_position_command_controller/VelocityToPositionCommandController
+
+      # --------- Arm Controllers ------------
+      arm_trajectory_controller:
+        type: joint_trajectory_controller/JointTrajectoryController
+
+      # --------- Gripper Controllers ----------
+      gripper_trajectory_controller:
+        type: joint_trajectory_controller/JointTrajectoryController
+
+  # ---------- Flipper velocity controller (top of chain) ----------
+  flipper_velocity_controller:
+    ros__parameters:
+      joints:
+      - flipper_fl_joint
+      - flipper_fr_joint
+      - flipper_bl_joint
+      - flipper_br_joint
+
+      passthrough_controller: vel_to_pos_controller
+      interface_type: velocity
+      safety_timer_duration: 10000 # effectively disabled for simulation
+
+  # ---------- Velocity to position controller ----------
+  vel_to_pos_controller:
+    ros__parameters:
+      joints:
+      - flipper_fl_joint
+      - flipper_fr_joint
+      - flipper_bl_joint
+      - flipper_br_joint
+
+      # No passthrough -> writes directly to hardware position interface
+
+      synchronous_groups:
+      - flipper_front
+      - flipper_front
+      - flipper_back
+      - flipper_back
+
+      kp: 1.0
+      kd: 1.0
+      kp_sync: 1.0
+      braking_deceleration: 5.0
+      publish_debug_joint_states: true
+
+  # ---------- Flipper trajectory controller (inactive by default) ----------
+  flipper_trajectory_controller:
+    ros__parameters:
+      joints:
+      - flipper_fl_joint
+      - flipper_fr_joint
+      - flipper_bl_joint
+      - flipper_br_joint
+
+      command_interfaces:
+      - position
+      state_interfaces:
+      - position
+      - velocity
+
+  # ---------- Arm trajectory controller ----------
+  arm_trajectory_controller:
+    ros__parameters:
+      joints:
+      - arm_joint_1
+      - arm_joint_2
+      - arm_joint_3
+      - arm_joint_4
+      - arm_joint_5
+      - arm_joint_6
+      - arm_joint_7
+
+      # No command_joints -> writes directly to hardware position interface
+      command_interfaces:
+      - position
+      state_interfaces:
+      - position
+      - velocity
+
+  # ---------- Gripper trajectory controller ----------
+  gripper_trajectory_controller:
+    ros__parameters:
+      joints:
+      - gripper_servo_joint
+
+      command_interfaces:
+      - position
+      state_interfaces:
+      - position
+      - velocity
