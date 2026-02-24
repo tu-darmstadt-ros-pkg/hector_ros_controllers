@@ -80,7 +80,7 @@ Converts **velocity references** into **position commands** for joint hardware. 
     * Configurable deceleration ramp (`braking_deceleration`) for smooth stopping.
 * **Joint synchronization:**
     * Joints in the same synchronization group are kept aligned via P-control on position offsets.
-    * **Synced braking:** When synced joints stop together, the faster-stopping joint reduces its braking to maintain the position difference with the weaker joint (controlled by `kp_braking_sync`). Both joints transition to STOPPED only when all group partners have finished braking.
+    * Braking is independent per joint — each decelerates at `braking_deceleration` regardless of sync group membership.
 * **URDF position limit clamping:**
     * Position commands are clamped to URDF joint limits for revolute/prismatic joints. Continuous joints are unclamped.
 * **E-Stop support:**
@@ -90,7 +90,7 @@ Converts **velocity references** into **position commands** for joint hardware. 
 * **Debug joint state publishers:**
     * Optionally publishes incoming velocity references and outgoing position commands as `sensor_msgs/JointState` (dynamically togglable).
 * **Dynamic parameter reconfiguration:**
-    * `kp`, `kd`, `kp_sync`, `kp_braking_sync`, and `braking_deceleration` can be changed at runtime via ROS parameter callbacks.
+    * `kp`, `kd`, `kp_sync`, and `braking_deceleration` can be changed at runtime via ROS parameter callbacks.
 
 ### Control Law
 
@@ -109,7 +109,6 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | **kp**                          | `double`       | `1.0`                    | Proportional gain for velocity tracking.                                                                                                        |
 | **kd**                          | `double`       | `0.1`                    | Derivative gain for acceleration damping.                                                                                                       |
 | **kp_sync**                     | `double`       | `1.0`                    | Proportional gain for synchronization of synced joints during movement.                                                                         |
-| **kp_braking_sync**             | `double`       | `1.0`                    | Proportional gain for synced braking correction. Controls how aggressively the faster joint slows its braking to maintain the position offset.  |
 | **stopping_velocity_threshold** | `double`       | `0.005`                  | Velocity threshold below which a joint is considered stopped.                                                                                   |
 | **braking_deceleration**        | `double`       | `5.0`                    | Deceleration in rad/s² used to smoothly bring joints to a stop when velocity command becomes zero.                                              |
 | **synchronous_groups**          | `string_array` | `[]`                     | Group names per joint for synchronization (empty = no sync).                                                                                    |

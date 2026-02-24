@@ -11,3 +11,7 @@ repositories:
     type: git
     url: https://github.com/Beam-and-Spyrosoft/rtest.git
     version: jazzy
+  hector_gamepad_manager:
+    type: git
+    url: https://github.com/tu-darmstadt-ros-pkg/hector_gamepad_manager.git
+    version: main

@@ -1,0 +1,30 @@
+/**:
+  ros__parameters:
+    estop_topic: ''
+    retry_delay: 5.0
+
+    hardware_interfaces:
+    - athena_flipper_interface
+    - athena_arm_interface
+
+    controllers:
+    - joint_state_broadcaster
+    - vel_to_pos_controller
+    - flipper_velocity_controller
+    - arm_trajectory_controller
+    - gripper_trajectory_controller
+
+    joint_state_broadcaster:
+      activate: true
+
+    flipper_velocity_controller:
+      activate: true
+
+    vel_to_pos_controller:
+      activate: true
+
+    arm_trajectory_controller:
+      activate: true
+
+    gripper_trajectory_controller:
+      activate: true

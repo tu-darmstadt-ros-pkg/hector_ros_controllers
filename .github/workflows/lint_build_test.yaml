@@ -58,7 +58,7 @@ jobs:
           fi
           echo "Processing Level $i dependencies..."
           for f in $REPOS_FILES; do
-            vcs import . < "$f"
+            vcs import . < "$f" --skip-existing
           done
           PREVIOUS_HASH="$CURRENT_HASH"
         done

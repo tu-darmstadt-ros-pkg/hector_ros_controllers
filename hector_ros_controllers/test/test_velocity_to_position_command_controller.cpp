@@ -808,129 +808,7 @@ TEST_F( VelocityToPositionCommandControllerTest, DesiredPositionClampedPreventsW
 
 // Verify synced braking: when two synced joints stop together, the faster one
 // slows its braking to maintain the position difference with the weaker one.
-TEST_F( VelocityToPositionCommandControllerTest, SyncedBrakingSlowsDownFasterJoint )
-{
-  // joint1 and joint2 in same sync group
-  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
-  initController( sync_groups );
-  configureController();
-  setupHardwareInterfaces();
-
-  // Both joints start at 0
-  setPosition( 0, 0.0 );
-  setPosition( 1, 0.0 );
-  activateController();
-
-  // Move both joints together at 1.0 rad/s for 50 cycles (0.5s)
-  // Simulate both joints tracking perfectly during movement
-  for ( int i = 0; i < 50; i++ ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 1.0;
-    controller_->reference_interfaces_[2] = 0.0;
-    // Simulate both joints tracking the commanded position
-    setPosition( 0, 0.0 + ( i + 1 ) * 0.01 );
-    setPosition( 1, 0.0 + ( i + 1 ) * 0.01 );
-    setVelocity( 0, 1.0 );
-    setVelocity( 1, 1.0 );
-    callUpdate();
-  }
-
-  // Both should be in sync and MOVING
-  EXPECT_TRUE( controller_->sync_states_[0] );
-  EXPECT_TRUE( controller_->sync_states_[1] );
-  EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
-  EXPECT_EQ( controller_->move_states_[1], MoveState::MOVING );
-
-  // Now stop both: send zero velocity
-  // Both should enter STOPPING with synced_braking_ = true
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-  setVelocity( 0, 1.0 );
-  setVelocity( 1, 1.0 );
-  callUpdate();
-
-  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
-  EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPING );
-  EXPECT_TRUE( controller_->synced_braking_[0] );
-  EXPECT_TRUE( controller_->synced_braking_[1] );
-
-  // Now simulate braking: "fast" joint0 tracks perfectly, "slow" joint1 lags
-  // Record positions at braking start
-  double pos0 = 0.5;
-  double pos1 = 0.5;
-
-  // Brake for several cycles
-  // The fast joint immediately follows the commanded position
-  // The slow joint lags behind — it decelerates less in reality
-  for ( int i = 0; i < 15; i++ ) {
-    // Fast joint: position follows the braking trajectory closely
-    double vel0 = controller_->stopping_velocities_[0];
-    pos0 += vel0 * 0.01; // perfect tracking of the deceleration ramp
-    setPosition( 0, pos0 );
-    setVelocity( 0, vel0 );
-
-    // Slow (weak) joint: only achieves 60% of the braking deceleration
-    // so it moves further than the fast joint
-    double vel1 = controller_->stopping_velocities_[1];
-    pos1 += vel1 * 0.01 * 1.3; // overshoots: weak motor can't brake as fast
-    setPosition( 1, pos1 );
-    setVelocity( 1, vel1 * 1.3 ); // actual velocity is higher than commanded
-
-    callUpdate();
-  }
-
-  // The fast joint should have slowed its braking (has higher remaining
-  // stopping velocity) to keep up with the slower joint
-  // OR the positions should remain close to each other (difference ~ 0)
-  // The key assertion: the position difference should be kept small
-  double pos_diff = std::abs( pos0 - pos1 );
-  // Without synced braking, pos_diff would grow significantly because
-  // the slow joint overshoots. With synced braking, the fast joint
-  // slows down its braking to keep the difference small.
-  // Allow some tolerance since the P-control can't be perfect.
-  EXPECT_LT( pos_diff, 0.1 ) << "Position difference should stay small during synced braking, got "
-                             << pos_diff;
-}
-
-// Verify non-synced joints still brake independently
-TEST_F( VelocityToPositionCommandControllerTest, NonSyncedBrakingUnaffected )
-{
-  // joint3 is in its own group (group2), not synced
-  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
-  initController( sync_groups );
-  configureController();
-  setupHardwareInterfaces();
-  activateController();
-
-  // Move only joint3
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 1.0;
-  setVelocity( 2, 1.0 );
-  setPosition( 2, 0.1 );
-  callUpdate();
-
-  EXPECT_EQ( controller_->move_states_[2], MoveState::MOVING );
-
-  // Stop joint3
-  setVelocity( 2, 0.5 );
-  setPosition( 2, 0.5 );
-  controller_->reference_interfaces_[2] = 0.0;
-  callUpdate();
-
-  EXPECT_EQ( controller_->move_states_[2], MoveState::STOPPING );
-  EXPECT_FALSE( controller_->synced_braking_[2] );
-
-  // Brake until stopped: at 5.0 rad/s^2 starting at 0.5 -> 10 cycles
-  for ( int i = 0; i < 10; i++ ) { callUpdate(); }
-
-  // Should transition to STOPPED normally without waiting for partners
-  EXPECT_EQ( controller_->move_states_[2], MoveState::STOPPED );
-}
-
-// Verify synced braking waits for all partners to finish before transitioning to STOPPED
-TEST_F( VelocityToPositionCommandControllerTest, SyncedBrakingWaitsForPartners )
+TEST_F( VelocityToPositionCommandControllerTest, IndependentBraking )
 {
   std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
   initController( sync_groups );
@@ -938,7 +816,7 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncedBrakingWaitsForPartners )
   setupHardwareInterfaces();
   activateController();
 
-  // Move both joints together
+  // Move both synced joints together
   for ( int i = 0; i < 10; i++ ) {
     controller_->reference_interfaces_[0] = 1.0;
     controller_->reference_interfaces_[1] = 1.0;
@@ -950,33 +828,25 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncedBrakingWaitsForPartners )
     callUpdate();
   }
 
-  // Stop both — joint0 starts with low velocity (stops quickly),
-  // joint1 starts with high velocity (stops slowly)
-  setVelocity( 0, 0.1 ); // will stop in ~2 cycles
-  setVelocity( 1, 0.8 ); // will take ~16 cycles
+  // Stop both — joint0 has low velocity (stops quickly), joint1 has high velocity
+  setVelocity( 0, 0.1 );
+  setVelocity( 1, 0.8 );
   controller_->reference_interfaces_[0] = 0.0;
   controller_->reference_interfaces_[1] = 0.0;
   callUpdate();
 
-  EXPECT_TRUE( controller_->synced_braking_[0] );
-  EXPECT_TRUE( controller_->synced_braking_[1] );
-
-  // After 2-3 cycles, joint0's stopping_velocity should reach 0
-  // but it should NOT transition to STOPPED because joint1 is still braking
-  for ( int i = 0; i < 3; i++ ) { callUpdate(); }
-
-  EXPECT_DOUBLE_EQ( controller_->stopping_velocities_[0], 0.0 );
-  // joint0 should still be STOPPING (waiting for partner)
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
-  // joint1 should still be braking
   EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPING );
-  EXPECT_GT( std::abs( controller_->stopping_velocities_[1] ), 0.0 );
 
-  // Continue until joint1 also finishes braking
-  for ( int i = 0; i < 20; i++ ) { callUpdate(); }
+  // After a few cycles, joint0 should be STOPPED independently (no waiting for partner)
+  for ( int i = 0; i < 5; i++ ) { callUpdate(); }
 
-  // Now both should be STOPPED
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
+  // joint1 should still be braking (0.8 / (5.0 * 0.01) = 16 cycles)
+  EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPING );
+
+  // Continue until joint1 also finishes
+  for ( int i = 0; i < 20; i++ ) { callUpdate(); }
   EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPED );
 }
 

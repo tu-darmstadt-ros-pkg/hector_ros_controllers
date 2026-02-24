@@ -1,0 +1,36 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"
+            schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dynamics_mock_hardware</name>
+  <version>0.1.0</version>
+  <description>Mock hardware interface using Pinocchio forward dynamics for realistic     joint-level simulation with per-joint torque limits.</description>
+  <maintainer email="aljoscha.schmidt@tu-darmstadt.de">Aljoscha Schmidt</maintainer>
+  <license>BSD-3-Clause</license>
+  <author email="aljoscha.schmidt@tu-darmstadt.de">Aljoscha Schmidt</author>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>hardware_interface</depend>
+  <depend>pinocchio</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>hector_controller_spawner</exec_depend>
+  <exec_depend>hector_gamepad_manager</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <!--<exec_depend>rviz2</exec_depend>-->
+  <exec_depend>joy</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <test_depend>ament_cmake_gmock</test_depend>
+  <test_depend>lifecycle_msgs</test_depend>
+  <test_depend>ros2_control_test_assets</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
