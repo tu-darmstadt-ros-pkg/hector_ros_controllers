@@ -14,9 +14,16 @@
 #include <pinocchio/multibody/model.hpp>
 
 #include <hpp/fcl/collision.h>
+#include <limits>
 #include <unordered_map>
 
 // #define SAFETY_CC_ENABLE_TIMING
+
+/// Result of a collision query: collision flag + minimum clearance.
+struct CollisionResult {
+  bool in_collision{ false }; ///< true if any pair distance <= padding
+  double min_distance{ std::numeric_limits<double>::max() }; ///< global minimum pairwise distance [m]
+};
 
 /// Self-collision checker using Pinocchio + hpp-fcl; optional RViz debug markers.
 class CollisionChecker
@@ -58,19 +65,19 @@ public:
    * - continuous revolute (nq=2,nv=1): [cos(θ), sin(θ)]
    * - others: left at neutral with warning
    * @param joint_positions rad (rev) / m (prismatic)
-   * @return true if any distance ≤ padding
+   * @return CollisionResult with collision flag and minimum clearance distance
    */
-  bool checkCollision( const std::unordered_map<std::string, double> &joint_positions );
+  CollisionResult checkCollision( const std::unordered_map<std::string, double> &joint_positions );
 
   /**
    * @brief Collision check for full q.
    * - FK + update placements
    * - computeDistances() with nearest points + cached GJK
-   * - cache: reuse if last collision result if q change ≤ epsilon
+   * - cache: reuse last collision result if q change ≤ epsilon
    * @param q size == model_.nq
-   * @return true if any distance ≤ padding
+   * @return CollisionResult with collision flag and minimum clearance distance
    */
-  bool checkCollisionQ( const Eigen::VectorXd &q );
+  CollisionResult checkCollisionQ( const Eigen::VectorXd &q );
 
   /**
    * @brief Set collision padding [m].
@@ -113,7 +120,7 @@ private:
 
   Eigen::VectorXd q_default_;
   Eigen::VectorXd q_last_;
-  bool last_collision_state_{ false };
+  CollisionResult last_collision_result_;
 
   double collision_padding_{ 0.0 };
   double collision_cache_epsilon_{ 1e-4 };

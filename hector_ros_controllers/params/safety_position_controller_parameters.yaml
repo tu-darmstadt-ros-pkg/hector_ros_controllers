@@ -30,15 +30,23 @@ safety_position_controller:
     default_value: 0.000001
     description: Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true.
 
-  block_if_too_far:
-    type: bool
-    default_value: true
-    description: If true, the controller blocks position commands that are too far from the current position. Automatically true when 'check_self_collisions' is true.
-
   block_velocity_scaling:
     type: double
     default_value: 1.5
-    description: Scaling factor block_if_too_far. it is blocked when (target_position - current_position) > block_velocity_scaling * dt * velocity limit.
+    description: >
+      Scaling factor for velocity-limited stepping. The maximum per-cycle step is
+      velocity_limit / update_rate * block_velocity_scaling. Only active when
+      'check_self_collisions' is true.
+    validation:
+      bounds<>: [0.01, 3.0]
+
+  collision_safety_zone:
+    type: double
+    default_value: 0.05
+    description: >
+      Outer safety zone distance in [m]. When the minimum collision distance falls between
+      'collision_padding' and 'collision_safety_zone', joint velocities are linearly scaled
+      down to zero. Must be strictly greater than 'collision_padding'.
 
   debug_visualize_collisions:
     type: bool

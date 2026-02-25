@@ -1,5 +1,6 @@
 #include "safety_position_controller/safety_position_controller.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -179,7 +180,13 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
-  params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
+  if ( params_.check_self_collisions && params_.collision_safety_zone <= params_.collision_padding ) {
+    RCLCPP_ERROR( get_node()->get_logger(),
+                  "collision_safety_zone (%.4f) must be > collision_padding (%.4f)",
+                  params_.collision_safety_zone, params_.collision_padding );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+  last_min_distance_ = std::numeric_limits<double>::max();
   if ( collision_checker_ ) {
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
@@ -368,20 +375,38 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 
   // resolve continuous joints & enforce limits
   enforce_limits();
-  // make sure movement is not too large
-  if ( params_.block_if_too_far ) {
-    block_if_too_far();
+
+  // ---- Distance-based velocity scaling ----
+  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+  const bool collision_checks_active =
+      !bypass_active && params_.check_self_collisions && collision_checker_;
+
+  // Compute velocity scale factor from previous cycle's min distance
+  double distance_scale = 1.0;
+  if ( collision_checks_active ) {
+    const auto &d = last_min_distance_;
+    const auto &d_pad = params_.collision_padding;
+    const auto &d_zone = params_.collision_safety_zone;
+
+    if ( d <= d_pad ) {
+      distance_scale = 0.0;
+    } else if ( d < d_zone ) {
+      distance_scale = ( d - d_pad ) / ( d_zone - d_pad );
+    }
+    // else: distance_scale remains 1.0 (full speed)
   }
+
+  // Always apply velocity-limited stepping when collision checks are active
+  if ( collision_checks_active ) {
+    apply_velocity_limits( distance_scale );
+  }
+
   if ( params_.set_current_limits ) {
     success &= write_current_limits();
   }
 
-  // check collisions with the new commands (skip if bypass is active)
-  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
-  const bool skip_collision_check =
-      bypass_active || !params_.check_self_collisions || !collision_checker_;
-
-  if ( skip_collision_check ) {
+  // ---- Collision check ----
+  if ( !collision_checks_active ) {
     if ( bypass_active && params_.check_self_collisions && collision_checker_ ) {
       RCLCPP_DEBUG_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                              throttle_logging_msg, "Safety bypass active: skipping collision check" );
@@ -399,20 +424,24 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       }
     }
     for ( size_t i = 0; i < n; ++i ) { cc_positions_[params_.joints[i]] = cmd_positions_[i]; }
-    if ( success_cc_setup && !collision_checker_->checkCollision( cc_positions_ ) ) {
-      // write commands if no collision detected
-      write_position_commands( cmd_positions_ );
-    } else {
-      if ( !success_cc_setup ) {
-        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                              throttle_logging_msg, "Failed to setup collision checking." );
+
+    if ( success_cc_setup ) {
+      const auto cc_result = collision_checker_->checkCollision( cc_positions_ );
+      last_min_distance_ = cc_result.min_distance;
+
+      if ( !cc_result.in_collision ) {
+        write_position_commands( cmd_positions_ );
       } else {
         RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                               throttle_logging_msg,
-                              "Collision detected! Holding current positions." );
+                              "Collision detected (min_dist=%.4f)! Holding current positions.",
+                              cc_result.min_distance );
+        write_position_commands( current_positions_ );
       }
+    } else {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                            throttle_logging_msg, "Failed to setup collision checking." );
       write_position_commands( current_positions_ );
-      // success = false; // make parent controllers unload if desired
     }
   }
 
@@ -481,25 +510,28 @@ void SafetyPositionController::enforce_limits()
   }
 }
 
-void SafetyPositionController::block_if_too_far()
+void SafetyPositionController::apply_velocity_limits( const double distance_scale )
 {
-  // check if any joint command is too far from the current position
+  const double clamped_scale = std::clamp( distance_scale, 0.0, 1.0 );
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( !std::isnan( velocity_limits_[i] ) ) {
       // shortest signed distance from current -> command
       const double diff = get_signed_distance( current_positions_[i], cmd_positions_[i] );
-      const double max_step = max_allowed_distance_per_cycle_[i];
+      const double max_step = max_allowed_distance_per_cycle_[i] * clamped_scale;
 
       if ( std::abs( diff ) > max_step ) {
         RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                               throttle_logging_msg,
-                              "Joint '%s' command is too far (|diff|=%.3f > allowed=%.3f). "
-                              "Limiting step. [current=%.3f, cmd=%.3f]",
-                              params_.joints[i].c_str(), std::abs( diff ), max_step,
+                              "Joint '%s' step limited (|diff|=%.4f > allowed=%.4f, "
+                              "dist_scale=%.3f). [current=%.3f, cmd=%.3f]",
+                              params_.joints[i].c_str(), std::abs( diff ), max_step, clamped_scale,
                               current_positions_[i], cmd_positions_[i] );
 
-        // Limit the commanded position to a max step in the direction of diff
-        cmd_positions_[i] = current_positions_[i] + std::copysign( max_step, diff );
+        if ( max_step <= 0.0 ) {
+          cmd_positions_[i] = current_positions_[i]; // zero speed = hold
+        } else {
+          cmd_positions_[i] = current_positions_[i] + std::copysign( max_step, diff );
+        }
       }
     }
   }

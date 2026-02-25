@@ -113,8 +113,8 @@ public:
         rclcpp::Parameter( "unwrap_continuous_joints", true ),
         rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", check_self_collisions ),
-        rclcpp::Parameter( "block_if_too_far", !check_self_collisions ),
         rclcpp::Parameter( "block_velocity_scaling", 1.5 ),
+        rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", set_current_limits ),
         rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
         rclcpp::Parameter( "safety_bypass_joint_limit_tolerance", 0.03 ),
@@ -270,30 +270,30 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsUnwrapsContinuous )
 }
 
 // ============================================================================
-// block_if_too_far Tests
+// Velocity Limiting Tests (no collision fixture — collision checks disabled)
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, BlockIfTooFarLimitsStep )
+TEST_F( SafetyPositionControllerTest, NoVelocityLimitingWithoutCollisionChecks )
 {
-  initController();
+  // When check_self_collisions=false, velocity limiting is not applied
+  initController(); // check_self_collisions=false by default
   configureController();
   setupHardwareInterfaces();
   findMocks();
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  // Current at 0.0, command at 0.5 (within limits but large step)
-  // velocity_limit=1.0, update_rate=100, scaling=1.5 -> max_step = 1.0/100 * 1.5 = 0.015
   for ( auto &v : hw_state_values_ ) v = 0.0;
 
-  controller_->reference_interfaces_[0] = 0.5; // large jump for joint1
+  // Large jump within joint limits
+  controller_->reference_interfaces_[0] = 0.5;
   controller_->reference_interfaces_[1] = 0.0;
   controller_->reference_interfaces_[2] = 0.0;
 
   callUpdate();
 
-  double max_step = 1.0 / kUpdateRate * 1.5;
-  EXPECT_NEAR( hw_cmd_values_[0], max_step, 1e-6 );
+  // Without collision checks, no velocity limiting → full step passes through
+  EXPECT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 );
 }
 
 // ============================================================================
@@ -725,8 +725,8 @@ public:
         rclcpp::Parameter( "unwrap_continuous_joints", true ),
         rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", true ),
-        rclcpp::Parameter( "block_if_too_far", true ),        // auto-set true when collisions on
-        rclcpp::Parameter( "block_velocity_scaling", 100.0 ), // high scaling to not limit step
+        rclcpp::Parameter( "block_velocity_scaling", 3.0 ), // max allowed scaling
+        rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", false ),
         rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
         rclcpp::Parameter( "safety_bypass_joint_limit_tolerance", 0.03 ),
@@ -979,6 +979,119 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointCollisionDetected 
   EXPECT_DOUBLE_EQ( hw_cmd_values_[1], M_PI );
   EXPECT_DOUBLE_EQ( hw_cmd_values_[2], -M_PI );
   EXPECT_DOUBLE_EQ( hw_cmd_values_[3], 0.0 );
+}
+
+// ============================================================================
+// Velocity Limiting & Distance-Based Scaling Tests (collision fixture)
+// ============================================================================
+
+TEST_F( SafetyPositionControllerCollisionTest, VelocityLimitingWithCollisionChecks )
+{
+  // Override block_velocity_scaling to a known low value
+  auto cj = controlled_joints_;
+  const auto urdf = hector_test::loadUrdfFile( "test_robot_collision.urdf" );
+
+  controller_interface::ControllerInterfaceParams params;
+  params.controller_name = "test_safety_position_cc";
+  params.robot_description = urdf;
+  params.update_rate = kUpdateRate;
+  params.controller_manager_update_rate = kUpdateRate;
+  params.node_namespace = "";
+
+  rclcpp::NodeOptions opts;
+  opts.parameter_overrides( {
+      rclcpp::Parameter( "joints", cj ),
+      rclcpp::Parameter( "unwrap_continuous_joints", true ),
+      rclcpp::Parameter( "enforce_position_limits", true ),
+      rclcpp::Parameter( "check_self_collisions", true ),
+      rclcpp::Parameter( "block_velocity_scaling", 1.5 ),
+      rclcpp::Parameter( "collision_safety_zone", 0.05 ),
+      rclcpp::Parameter( "set_current_limits", false ),
+      rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
+      rclcpp::Parameter( "safety_bypass_joint_limit_tolerance", 0.03 ),
+      rclcpp::Parameter( "publish_debug_joint_states", false ),
+      rclcpp::Parameter( "collision_padding", 0.0 ),
+      rclcpp::Parameter( "collision_cache_epsilon", 0.0 ),
+      rclcpp::Parameter( "debug_visualize_collisions", false ),
+  } );
+  params.node_options = opts;
+
+  auto result = controller_->init( params );
+  ASSERT_EQ( result, controller_interface::return_type::OK );
+
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // First cycle: last_min_distance_ = max -> distance_scale = 1.0 (full speed)
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5; // large jump
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // max_step = velocity_limit / update_rate * block_velocity_scaling = 1.0/100 * 1.5 = 0.015
+  double max_step = 1.0 / kUpdateRate * 1.5;
+  EXPECT_NEAR( hw_cmd_values_[0], max_step, 1e-6 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, DistanceBasedScalingReducesVelocity )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // Set last_min_distance_ to halfway in the safety zone
+  // collision_padding=0.0, collision_safety_zone=0.05
+  // d=0.025 -> scale = (0.025 - 0.0) / (0.05 - 0.0) = 0.5
+  controller_->last_min_distance_ = 0.025;
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5; // large jump
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // max_step = velocity_limit / update_rate * block_velocity_scaling * distance_scale
+  // = 1.0 / 100 * 3.0 * 0.5 = 0.015
+  double full_max_step = 1.0 / kUpdateRate * 3.0;
+  double expected_step = full_max_step * 0.5;
+  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, DistanceScaleZeroHoldsPosition )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // Set last_min_distance_ to exactly at collision_padding (0.0) -> scale = 0
+  controller_->last_min_distance_ = 0.0;
+
+  setStateValue( "joint1", 0.3 );
+  setStateValue( "joint2", 0.0 );
+  setStateValue( "joint3", 0.0 );
+
+  controller_->reference_interfaces_[0] = 0.5; // wants to move
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // With distance_scale=0, apply_velocity_limits should hold at current position.
+  // The collision check at the held position should be safe (straight chain at [0.3,0,0]).
+  // So the final written command should be the velocity-limited position (= current = 0.3).
+  EXPECT_NEAR( hw_cmd_values_[0], 0.3, 1e-6 );
 }
 
 // ============================================================================

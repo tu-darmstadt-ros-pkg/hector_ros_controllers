@@ -127,10 +127,11 @@ private:
   void enforce_limits();
 
   /**
-   * @brief Limit per-cycle motion by vel_limit/update_rate (scaled).
-   * Reduces command toward current position if excessive.
+   * @brief Limit per-cycle motion by vel_limit/update_rate, scaled by
+   * block_velocity_scaling and the distance-based scaling factor.
+   * @param distance_scale [0,1] factor from distance-based scaling (1.0 = full speed, 0.0 = hold)
    */
-  void block_if_too_far();
+  void apply_velocity_limits( double distance_scale );
 
   /**
    * @brief Write current-limit commands (stiff/compliant) if enabled.
@@ -222,6 +223,8 @@ private:
   std::unique_ptr<CollisionChecker> collision_checker_;  ///< optional self-collision checker
   std::string srdf_;                                     ///< SRDF XML (semantic)
   bool srdf_received_ = false;                           ///< latched SRDF received
+  double last_min_distance_{
+      std::numeric_limits<double>::max() }; ///< previous cycle's min collision distance
 
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> cmd_positions_;     ///< post-enforcement commands

@@ -126,21 +126,22 @@ std::vector<std::string> CollisionChecker::getJointNames() const
   return out;
 }
 
-bool CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
+CollisionResult
+CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
 {
 
   if ( model_.nq == 0 ) {
     RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
-    return true;
+    return { true, 0.0 };
   }
-  // return true if any position is Nan or Inf
+  // return collision if any position is Nan or Inf
   for ( const auto &[name, position] : joint_positions ) {
     if ( std::isnan( position ) || std::isinf( position ) ) {
       RCLCPP_ERROR(
           node_->get_logger(),
           "Joint position for joint '%s' is NaN or Inf (%.3f). Assuming the robot is in collision.",
           name.c_str(), position );
-      return true;
+      return { true, 0.0 };
     }
   }
   // transforms the joint positions into the pinocchio format
@@ -175,7 +176,7 @@ bool CollisionChecker::checkCollision( const std::unordered_map<std::string, dou
 
   return checkCollisionQ( q );
 }
-bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
+CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
 #ifdef SAFETY_CC_ENABLE_TIMING
   using clock = std::chrono::steady_clock;
@@ -184,13 +185,14 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 
   if ( q.size() != model_.nq ) {
     RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
-    return true;
+    return { true, 0.0 };
   }
 
   // check if robot moved since the last check
-  if ( q.size() == q_last_.size() && ( q - q_last_ ).cwiseAbs().maxCoeff() < 1e-4 ) {
+  if ( q.size() == q_last_.size() &&
+       ( q - q_last_ ).cwiseAbs().maxCoeff() < collision_cache_epsilon_ ) {
     // no movement -> no need to recompute distances
-    return last_collision_state_;
+    return last_collision_result_;
   }
   q_last_ = q;
 
@@ -207,24 +209,32 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   // Distance pass (fills distanceResults + caches)
   pinocchio::computeDistances( geom_model_, geom_data_ );
 
-  bool in_collision = false;
+  // Iterate ALL pairs to find the global minimum distance
+  double global_min_distance = std::numeric_limits<double>::max();
+  bool logged_collision = false;
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-    const auto &cp = geom_model_.collisionPairs[k];
-    const auto &o1 = geom_model_.geometryObjects[cp.first];
-    const auto &o2 = geom_model_.geometryObjects[cp.second];
     const auto &dres = geom_data_.distanceResults[k];
 
-    // hpp-fcl distance is >= 0 for separated; 0 when touching
-    if ( dres.min_distance <= collision_padding_ ) {
-      in_collision = true;
+    if ( dres.min_distance < global_min_distance ) {
+      global_min_distance = dres.min_distance;
+    }
+
+    if ( dres.min_distance <= collision_padding_ && !logged_collision ) {
+      logged_collision = true;
+      const auto &cp = geom_model_.collisionPairs[k];
+      const auto &o1 = geom_model_.geometryObjects[cp.first];
+      const auto &o2 = geom_model_.geometryObjects[cp.second];
       RCLCPP_WARN_STREAM_THROTTLE( node_->get_logger(), *node_->get_clock(), 1000,
                                    "Collision (or contact) distance "
                                        << dres.min_distance << " between "
                                        << model_.frames[o1.parentFrame].name << " and "
                                        << model_.frames[o2.parentFrame].name );
-      break;
     }
   }
+
+  CollisionResult result;
+  result.in_collision = ( global_min_distance <= collision_padding_ );
+  result.min_distance = global_min_distance;
 
 #ifdef SAFETY_CC_ENABLE_TIMING
   const auto t_end = clock::now();
@@ -236,10 +246,10 @@ bool CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
                         sum_timings_ / n_timings_, geom_model_.collisionPairs.size() );
 #endif
 
-  last_collision_state_ = in_collision;
+  last_collision_result_ = result;
   if ( pub_debug_geometry_ )
     publishMarkers();
-  return in_collision;
+  return result;
 }
 
 void CollisionChecker::updateDoDebugVisualization( const bool pub_debug_geometry )
