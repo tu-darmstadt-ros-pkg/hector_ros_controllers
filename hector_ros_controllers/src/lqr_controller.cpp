@@ -101,5 +101,5 @@ bool LQRController::check_goal_completion( const Waypoint &goal, const Pose &pos
 
     return dist < ( dist_tolerance * 1.0 );
   }
-
+}
 } // namespace waypoint_controller

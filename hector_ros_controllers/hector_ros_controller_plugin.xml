@@ -26,4 +26,8 @@
             A simple waypoint controller that calculates velocity commands to navigate a robot to a given waypoint.
         </description>
   </class>
+  <class name="waypoint_controller/LQRController" type="waypoint_controller::LQRController" base_class_type="controller_interface::ControllerInterface">
+    <description>
+            A lqr controller that calculates velocity commands by finding out the proper gains to minimise a cost function.
+        </description>
 </library>
