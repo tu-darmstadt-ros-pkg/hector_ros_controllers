@@ -116,7 +116,8 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
   kd_sync_ = params_.kd_sync;
-  max_sync_correction_ = params_.max_sync_correction;
+  sync_velocity_factor_ = params_.sync_velocity_factor;
+  sync_velocity_min_threshold_ = params_.sync_velocity_min_threshold;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
   braking_deceleration_ = params_.braking_deceleration;
 
@@ -189,8 +190,10 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
       kp_sync_ = val;
     } else if ( p.get_name() == "kd_sync" ) {
       kd_sync_ = val;
-    } else if ( p.get_name() == "max_sync_correction" ) {
-      max_sync_correction_ = val;
+    } else if ( p.get_name() == "sync_velocity_factor" ) {
+      sync_velocity_factor_ = val;
+    } else if ( p.get_name() == "sync_velocity_min_threshold" ) {
+      sync_velocity_min_threshold_ = val;
     } else if ( p.get_name() == "braking_deceleration" ) {
       braking_deceleration_ = val;
     }
@@ -230,8 +233,13 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
-    cb_handle_max_sync_correction_ = param_subscriber_->add_parameter_callback(
-        "max_sync_correction",
+    cb_handle_sync_velocity_factor_ = param_subscriber_->add_parameter_callback(
+        "sync_velocity_factor",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_velocity_min_threshold_ = param_subscriber_->add_parameter_callback(
+        "sync_velocity_min_threshold",
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -547,7 +555,8 @@ double VelocityToPositionCommandController::sync_pd_control( size_t joint_idx, d
     return 0.0;
   correction /= static_cast<double>( valid_count );
   // clamp correction to max_sync_correction_ * vel_command to prevent excessive corrections at high speeds
-  double max_correction = std::abs( vel_command ) * max_sync_correction_;
+  double max_correction =
+      std::max( std::abs( vel_command ) * sync_velocity_factor_, sync_velocity_min_threshold_ );
   return std::clamp( correction, -max_correction, max_correction );
 }
 
