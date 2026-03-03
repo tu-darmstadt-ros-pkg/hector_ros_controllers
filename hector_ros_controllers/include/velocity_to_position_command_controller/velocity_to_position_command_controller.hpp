@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "controller_interface/chainable_controller_interface.hpp"
+#include "hector_ros_controllers_msgs/msg/sync_status.hpp"
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
@@ -152,9 +153,11 @@ private:
   // Debug publishers
   void publish_debug_joint_state_in();
   void publish_debug_joint_state_out( const std::vector<double> &positions );
+  void publish_sync_status( const std::vector<double> &vel_commands_out );
   void update_debug_publishers( bool enable );
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
+  rclcpp::Publisher<hector_ros_controllers_msgs::msg::SyncStatus>::SharedPtr sync_status_pub_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_debug_pubs_;
 
   // RT-safe command buffer and subscriptions

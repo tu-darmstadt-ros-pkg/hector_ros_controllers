@@ -7,6 +7,7 @@ find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(
   ${PROJECT_NAME} "msg/SafetyPositionControllerStatus.msg"
-  "msg/SafetyForwardControllerStatus.msg" DEPENDENCIES std_msgs)
+  "msg/SafetyForwardControllerStatus.msg" "msg/SyncStatus.msg" DEPENDENCIES
+  std_msgs)
 
 ament_package()

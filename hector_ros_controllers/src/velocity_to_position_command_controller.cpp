@@ -581,8 +581,19 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
                                                               const rclcpp::Duration &period )
 {
   double next_position = pos_pd_control( joint_idx, vel_command, period );
-  if ( sync_states_[joint_idx] )
-    next_position += sync_pd_control( joint_idx, vel_command );
+  if ( sync_states_[joint_idx] ) {
+    const double sync_correction = sync_pd_control( joint_idx, vel_command );
+    const double corrected_position = next_position + sync_correction;
+
+    // Prevent sync correction from causing movement opposite to the commanded direction
+    if ( vel_command > 0.0 ) {
+      next_position = std::max( corrected_position, joint_position_states_[joint_idx] );
+    } else if ( vel_command < 0.0 ) {
+      next_position = std::min( corrected_position, joint_position_states_[joint_idx] );
+    } else {
+      next_position = corrected_position;
+    }
+  }
 
   return next_position;
 }
@@ -602,10 +613,15 @@ void VelocityToPositionCommandController::update_debug_publishers( bool enable )
       debug_out_js_pub_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
           "~/debug_out_joint_states", 10 );
     }
+    if ( !sync_status_pub_ ) {
+      sync_status_pub_ = get_node()->create_publisher<hector_ros_controllers_msgs::msg::SyncStatus>(
+          "~/sync_status", 10 );
+    }
     RCLCPP_INFO( get_node()->get_logger(), "Debug joint state publishers enabled" );
   } else {
     debug_in_js_pub_.reset();
     debug_out_js_pub_.reset();
+    sync_status_pub_.reset();
   }
 }
 
@@ -632,6 +648,35 @@ void VelocityToPositionCommandController::publish_debug_joint_state_out(
   msg.name = joints_;
   msg.position = positions;
   debug_out_js_pub_->publish( msg );
+}
+
+void VelocityToPositionCommandController::publish_sync_status( const std::vector<double> &vel_commands_out )
+{
+  if ( !sync_status_pub_ )
+    return;
+
+  hector_ros_controllers_msgs::msg::SyncStatus msg;
+  msg.header.stamp = get_node()->now();
+  msg.joint_names = joints_;
+  msg.vel_command_in.resize( joints_.size() );
+  msg.vel_command_out = vel_commands_out;
+  msg.desired_sync_offset.resize( joints_.size() );
+  msg.current_sync_offset.resize( joints_.size() );
+
+  for ( size_t i = 0; i < joints_.size(); ++i ) {
+    msg.vel_command_in[i] = reference_interfaces_[i];
+
+    if ( !synced_joints_[i].empty() ) {
+      const size_t partner = synced_joints_[i][0];
+      msg.desired_sync_offset[i] = sync_offsets_[i][0];
+      msg.current_sync_offset[i] = joint_position_states_[partner] - joint_position_states_[i];
+    } else {
+      msg.desired_sync_offset[i] = std::numeric_limits<double>::quiet_NaN();
+      msg.current_sync_offset[i] = std::numeric_limits<double>::quiet_NaN();
+    }
+  }
+
+  sync_status_pub_->publish( msg );
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +708,9 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
 
   update_sync_states( reference_interfaces_ );
   update_sync_offsets();
+
+  const double dt = period.seconds();
+  std::vector<double> vel_commands_out( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
 
   for ( size_t joint_idx = 0; joint_idx < command_interfaces_.size(); joint_idx++ ) {
 
@@ -701,7 +749,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
         break;
       }
 
-      const double dt = period.seconds();
       const double sign = ( stopping_velocities_[joint_idx] > 0.0 ) ? 1.0 : -1.0;
 
       stopping_velocities_[joint_idx] -= sign * braking_deceleration_ * dt;
@@ -750,10 +797,15 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
                       joint_upper_limits_[joint_idx] );
     }
 
+    if ( dt > 0.0 ) {
+      vel_commands_out[joint_idx] = ( pos_command - joint_position_states_[joint_idx] ) / dt;
+    }
+
     successful &= command_interfaces_[joint_idx].set_value( pos_command );
   }
 
   publish_debug_joint_state_out( desired_positions_ );
+  publish_sync_status( vel_commands_out );
 
   if ( !successful )
     return controller_interface::return_type::ERROR;
