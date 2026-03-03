@@ -442,10 +442,6 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
       move_states_[joint_idx] = STOPPING;
       stopping_velocities_[joint_idx] = joint_velocity_states_[joint_idx];
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-
-      RCLCPP_INFO( get_node()->get_logger(), "[BRAKE] %s: MOVING->STOPPING  vel_state=%.4f  pos=%.4f",
-                   joints_[joint_idx].c_str(), stopping_velocities_[joint_idx],
-                   joint_position_states_[joint_idx] );
     }
     break;
 
@@ -590,57 +586,63 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
 void VelocityToPositionCommandController::update_debug_publishers( bool enable )
 {
   if ( enable ) {
-    if ( !debug_in_js_pub_ ) {
-      debug_in_js_pub_ =
-          get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
+    if ( !rt_debug_in_js_pub_ ) {
+      rt_debug_in_js_pub_ =
+          std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(
+              get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states",
+                                                                          10 ) );
     }
-    if ( !debug_out_js_pub_ ) {
-      debug_out_js_pub_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
-          "~/debug_out_joint_states", 10 );
+    if ( !rt_debug_out_js_pub_ ) {
+      rt_debug_out_js_pub_ =
+          std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(
+              get_node()->create_publisher<sensor_msgs::msg::JointState>(
+                  "~/debug_out_joint_states", 10 ) );
     }
-    if ( !sync_status_pub_ ) {
-      sync_status_pub_ = get_node()->create_publisher<hector_ros_controllers_msgs::msg::SyncStatus>(
-          "~/sync_status", 10 );
+    if ( !rt_sync_status_pub_ ) {
+      rt_sync_status_pub_ =
+          std::make_shared<realtime_tools::RealtimePublisher<hector_ros_controllers_msgs::msg::SyncStatus>>(
+              get_node()->create_publisher<hector_ros_controllers_msgs::msg::SyncStatus>(
+                  "~/sync_status", 10 ) );
     }
-    RCLCPP_INFO( get_node()->get_logger(), "Debug joint state publishers enabled" );
+    RCLCPP_INFO( get_node()->get_logger(), "Debug publishers enabled" );
   } else {
-    debug_in_js_pub_.reset();
-    debug_out_js_pub_.reset();
-    sync_status_pub_.reset();
+    rt_debug_in_js_pub_.reset();
+    rt_debug_out_js_pub_.reset();
+    rt_sync_status_pub_.reset();
   }
 }
 
 void VelocityToPositionCommandController::publish_debug_joint_state_in()
 {
-  if ( !debug_in_js_pub_ )
+  if ( !rt_debug_in_js_pub_ || !rt_debug_in_js_pub_->trylock() )
     return;
 
-  sensor_msgs::msg::JointState msg;
+  auto &msg = rt_debug_in_js_pub_->msg_;
   msg.header.stamp = get_node()->now();
   msg.name = joints_;
   msg.velocity = reference_interfaces_;
-  debug_in_js_pub_->publish( msg );
+  rt_debug_in_js_pub_->unlockAndPublish();
 }
 
 void VelocityToPositionCommandController::publish_debug_joint_state_out(
     const std::vector<double> &positions )
 {
-  if ( !debug_out_js_pub_ )
+  if ( !rt_debug_out_js_pub_ || !rt_debug_out_js_pub_->trylock() )
     return;
 
-  sensor_msgs::msg::JointState msg;
+  auto &msg = rt_debug_out_js_pub_->msg_;
   msg.header.stamp = get_node()->now();
   msg.name = joints_;
   msg.position = positions;
-  debug_out_js_pub_->publish( msg );
+  rt_debug_out_js_pub_->unlockAndPublish();
 }
 
 void VelocityToPositionCommandController::publish_sync_status( const std::vector<double> &vel_commands_out )
 {
-  if ( !sync_status_pub_ )
+  if ( !rt_sync_status_pub_ || !rt_sync_status_pub_->trylock() )
     return;
 
-  hector_ros_controllers_msgs::msg::SyncStatus msg;
+  auto &msg = rt_sync_status_pub_->msg_;
   msg.header.stamp = get_node()->now();
   msg.joint_names = joints_;
   msg.vel_command_in.resize( joints_.size() );
@@ -661,7 +663,7 @@ void VelocityToPositionCommandController::publish_sync_status( const std::vector
     }
   }
 
-  sync_status_pub_->publish( msg );
+  rt_sync_status_pub_->unlockAndPublish();
 }
 
 // ---------------------------------------------------------------------------
@@ -747,8 +749,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
         pos_command = hold_positions_[joint_idx];
         move_states_[joint_idx] = STOPPED;
 
-        RCLCPP_INFO( get_node()->get_logger(), "[BRAKE] %s: stopped at pos=%.4f",
-                     joints_[joint_idx].c_str(), hold_positions_[joint_idx] );
       } else {
         desired_positions_[joint_idx] += stopping_velocities_[joint_idx] * dt;
         pos_command = desired_positions_[joint_idx];
