@@ -18,7 +18,7 @@ namespace velocity_to_position_command_controller
 VelocityToPositionCommandController::VelocityToPositionCommandController()
     : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
       e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
-      rt_buffer_ptr_( nullptr )
+      kd_sync_( 0.0 ), max_sync_velocity_( 0.0 ), rt_buffer_ptr_( nullptr )
 {
 }
 
@@ -116,6 +116,8 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   kp_ = params_.kp;
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
+  kd_sync_ = params_.kd_sync;
+  max_sync_velocity_ = params_.max_sync_velocity;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
   braking_deceleration_ = params_.braking_deceleration;
 
@@ -186,6 +188,10 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
       kd_ = val;
     } else if ( p.get_name() == "kp_sync" ) {
       kp_sync_ = val;
+    } else if ( p.get_name() == "kd_sync" ) {
+      kd_sync_ = val;
+    } else if ( p.get_name() == "max_sync_velocity" ) {
+      max_sync_velocity_ = val;
     } else if ( p.get_name() == "braking_deceleration" ) {
       braking_deceleration_ = val;
     }
@@ -217,6 +223,16 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
 
     cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
         "kp_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_kd_ = param_subscriber_->add_parameter_callback(
+        "kd_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_max_sync_vel_ = param_subscriber_->add_parameter_callback(
+        "max_sync_velocity",
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -507,20 +523,42 @@ void VelocityToPositionCommandController::update_sync_offsets()
   }
 }
 
-double VelocityToPositionCommandController::sync_p_control( size_t joint_idx )
+double VelocityToPositionCommandController::sync_correction( size_t joint_idx,
+                                                             double effective_velocity_limit,
+                                                             double dt )
 {
-  double sync_pos_command = 0.0;
+  double correction = 0.0;
   size_t valid_count = 0;
   for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
     const size_t partner = synced_joints_[joint_idx][i];
     if ( std::isnan( joint_position_states_[partner] ) || std::isnan( sync_offsets_[joint_idx][i] ) )
       continue;
-    sync_pos_command += ( joint_position_states_[partner] - joint_position_states_[joint_idx] -
-                          sync_offsets_[joint_idx][i] ) *
-                        kp_sync_;
+
+    // P-term: proportional to position offset error
+    const double offset_error = joint_position_states_[partner] -
+                                joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i];
+    const double p_term = kp_sync_ * offset_error;
+
+    // D-term: damps oscillation using velocity difference between partners
+    const double vel_diff = joint_velocity_states_[partner] - joint_velocity_states_[joint_idx];
+    const double d_term = kd_sync_ * vel_diff;
+
+    correction += p_term + d_term;
     ++valid_count;
   }
-  return valid_count > 0 ? sync_pos_command / static_cast<double>( valid_count ) : 0.0;
+
+  if ( valid_count == 0 )
+    return 0.0;
+
+  correction /= static_cast<double>( valid_count );
+
+  // Clamp: sync correction must not exceed effective_velocity_limit * dt
+  if ( effective_velocity_limit > 0.0 && dt > 0.0 ) {
+    const double max_correction = effective_velocity_limit * dt;
+    correction = std::clamp( correction, -max_correction, max_correction );
+  }
+
+  return correction;
 }
 
 // ---------------------------------------------------------------------------
@@ -543,9 +581,17 @@ double VelocityToPositionCommandController::pos_pd_control( size_t joint_idx, do
 double VelocityToPositionCommandController::position_control( size_t joint_idx, double vel_command,
                                                               const rclcpp::Duration &period )
 {
+  const double dt = period.seconds();
   double next_position = pos_pd_control( joint_idx, vel_command, period );
-  if ( sync_states_[joint_idx] )
-    next_position += sync_p_control( joint_idx );
+
+  if ( sync_states_[joint_idx] ) {
+    // During MOVING: always clamp to abs(vel_command), with max_sync_velocity as additional cap
+    double vel_limit = std::abs( vel_command );
+    if ( max_sync_velocity_ > 0.0 ) {
+      vel_limit = std::min( vel_limit, max_sync_velocity_ );
+    }
+    next_position += sync_correction( joint_idx, vel_limit, dt );
+  }
 
   return next_position;
 }
@@ -682,6 +728,16 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
                      joints_[joint_idx].c_str(), hold_positions_[joint_idx] );
       } else {
         desired_positions_[joint_idx] += stopping_velocities_[joint_idx] * dt;
+
+        // Apply sync correction during braking, clamped to stopping velocity
+        if ( sync_states_[joint_idx] ) {
+          double vel_limit = std::abs( stopping_velocities_[joint_idx] );
+          if ( max_sync_velocity_ > 0.0 ) {
+            vel_limit = std::min( vel_limit, max_sync_velocity_ );
+          }
+          desired_positions_[joint_idx] += sync_correction( joint_idx, vel_limit, dt );
+        }
+
         pos_command = desired_positions_[joint_idx];
         hold_positions_[joint_idx] = desired_positions_[joint_idx];
       }

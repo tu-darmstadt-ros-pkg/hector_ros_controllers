@@ -33,7 +33,8 @@ protected:
   }
 
   void initController( const std::vector<std::string> &sync_groups = {},
-                       const std::string &passthrough = "" )
+                       const std::string &passthrough = "", double kd_sync = 0.0,
+                       double max_sync_velocity = 0.0 )
   {
     const auto urdf = hector_test::loadUrdfFile( "test_robot.urdf" );
 
@@ -49,6 +50,8 @@ protected:
         rclcpp::Parameter( "kp", 2.0 ),
         rclcpp::Parameter( "kd", 0.1 ),
         rclcpp::Parameter( "kp_sync", 1.0 ),
+        rclcpp::Parameter( "kd_sync", kd_sync ),
+        rclcpp::Parameter( "max_sync_velocity", max_sync_velocity ),
         rclcpp::Parameter( "stopping_velocity_threshold", 0.005 ),
         rclcpp::Parameter( "passthrough_controller", passthrough ),
         rclcpp::Parameter( "e_stop_topic", std::string( "estop_board/hard_estop" ) ),
@@ -947,6 +950,202 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncRestoredAfterRepeatedStopSt
   // Allow some tolerance — sync P-control can't perfectly correct drift,
   // but it should prevent unbounded accumulation
   EXPECT_LT( final_diff, 0.5 ) << "Position difference after 5 cycles: " << final_diff;
+}
+
+// ============================================================================
+// Sync Correction Clamping & PD Tests
+// ============================================================================
+
+// Verify sync correction is clamped to abs(vel_command) during MOVING
+TEST_F( VelocityToPositionCommandControllerTest, SyncCorrectionClampedToVelocityDuringMoving )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  // Start with a large offset between synced joints
+  setPosition( 0, 0.0 );
+  setPosition( 1, 1.0 ); // 1.0 rad apart (sync_offset will be 1.0)
+  activateController();
+
+  // Now move joint1 further to create sync error
+  setPosition( 1, 1.5 ); // actual offset is 1.5, stored offset is 1.0 -> error = 0.5
+
+  // Command low velocity (0.1 rad/s) -> sync correction should be clamped to 0.1*dt = 0.001
+  controller_->reference_interfaces_[0] = 0.1;
+  controller_->reference_interfaces_[1] = 0.1;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate();
+
+  double cmd0_after = hw_cmd_values_[0];
+  double cmd1_after = hw_cmd_values_[1];
+
+  // The sync correction for joint0 should push it toward joint1 (positive correction)
+  // but clamped to 0.1 * 0.01 = 0.001
+  // Without clamping, kp_sync=1.0 * error=0.5 = 0.5 rad (way too much)
+  // The actual position command includes the PD terms too, but the sync component is bounded
+  // Check that position commands are not wildly different (bounded by vel_cmd)
+  double pos_diff = std::abs( cmd0_after - cmd1_after );
+  // With clamped sync and only 0.001 max correction, the offset should remain close to initial
+  EXPECT_GT( pos_diff, 0.9 ) << "Sync correction should be clamped, not aggressively resync";
+}
+
+// Verify sync correction during STOPPING keeps joints closer together
+TEST_F( VelocityToPositionCommandControllerTest, SyncCorrectionDuringStopping )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.0 );
+  activateController();
+
+  // Move both synced joints together
+  for ( int i = 0; i < 10; i++ ) {
+    controller_->reference_interfaces_[0] = 1.0;
+    controller_->reference_interfaces_[1] = 1.0;
+    controller_->reference_interfaces_[2] = 0.0;
+    setPosition( 0, ( i + 1 ) * 0.01 );
+    setPosition( 1, ( i + 1 ) * 0.01 );
+    setVelocity( 0, 1.0 );
+    setVelocity( 1, 1.0 );
+    callUpdate();
+  }
+
+  // Stop both — joint0 has low velocity (stops quickly), joint1 has high velocity
+  // This simulates asymmetric braking (one motor is weaker)
+  setPosition( 0, 0.1 );
+  setPosition( 1, 0.12 ); // slight drift
+  setVelocity( 0, 0.1 );
+  setVelocity( 1, 0.8 );
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  callUpdate();
+
+  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
+  EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPING );
+
+  // Both joints are synced (same vel_command = 0.0)
+  EXPECT_TRUE( controller_->sync_states_[0] );
+  EXPECT_TRUE( controller_->sync_states_[1] );
+
+  // The desired_positions should incorporate sync correction during braking
+  // joint0 has smaller stopping_velocity, so its sync correction is also smaller
+  // joint1 has larger stopping_velocity, so it can correct more
+  double desired_diff_before =
+      std::abs( controller_->desired_positions_[0] - controller_->desired_positions_[1] );
+
+  // Run a few more braking cycles
+  for ( int i = 0; i < 5; i++ ) { callUpdate(); }
+
+  // The desired positions should be closer than they would be without sync
+  // (With sync correction, the faster joint is pulled toward the slower one)
+  double desired_diff_after =
+      std::abs( controller_->desired_positions_[0] - controller_->desired_positions_[1] );
+
+  // Sync correction should have reduced or maintained the difference
+  EXPECT_LE( desired_diff_after, desired_diff_before + 0.01 )
+      << "Sync correction during STOPPING should prevent positions from diverging";
+}
+
+// Verify sync correction is never applied during STOPPED (flippers stay still)
+TEST_F( VelocityToPositionCommandControllerTest, NoSyncCorrectionDuringStopped )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  // Even with max_sync_velocity > 0, STOPPED should not move
+  initController( sync_groups, "", 0.0, 0.5 );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.0 );
+  activateController();
+
+  // Create desync
+  setPosition( 1, 0.1 );
+
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  double hold0_before = controller_->hold_positions_[0];
+  double hold1_before = controller_->hold_positions_[1];
+
+  // Run STOPPED cycles — hold positions must NOT change
+  for ( int i = 0; i < 50; i++ ) { callUpdate(); }
+
+  EXPECT_DOUBLE_EQ( controller_->hold_positions_[0], hold0_before )
+      << "Hold position must not change during STOPPED";
+  EXPECT_DOUBLE_EQ( controller_->hold_positions_[1], hold1_before )
+      << "Hold position must not change during STOPPED";
+}
+
+// Verify kd_sync affects sync correction (D-term uses velocity difference)
+TEST_F( VelocityToPositionCommandControllerTest, KdSyncDampsCorrection )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+
+  // First run WITHOUT kd_sync, using a small sync error so the clamp doesn't dominate
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.0 );
+  activateController();
+
+  // Create small sync error and velocity difference
+  // sync_offset stored as 0. Actual offset = 0.005. Error = 0.005.
+  // P-term = 1.0 * 0.005 = 0.005 (within clamp of vel_cmd * dt = 10.0 * 0.01 = 0.1)
+  setPosition( 1, 0.005 );
+  setVelocity( 0, 0.5 );
+  setVelocity( 1, 1.5 ); // joint1 moving away from joint0
+
+  controller_->reference_interfaces_[0] = 10.0; // High vel to avoid clamp
+  controller_->reference_interfaces_[1] = 10.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate();
+
+  double cmd0_no_kd = hw_cmd_values_[0];
+
+  // Reset and run WITH kd_sync
+  controller_.reset();
+  rtest::StaticMocksRegistry::instance().reset();
+  controller_ = std::make_shared<VelToPosController>();
+
+  initController( sync_groups, "", 0.5 ); // kd_sync = 0.5
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.0 );
+  activateController();
+
+  setPosition( 1, 0.005 );
+  setVelocity( 0, 0.5 );
+  setVelocity( 1, 1.5 );
+
+  controller_->reference_interfaces_[0] = 10.0;
+  controller_->reference_interfaces_[1] = 10.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate();
+
+  double cmd0_with_kd = hw_cmd_values_[0];
+
+  // With kd_sync, joint0's correction should be larger because partner is moving faster
+  // D-term adds kd_sync * (partner_vel - this_vel) = 0.5 * (1.5 - 0.5) = 0.5
+  // Total correction = 0.005 + 0.5 = 0.505 (still within clamp of 0.1)
+  // Wait — 0.505 > 0.1, so it's still clamped! Use even higher vel_command or smaller kd.
+  // Actually vel_limit = abs(10.0) = 10.0, max_correction = 10.0 * 0.01 = 0.1
+  // P-only: 0.005 < 0.1, not clamped -> correction = 0.005
+  // P+D: 0.005 + 0.5 = 0.505 > 0.1, clamped to 0.1
+  // So cmd0_with_kd > cmd0_no_kd by 0.1 - 0.005 = 0.095
+  EXPECT_GT( cmd0_with_kd, cmd0_no_kd )
+      << "kd_sync should increase correction when partner is moving away. "
+      << "Without kd: " << cmd0_no_kd << ", with kd: " << cmd0_with_kd;
 }
 
 // ============================================================================

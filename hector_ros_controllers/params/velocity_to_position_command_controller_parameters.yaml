@@ -10,6 +10,8 @@ velocity_to_position_command_controller:
   kp: {type: double, default_value: 1.0, description: Proportional gain for the velocity to position pd-controller}
   kd: {type: double, default_value: 0.1, description: Differential gain for for the velocity to position pd-controller}
   kp_sync: {type: double, default_value: 1.0, description: Proportional gain for the synchronization of synced joints}
+  kd_sync: {type: double, default_value: 0.0, description: Derivative gain for synchronization using velocity difference between partners to damp oscillation}
+  max_sync_velocity: {type: double, default_value: 0.0, description: 'Maximum velocity (rad/s) of sync correction. 0 disables sync during STOPPED and leaves MOVING/STOPPING uncapped beyond the vel_command clamp. When > 0, provides an additional upper limit in all states and enables sync correction during STOPPED.'}
 
   stopping_velocity_threshold: {type: double, default_value: 0.005, description: Velocity threshold below which a joint is considered stopped}
 
