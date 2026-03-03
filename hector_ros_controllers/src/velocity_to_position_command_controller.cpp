@@ -95,8 +95,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
         sync_offsets_[joint_idx].push_back( std::numeric_limits<double>::quiet_NaN() );
         RCLCPP_INFO( get_node()->get_logger(),
                      "Adding synced joint %s for joint %s for vel to pos controller",
-                     joints_[group.second[i]].c_str(),
-                     joints_[group.second[( i + j + 1 ) % group.second.size()]].c_str() );
+                     joints_[synced_joint_idx].c_str(), joints_[joint_idx].c_str() );
       }
     }
   }
@@ -116,6 +115,8 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   kp_ = params_.kp;
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
+  kd_sync_ = params_.kd_sync;
+  max_sync_correction_ = params_.max_sync_correction;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
   braking_deceleration_ = params_.braking_deceleration;
 
@@ -186,6 +187,10 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
       kd_ = val;
     } else if ( p.get_name() == "kp_sync" ) {
       kp_sync_ = val;
+    } else if ( p.get_name() == "kd_sync" ) {
+      kd_sync_ = val;
+    } else if ( p.get_name() == "max_sync_correction" ) {
+      max_sync_correction_ = val;
     } else if ( p.get_name() == "braking_deceleration" ) {
       braking_deceleration_ = val;
     }
@@ -217,6 +222,16 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
 
     cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
         "kp_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_kd_ = param_subscriber_->add_parameter_callback(
+        "kd_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_max_sync_correction_ = param_subscriber_->add_parameter_callback(
+        "max_sync_correction",
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -507,20 +522,33 @@ void VelocityToPositionCommandController::update_sync_offsets()
   }
 }
 
-double VelocityToPositionCommandController::sync_p_control( size_t joint_idx )
+double VelocityToPositionCommandController::sync_pd_control( size_t joint_idx, double vel_command )
 {
-  double sync_pos_command = 0.0;
+  double correction = 0.0;
   size_t valid_count = 0;
   for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
     const size_t partner = synced_joints_[joint_idx][i];
     if ( std::isnan( joint_position_states_[partner] ) || std::isnan( sync_offsets_[joint_idx][i] ) )
       continue;
-    sync_pos_command += ( joint_position_states_[partner] - joint_position_states_[joint_idx] -
-                          sync_offsets_[joint_idx][i] ) *
-                        kp_sync_;
+    // P-term: proportional to position offset error
+    const double offset_error = joint_position_states_[partner] -
+                                joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i];
+    const double p_term = kp_sync_ * offset_error;
+
+    // D-term: damps oscillation using velocity difference between partners
+    const double vel_diff = joint_velocity_states_[partner] - joint_velocity_states_[joint_idx];
+    const double d_term = kd_sync_ * vel_diff;
+
+    correction += p_term + d_term;
+
     ++valid_count;
   }
-  return valid_count > 0 ? sync_pos_command / static_cast<double>( valid_count ) : 0.0;
+  if ( valid_count == 0 )
+    return 0.0;
+  correction /= static_cast<double>( valid_count );
+  // clamp correction to max_sync_correction_ * vel_command to prevent excessive corrections at high speeds
+  double max_correction = std::abs( vel_command ) * max_sync_correction_;
+  return std::clamp( correction, -max_correction, max_correction );
 }
 
 // ---------------------------------------------------------------------------
@@ -545,7 +573,7 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
 {
   double next_position = pos_pd_control( joint_idx, vel_command, period );
   if ( sync_states_[joint_idx] )
-    next_position += sync_p_control( joint_idx );
+    next_position += sync_pd_control( joint_idx, vel_command );
 
   return next_position;
 }
