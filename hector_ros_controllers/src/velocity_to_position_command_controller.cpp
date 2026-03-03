@@ -525,8 +525,13 @@ void VelocityToPositionCommandController::update_sync_offsets()
     for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
       const size_t partner = synced_joints_[joint_idx][i];
       if ( !std::isnan( joint_position_states_[partner] ) ) {
-        sync_offsets_[joint_idx][i] =
-            joint_position_states_[partner] - joint_position_states_[joint_idx];
+        const double new_offset = joint_position_states_[partner] - joint_position_states_[joint_idx];
+        RCLCPP_INFO_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                              "[SYNC] %s: updating offset for partner %s: %.4f -> %.4f "
+                              "(MOVING independently)",
+                              joints_[joint_idx].c_str(), joints_[partner].c_str(),
+                              sync_offsets_[joint_idx][i], new_offset );
+        sync_offsets_[joint_idx][i] = new_offset;
       }
     }
   }
@@ -554,6 +559,13 @@ double VelocityToPositionCommandController::sync_correction( size_t joint_idx,
 
     correction += p_term + d_term;
     ++valid_count;
+
+    RCLCPP_DEBUG( get_node()->get_logger(),
+                  "[SYNC] %s: partner=%s  offset_err=%.4f  p=%.4f  d=%.4f  stored_offset=%.4f  "
+                  "pos=%.4f  partner_pos=%.4f",
+                  joints_[joint_idx].c_str(), joints_[partner].c_str(), offset_error, p_term,
+                  d_term, sync_offsets_[joint_idx][i], joint_position_states_[joint_idx],
+                  joint_position_states_[partner] );
   }
 
   if ( valid_count == 0 )
@@ -561,11 +573,18 @@ double VelocityToPositionCommandController::sync_correction( size_t joint_idx,
 
   correction /= static_cast<double>( valid_count );
 
+  const double unclamped = correction;
+
   // Clamp: sync correction must not exceed effective_velocity_limit * dt
   if ( effective_velocity_limit > 0.0 && dt > 0.0 ) {
     const double max_correction = effective_velocity_limit * dt;
     correction = std::clamp( correction, -max_correction, max_correction );
   }
+
+  RCLCPP_DEBUG( get_node()->get_logger(),
+                "[SYNC] %s: correction=%.6f (unclamped=%.6f)  vel_limit=%.4f  max_corr=%.6f",
+                joints_[joint_idx].c_str(), correction, unclamped, effective_velocity_limit,
+                effective_velocity_limit * dt );
 
   return correction;
 }
