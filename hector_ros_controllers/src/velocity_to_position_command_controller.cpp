@@ -646,6 +646,8 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
     }
     const double correction = sync_correction( joint_idx, vel_limit, dt );
     next_position += correction;
+    // Also shift the integrating state so the correction accumulates across cycles
+    desired_positions_[joint_idx] += correction;
 
     RCLCPP_DEBUG( get_node()->get_logger(),
                   "[CTRL] %s: MOVING synced  vel_cmd=%.4f  pos_before_sync=%.4f  "
