@@ -75,28 +75,20 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  synced_joints_ = std::vector<std::vector<size_t>>( joints_.size() );
   sync_states_ = std::vector<bool>( joints_.size(), false );
-  sync_offsets_ = std::vector<std::vector<double>>( joints_.size() );
 
   for ( size_t i = 0; i < params_.synchronous_groups.size(); i++ ) {
     joint_groups_.push_back( params_.synchronous_groups[i] );
     groups_[params_.synchronous_groups[i]].push_back( i );
   }
 
-  for ( const auto &group : groups_ ) {
-    for ( size_t i = 0; i < group.second.size(); i++ ) {
-      size_t joint_idx = group.second[i];
+  sync_pairs_.init( joints_.size(), groups_ );
 
-      for ( size_t j = 0; j < group.second.size() - 1; j++ ) {
-        size_t synced_joint_idx = group.second[( i + j + 1 ) % group.second.size()];
-
-        synced_joints_[joint_idx].push_back( synced_joint_idx );
-        sync_offsets_[joint_idx].push_back( std::numeric_limits<double>::quiet_NaN() );
-        RCLCPP_INFO( get_node()->get_logger(),
-                     "Adding synced joint %s for joint %s for vel to pos controller",
-                     joints_[synced_joint_idx].c_str(), joints_[joint_idx].c_str() );
-      }
+  for ( size_t i = 0; i < joints_.size(); ++i ) {
+    if ( sync_pairs_.has_partner( i ) ) {
+      RCLCPP_INFO( get_node()->get_logger(),
+                   "Sync pair: joint %s <-> joint %s for vel to pos controller", joints_[i].c_str(),
+                   joints_[sync_pairs_.partner( i )].c_str() );
     }
   }
 
@@ -501,14 +493,11 @@ void VelocityToPositionCommandController::update_sync_states( const std::vector<
 
 void VelocityToPositionCommandController::reset_sync_offsets( size_t joint_idx )
 {
-  if ( std::isnan( joint_position_states_[joint_idx] ) )
+  if ( !sync_pairs_.has_partner( joint_idx ) || std::isnan( joint_position_states_[joint_idx] ) )
     return;
-  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
-    const size_t partner = synced_joints_[joint_idx][i];
-    if ( !std::isnan( joint_position_states_[partner] ) ) {
-      sync_offsets_[joint_idx][i] =
-          joint_position_states_[partner] - joint_position_states_[joint_idx];
-    }
+  const size_t p = sync_pairs_.partner( joint_idx );
+  if ( !std::isnan( joint_position_states_[p] ) ) {
+    sync_pairs_.set_offset( joint_idx, joint_position_states_[p] - joint_position_states_[joint_idx] );
   }
 }
 
@@ -518,43 +507,39 @@ void VelocityToPositionCommandController::update_sync_offsets()
     // Only update offsets for MOVING joints that are NOT synced (moving independently).
     if ( move_states_[joint_idx] != MOVING )
       continue;
+    if ( !sync_pairs_.has_partner( joint_idx ) )
+      continue;
     if ( sync_states_[joint_idx] || std::isnan( joint_position_states_[joint_idx] ) )
       continue;
-    for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
-      const size_t partner = synced_joints_[joint_idx][i];
-      if ( !std::isnan( joint_position_states_[partner] ) ) {
-        sync_offsets_[joint_idx][i] =
-            joint_position_states_[partner] - joint_position_states_[joint_idx];
-      }
+    const size_t p = sync_pairs_.partner( joint_idx );
+    if ( !std::isnan( joint_position_states_[p] ) ) {
+      sync_pairs_.set_offset( joint_idx,
+                              joint_position_states_[p] - joint_position_states_[joint_idx] );
     }
   }
 }
 
 double VelocityToPositionCommandController::sync_pd_control( size_t joint_idx, double vel_command )
 {
-  double correction = 0.0;
-  size_t valid_count = 0;
-  for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
-    const size_t partner = synced_joints_[joint_idx][i];
-    if ( std::isnan( joint_position_states_[partner] ) || std::isnan( sync_offsets_[joint_idx][i] ) )
-      continue;
-    // P-term: proportional to position offset error
-    const double offset_error = joint_position_states_[partner] -
-                                joint_position_states_[joint_idx] - sync_offsets_[joint_idx][i];
-    const double p_term = kp_sync_ * offset_error;
-
-    // D-term: damps oscillation using velocity difference between partners
-    const double vel_diff = joint_velocity_states_[partner] - joint_velocity_states_[joint_idx];
-    const double d_term = kd_sync_ * vel_diff;
-
-    correction += p_term + d_term;
-
-    ++valid_count;
-  }
-  if ( valid_count == 0 )
+  if ( !sync_pairs_.has_partner( joint_idx ) || sync_pairs_.is_offset_nan( joint_idx ) )
     return 0.0;
-  correction /= static_cast<double>( valid_count );
-  // clamp correction to max_sync_correction_ * vel_command to prevent excessive corrections at high speeds
+
+  const size_t p = sync_pairs_.partner( joint_idx );
+  if ( std::isnan( joint_position_states_[p] ) )
+    return 0.0;
+
+  // P-term: proportional to position offset error
+  const double current_diff = joint_position_states_[p] - joint_position_states_[joint_idx];
+  const double offset_error = current_diff - sync_pairs_.get_offset( joint_idx );
+  const double p_term = kp_sync_ * offset_error;
+
+  // D-term: damps oscillation using velocity difference between partners
+  const double vel_diff = joint_velocity_states_[p] - joint_velocity_states_[joint_idx];
+  const double d_term = kd_sync_ * vel_diff;
+
+  double correction = p_term + d_term;
+
+  // Clamp correction to prevent excessive corrections at high speeds
   double max_correction =
       std::max( std::abs( vel_command ) * sync_velocity_factor_, sync_velocity_min_threshold_ );
   return std::clamp( correction, -max_correction, max_correction );
@@ -666,10 +651,10 @@ void VelocityToPositionCommandController::publish_sync_status( const std::vector
   for ( size_t i = 0; i < joints_.size(); ++i ) {
     msg.vel_command_in[i] = reference_interfaces_[i];
 
-    if ( !synced_joints_[i].empty() ) {
-      const size_t partner = synced_joints_[i][0];
-      msg.desired_sync_offset[i] = sync_offsets_[i][0];
-      msg.current_sync_offset[i] = joint_position_states_[partner] - joint_position_states_[i];
+    if ( sync_pairs_.has_partner( i ) ) {
+      const size_t p = sync_pairs_.partner( i );
+      msg.desired_sync_offset[i] = sync_pairs_.get_offset( i );
+      msg.current_sync_offset[i] = joint_position_states_[p] - joint_position_states_[i];
     } else {
       msg.desired_sync_offset[i] = std::numeric_limits<double>::quiet_NaN();
       msg.current_sync_offset[i] = std::numeric_limits<double>::quiet_NaN();

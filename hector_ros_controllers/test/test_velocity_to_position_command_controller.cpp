@@ -867,12 +867,12 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncOffsetsInitializedWhenMovin
   activateController();
 
   // Offsets should be set from activation (via reset_sync_offsets)
-  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[0][0] ) );
-  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[1][0] ) );
+  EXPECT_FALSE( controller_->sync_pairs_.is_offset_nan( 0 ) );
+  EXPECT_FALSE( controller_->sync_pairs_.is_offset_nan( 1 ) );
   // joint1_pos - joint0_pos = 0.1
-  EXPECT_NEAR( controller_->sync_offsets_[0][0], 0.1, 1e-9 );
-  // joint0_pos - joint1_pos = -0.1
-  EXPECT_NEAR( controller_->sync_offsets_[1][0], -0.1, 1e-9 );
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.1, 1e-9 );
+  // joint0_pos - joint1_pos = -0.1 (symmetric by construction)
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 1 ), -0.1, 1e-9 );
 
   // Move both joints together at same velocity
   for ( int i = 0; i < 10; i++ ) {
@@ -887,9 +887,9 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncOffsetsInitializedWhenMovin
   }
 
   // Offsets should still be valid (not NaN) and reflect the position relationship
-  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[0][0] ) );
-  EXPECT_FALSE( std::isnan( controller_->sync_offsets_[1][0] ) );
-  EXPECT_NEAR( controller_->sync_offsets_[0][0], 0.1, 1e-6 );
+  EXPECT_FALSE( controller_->sync_pairs_.is_offset_nan( 0 ) );
+  EXPECT_FALSE( controller_->sync_pairs_.is_offset_nan( 1 ) );
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.1, 1e-6 );
 }
 
 // Verify synced flippers stay close after repeated up-down cycles
