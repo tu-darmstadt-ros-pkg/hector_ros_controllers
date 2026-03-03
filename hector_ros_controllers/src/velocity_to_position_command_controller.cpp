@@ -333,6 +333,16 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
   }
   for ( size_t i = 0; i < joints_.size(); i++ ) { reset_sync_offsets( i ); }
 
+  // Log initial sync offsets for debugging
+  for ( size_t i = 0; i < joints_.size(); i++ ) {
+    for ( size_t p = 0; p < synced_joints_[i].size(); p++ ) {
+      RCLCPP_INFO( get_node()->get_logger(),
+                   "[SYNC] %s: initial offset to %s = %.4f  (pos=%.4f, partner_pos=%.4f)",
+                   joints_[i].c_str(), joints_[synced_joints_[i][p]].c_str(), sync_offsets_[i][p],
+                   joint_position_states_[i], joint_position_states_[synced_joints_[i][p]] );
+    }
+  }
+
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -463,6 +473,8 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
     if ( vel_command != 0.0 ) {
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      RCLCPP_INFO( get_node()->get_logger(), "[STATE] %s: STOPPING->MOVING  vel_cmd=%.4f  pos=%.4f",
+                   joints_[joint_idx].c_str(), vel_command, joint_position_states_[joint_idx] );
     }
     break;
 
@@ -470,6 +482,8 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
     if ( vel_command != 0.0 ) {
       move_states_[joint_idx] = MOVING;
       desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+      RCLCPP_INFO( get_node()->get_logger(), "[STATE] %s: STOPPED->MOVING  vel_cmd=%.4f  pos=%.4f",
+                   joints_[joint_idx].c_str(), vel_command, joint_position_states_[joint_idx] );
     }
     break;
   }
@@ -496,7 +510,14 @@ void VelocityToPositionCommandController::update_sync_states( const std::vector<
     }
 
     for ( size_t i = 0; i < group_indices.size(); i++ ) {
+      const bool was_synced = sync_states_[group_indices[i]];
       sync_states_[group_indices[i]] = group_is_synchronized;
+      if ( was_synced != group_is_synchronized ) {
+        RCLCPP_INFO( get_node()->get_logger(), "[SYNC] %s: sync_state %s -> %s  (vel_cmd=%.4f)",
+                     joints_[group_indices[i]].c_str(), was_synced ? "SYNCED" : "INDEPENDENT",
+                     group_is_synchronized ? "SYNCED" : "INDEPENDENT",
+                     vel_commands[group_indices[i]] );
+      }
     }
   }
 }
@@ -514,12 +535,17 @@ void VelocityToPositionCommandController::reset_sync_offsets( size_t joint_idx )
   }
 }
 
-void VelocityToPositionCommandController::update_sync_offsets()
+void VelocityToPositionCommandController::update_sync_offsets( const std::vector<double> &vel_commands )
 {
   for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
-    // Only update offsets for MOVING joints that are NOT synced (moving independently).
+    // Only update offsets for joints that are actively MOVING independently.
+    // Guard 1: must be in MOVING state
     if ( move_states_[joint_idx] != MOVING )
       continue;
+    // Guard 2: must have a non-zero velocity command (vel=0 means about to stop)
+    if ( vel_commands[joint_idx] == 0.0 )
+      continue;
+    // Guard 3: must NOT be synced (i.e. moving independently with a different command than partner)
     if ( sync_states_[joint_idx] || std::isnan( joint_position_states_[joint_idx] ) )
       continue;
     for ( size_t i = 0; i < synced_joints_[joint_idx].size(); i++ ) {
@@ -528,9 +554,9 @@ void VelocityToPositionCommandController::update_sync_offsets()
         const double new_offset = joint_position_states_[partner] - joint_position_states_[joint_idx];
         RCLCPP_INFO_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
                               "[SYNC] %s: updating offset for partner %s: %.4f -> %.4f "
-                              "(MOVING independently)",
+                              "(MOVING independently, vel_cmd=%.4f)",
                               joints_[joint_idx].c_str(), joints_[partner].c_str(),
-                              sync_offsets_[joint_idx][i], new_offset );
+                              sync_offsets_[joint_idx][i], new_offset, vel_commands[joint_idx] );
         sync_offsets_[joint_idx][i] = new_offset;
       }
     }
@@ -618,7 +644,14 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
     if ( max_sync_velocity_ > 0.0 ) {
       vel_limit = std::min( vel_limit, max_sync_velocity_ );
     }
-    next_position += sync_correction( joint_idx, vel_limit, dt );
+    const double correction = sync_correction( joint_idx, vel_limit, dt );
+    next_position += correction;
+
+    RCLCPP_DEBUG( get_node()->get_logger(),
+                  "[CTRL] %s: MOVING synced  vel_cmd=%.4f  pos_before_sync=%.4f  "
+                  "sync_corr=%.6f  pos_after_sync=%.4f  vel_limit=%.4f",
+                  joints_[joint_idx].c_str(), vel_command, next_position - correction, correction,
+                  next_position, vel_limit );
   }
 
   return next_position;
@@ -699,7 +732,7 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
   // }
 
   update_sync_states( reference_interfaces_ );
-  update_sync_offsets();
+  update_sync_offsets( reference_interfaces_ );
 
   for ( size_t joint_idx = 0; joint_idx < command_interfaces_.size(); joint_idx++ ) {
 
@@ -786,6 +819,17 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
           std::clamp( hold_positions_[joint_idx], joint_lower_limits_[joint_idx],
                       joint_upper_limits_[joint_idx] );
     }
+
+    RCLCPP_DEBUG( get_node()->get_logger(),
+                  "[CMD] %s: state=%s  vel_cmd=%.4f  pos_cmd=%.4f  hw_pos=%.4f  hw_vel=%.4f  "
+                  "desired=%.4f  hold=%.4f  synced=%s",
+                  joints_[joint_idx].c_str(),
+                  move_states_[joint_idx] == MOVING     ? "MOVING"
+                  : move_states_[joint_idx] == STOPPING ? "STOPPING"
+                                                        : "STOPPED",
+                  vel_command, pos_command, joint_position_states_[joint_idx],
+                  joint_velocity_states_[joint_idx], desired_positions_[joint_idx],
+                  hold_positions_[joint_idx], sync_states_[joint_idx] ? "true" : "false" );
 
     successful &= command_interfaces_[joint_idx].set_value( pos_command );
   }

@@ -88,7 +88,7 @@ private:
 
   // Synchronization
   void update_sync_states( const std::vector<double> &vel_commands );
-  void update_sync_offsets();
+  void update_sync_offsets( const std::vector<double> &vel_commands );
   void reset_sync_offsets( size_t joint_idx );
   double sync_correction( size_t joint_idx, double effective_velocity_limit, double dt );
 
