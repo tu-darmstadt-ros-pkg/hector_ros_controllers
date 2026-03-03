@@ -18,7 +18,8 @@ namespace velocity_to_position_command_controller
 VelocityToPositionCommandController::VelocityToPositionCommandController()
     : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
       e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
-      kd_sync_( 0.0 ), max_sync_velocity_( 0.0 ), rt_buffer_ptr_( nullptr )
+      kd_sync_( 0.0 ), sync_velocity_factor_( 1.0 ), max_sync_velocity_( 0.0 ),
+      rt_buffer_ptr_( nullptr )
 {
 }
 
@@ -117,6 +118,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
   kd_sync_ = params_.kd_sync;
+  sync_velocity_factor_ = params_.sync_velocity_factor;
   max_sync_velocity_ = params_.max_sync_velocity;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
   braking_deceleration_ = params_.braking_deceleration;
@@ -190,6 +192,8 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
       kp_sync_ = val;
     } else if ( p.get_name() == "kd_sync" ) {
       kd_sync_ = val;
+    } else if ( p.get_name() == "sync_velocity_factor" ) {
+      sync_velocity_factor_ = val;
     } else if ( p.get_name() == "max_sync_velocity" ) {
       max_sync_velocity_ = val;
     } else if ( p.get_name() == "braking_deceleration" ) {
@@ -228,6 +232,11 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
 
     cb_handle_sync_kd_ = param_subscriber_->add_parameter_callback(
         "kd_sync",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_sync_vel_factor_ = param_subscriber_->add_parameter_callback(
+        "sync_velocity_factor",
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -585,8 +594,8 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
   double next_position = pos_pd_control( joint_idx, vel_command, period );
 
   if ( sync_states_[joint_idx] ) {
-    // During MOVING: always clamp to abs(vel_command), with max_sync_velocity as additional cap
-    double vel_limit = std::abs( vel_command );
+    // During MOVING: clamp to factor * abs(vel_command), with max_sync_velocity as additional cap
+    double vel_limit = sync_velocity_factor_ * std::abs( vel_command );
     if ( max_sync_velocity_ > 0.0 ) {
       vel_limit = std::min( vel_limit, max_sync_velocity_ );
     }
@@ -728,16 +737,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
                      joints_[joint_idx].c_str(), hold_positions_[joint_idx] );
       } else {
         desired_positions_[joint_idx] += stopping_velocities_[joint_idx] * dt;
-
-        // Apply sync correction during braking, clamped to stopping velocity
-        if ( sync_states_[joint_idx] ) {
-          double vel_limit = std::abs( stopping_velocities_[joint_idx] );
-          if ( max_sync_velocity_ > 0.0 ) {
-            vel_limit = std::min( vel_limit, max_sync_velocity_ );
-          }
-          desired_positions_[joint_idx] += sync_correction( joint_idx, vel_limit, dt );
-        }
-
         pos_command = desired_positions_[joint_idx];
         hold_positions_[joint_idx] = desired_positions_[joint_idx];
       }

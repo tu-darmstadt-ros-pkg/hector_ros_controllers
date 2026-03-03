@@ -136,6 +136,7 @@ private:
   double kd_;
   double kp_sync_;
   double kd_sync_;
+  double sync_velocity_factor_;
   double max_sync_velocity_;
 
   // Parameter callbacks
@@ -144,6 +145,7 @@ private:
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_kp_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_braking_decel_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_kd_;
+  std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_sync_vel_factor_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_max_sync_vel_;
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
 

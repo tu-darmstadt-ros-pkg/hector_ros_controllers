@@ -34,7 +34,7 @@ protected:
 
   void initController( const std::vector<std::string> &sync_groups = {},
                        const std::string &passthrough = "", double kd_sync = 0.0,
-                       double max_sync_velocity = 0.0 )
+                       double sync_velocity_factor = 1.0, double max_sync_velocity = 0.0 )
   {
     const auto urdf = hector_test::loadUrdfFile( "test_robot.urdf" );
 
@@ -51,6 +51,7 @@ protected:
         rclcpp::Parameter( "kd", 0.1 ),
         rclcpp::Parameter( "kp_sync", 1.0 ),
         rclcpp::Parameter( "kd_sync", kd_sync ),
+        rclcpp::Parameter( "sync_velocity_factor", sync_velocity_factor ),
         rclcpp::Parameter( "max_sync_velocity", max_sync_velocity ),
         rclcpp::Parameter( "stopping_velocity_threshold", 0.005 ),
         rclcpp::Parameter( "passthrough_controller", passthrough ),
@@ -989,66 +990,6 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncCorrectionClampedToVelocity
   double pos_diff = std::abs( cmd0_after - cmd1_after );
   // With clamped sync and only 0.001 max correction, the offset should remain close to initial
   EXPECT_GT( pos_diff, 0.9 ) << "Sync correction should be clamped, not aggressively resync";
-}
-
-// Verify sync correction during STOPPING keeps joints closer together
-TEST_F( VelocityToPositionCommandControllerTest, SyncCorrectionDuringStopping )
-{
-  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
-  initController( sync_groups );
-  configureController();
-  setupHardwareInterfaces();
-
-  setPosition( 0, 0.0 );
-  setPosition( 1, 0.0 );
-  activateController();
-
-  // Move both synced joints together
-  for ( int i = 0; i < 10; i++ ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 1.0;
-    controller_->reference_interfaces_[2] = 0.0;
-    setPosition( 0, ( i + 1 ) * 0.01 );
-    setPosition( 1, ( i + 1 ) * 0.01 );
-    setVelocity( 0, 1.0 );
-    setVelocity( 1, 1.0 );
-    callUpdate();
-  }
-
-  // Stop both — joint0 has low velocity (stops quickly), joint1 has high velocity
-  // This simulates asymmetric braking (one motor is weaker)
-  setPosition( 0, 0.1 );
-  setPosition( 1, 0.12 ); // slight drift
-  setVelocity( 0, 0.1 );
-  setVelocity( 1, 0.8 );
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  callUpdate();
-
-  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
-  EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPING );
-
-  // Both joints are synced (same vel_command = 0.0)
-  EXPECT_TRUE( controller_->sync_states_[0] );
-  EXPECT_TRUE( controller_->sync_states_[1] );
-
-  // The desired_positions should incorporate sync correction during braking
-  // joint0 has smaller stopping_velocity, so its sync correction is also smaller
-  // joint1 has larger stopping_velocity, so it can correct more
-  double desired_diff_before =
-      std::abs( controller_->desired_positions_[0] - controller_->desired_positions_[1] );
-
-  // Run a few more braking cycles
-  for ( int i = 0; i < 5; i++ ) { callUpdate(); }
-
-  // The desired positions should be closer than they would be without sync
-  // (With sync correction, the faster joint is pulled toward the slower one)
-  double desired_diff_after =
-      std::abs( controller_->desired_positions_[0] - controller_->desired_positions_[1] );
-
-  // Sync correction should have reduced or maintained the difference
-  EXPECT_LE( desired_diff_after, desired_diff_before + 0.01 )
-      << "Sync correction during STOPPING should prevent positions from diverging";
 }
 
 // Verify sync correction is never applied during STOPPED (flippers stay still)
