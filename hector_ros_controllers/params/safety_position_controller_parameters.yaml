@@ -22,7 +22,7 @@ safety_position_controller:
 
   collision_padding:
     type: double
-    default_value: 0.0
+    default_value: 0.01
     description: Minimum allowed distance in [m] between any two links to consider the robot safe from self-collisions when 'check_self_collisions' is true.
 
   collision_cache_epsilon:
@@ -38,7 +38,7 @@ safety_position_controller:
       velocity_limit / update_rate * block_velocity_scaling. Only active when
       'check_self_collisions' is true.
     validation:
-      bounds<>: [0.01, 3.0]
+      bounds<>: [0.01, 15.0]
 
   collision_safety_zone:
     type: double
@@ -47,6 +47,15 @@ safety_position_controller:
       Outer safety zone distance in [m]. When the minimum collision distance falls between
       'collision_padding' and 'collision_safety_zone', joint velocities are linearly scaled
       down to zero. Must be strictly greater than 'collision_padding'.
+
+  directional_collision_scaling:
+    type: bool
+    default_value: true
+    description: >
+      If true, velocity scaling near collisions is direction-aware: only motions
+      that decrease any collision distance in the safety zone are slowed down.
+      Motions moving away from all collisions proceed at full speed.
+      Requires 'check_self_collisions' to be true.
 
   debug_visualize_collisions:
     type: bool

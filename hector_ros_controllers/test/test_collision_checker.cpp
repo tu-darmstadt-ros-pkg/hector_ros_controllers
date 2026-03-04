@@ -31,6 +31,7 @@
 #include <cmath>
 #include <fstream>
 #include <random>
+#include <set>
 #include <unordered_map>
 
 namespace
@@ -404,6 +405,183 @@ TEST_F( CollisionCheckerTest, NonPenetratingExactMatch )
     ASSERT_GT( bf_min, 0.0 ) << "Config should be non-penetrating";
     EXPECT_NEAR( result.min_distance, bf_min, 1e-10 )
         << "Non-penetrating config must match exactly at j2=" << a2 << ", j3=" << a3;
+  }
+}
+
+// ============================================================
+// Gradient tests for directional collision velocity scaling
+// ============================================================
+
+// ---- Test 12: Gradient matches finite difference ----
+TEST_F( CollisionCheckerTest, GradientMatchesFiniteDifference )
+{
+  auto checker = makeChecker();
+  const double eps = 1e-6;
+  const double safety_zone = 1.0; // large threshold to always compute gradients
+
+  // Test multiple configurations (non-penetrating with various clearances)
+  std::vector<std::unordered_map<std::string, double>> configs = {
+      { { "joint1", 0.0 }, { "joint2", 0.5 }, { "joint3", -0.3 }, { "joint4", 0.0 } },
+      { { "joint1", 0.3 }, { "joint2", 2.0 }, { "joint3", -1.0 }, { "joint4", 0.5 } },
+      { { "joint1", -0.2 }, { "joint2", 1.5 }, { "joint3", -0.8 }, { "joint4", -0.3 } },
+      { { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } },
+  };
+
+  for ( size_t ci = 0; ci < configs.size(); ++ci ) {
+    const auto &positions = configs[ci];
+
+    // Get result with gradient
+    auto result = checker->checkCollision( positions, safety_zone );
+    // Skip if no pairs in safety zone (e.g. all pairs have distance > safety_zone)
+    if ( result.safety_zone_pairs.empty() )
+      continue;
+
+    // Use the first (closest) pair's gradient
+    const auto &closest = result.safety_zone_pairs[0];
+    const auto &gradient = closest.gradient;
+
+    // Finite-difference validation for each controlled joint
+    for ( const auto &[name, val] : positions ) {
+      auto perturbed = positions;
+      perturbed[name] = val + eps;
+
+      // Need to invalidate cache — use a different checker or large perturbation
+      // Actually, the cache epsilon is 0 for this checker, so different q always recomputes
+      auto result_plus = checker->checkCollision( perturbed, safety_zone );
+
+      double fd_gradient = ( result_plus.min_distance - result.min_distance ) / eps;
+
+      int v_idx = checker->getJointVelocityIndex( name );
+      ASSERT_GE( v_idx, 0 ) << "Joint " << name << " not found";
+      ASSERT_LT( v_idx, gradient.size() );
+
+      EXPECT_NEAR( gradient[v_idx], fd_gradient, 1e-3 )
+          << "Gradient mismatch for joint " << name << " at config " << ci
+          << " (analytical=" << gradient[v_idx] << ", fd=" << fd_gradient << ")";
+    }
+  }
+}
+
+// ---- Test 13: Gradient sign for approaching motion ----
+TEST_F( CollisionCheckerTest, GradientSignApproaching )
+{
+  auto checker = makeChecker();
+  const double safety_zone = 1.0;
+
+  // Start from straight chain, fold joint2 toward PI (approaching collision)
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 1.5 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+
+  auto result = checker->checkCollision( positions, safety_zone );
+  ASSERT_FALSE( result.safety_zone_pairs.empty() );
+
+  const auto &gradient = result.safety_zone_pairs[0].gradient;
+  int v_idx_j2 = checker->getJointVelocityIndex( "joint2" );
+  ASSERT_GE( v_idx_j2, 0 );
+
+  // Motion toward PI (positive delta for joint2) folds the chain → should decrease distance
+  // So gradient[v_idx_j2] * (+delta) should be negative → gradient[v_idx_j2] < 0
+  // (or the reverse depending on the chain geometry — let's use the finite difference to verify sign)
+  double delta = 0.1;
+  auto positions_plus = positions;
+  positions_plus["joint2"] += delta;
+  auto result_plus = checker->checkCollision( positions_plus, safety_zone );
+
+  // If distance decreased, the motion is approaching
+  if ( result_plus.min_distance < result.min_distance ) {
+    // The directional derivative should be negative
+    double dir_deriv = gradient[v_idx_j2] * delta;
+    EXPECT_LT( dir_deriv, 0.0 ) << "Gradient should indicate approaching when distance decreases. "
+                                << "grad[j2]=" << gradient[v_idx_j2] << " delta=" << delta;
+  }
+}
+
+// ---- Test 14: Gradient sign for retreating motion ----
+TEST_F( CollisionCheckerTest, GradientSignRetreating )
+{
+  auto checker = makeChecker();
+  const double safety_zone = 1.0;
+
+  // Near collision config: joint2 folded close to PI
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 2.5 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+
+  auto result = checker->checkCollision( positions, safety_zone );
+  ASSERT_FALSE( result.safety_zone_pairs.empty() );
+
+  const auto &gradient = result.safety_zone_pairs[0].gradient;
+  int v_idx_j2 = checker->getJointVelocityIndex( "joint2" );
+  ASSERT_GE( v_idx_j2, 0 );
+
+  // Motion back toward 0 (negative delta for joint2) unfolds the chain → should increase distance
+  double delta = -0.1;
+  auto positions_minus = positions;
+  positions_minus["joint2"] += delta;
+  auto result_minus = checker->checkCollision( positions_minus, safety_zone );
+
+  if ( result_minus.min_distance > result.min_distance ) {
+    // The directional derivative should be positive (moving away)
+    double dir_deriv = gradient[v_idx_j2] * delta;
+    EXPECT_GT( dir_deriv, 0.0 ) << "Gradient should indicate retreating when distance increases. "
+                                << "grad[j2]=" << gradient[v_idx_j2] << " delta=" << delta;
+  }
+}
+
+// ---- Test 15: Multiple pairs in safety zone get gradients ----
+TEST_F( CollisionCheckerTest, GradientComputedForAllSafetyZonePairs )
+{
+  auto checker = makeChecker();
+  const double safety_zone = 2.0; // very large to capture all pairs
+
+  // Configuration with multiple pairs relatively close
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 1.5 }, { "joint3", -0.5 }, { "joint4", 0.0 } };
+
+  auto result = checker->checkCollision( positions, safety_zone );
+
+  // With a large safety zone, multiple pairs should have gradients
+  EXPECT_GE( result.safety_zone_pairs.size(), 1u )
+      << "Expected at least 1 pair in safety zone with threshold=" << safety_zone;
+
+  // Each pair should have a non-empty gradient
+  for ( const auto &pi : result.safety_zone_pairs ) {
+    EXPECT_GT( pi.gradient.size(), 0 ) << "Pair " << pi.pair_index << " has empty gradient";
+    // Gradient should not be all zeros (would mean no joint affects this pair)
+    EXPECT_GT( pi.gradient.norm(), 0.0 ) << "Pair " << pi.pair_index << " gradient is zero vector";
+  }
+}
+
+// ---- Test 16: No gradient when threshold is zero ----
+TEST_F( CollisionCheckerTest, NoGradientWhenThresholdZero )
+{
+  auto checker = makeChecker();
+
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 1.5 }, { "joint3", -0.5 }, { "joint4", 0.0 } };
+
+  // Default threshold = 0 → no gradient computation
+  auto result = checker->checkCollision( positions );
+  EXPECT_TRUE( result.safety_zone_pairs.empty() )
+      << "No safety zone pairs should be computed with threshold=0";
+}
+
+// ---- Test 17: getJointVelocityIndex and getNv ----
+TEST_F( CollisionCheckerTest, VelocitySpaceHelpers )
+{
+  auto checker = makeChecker();
+
+  EXPECT_GT( checker->getNv(), 0 );
+  EXPECT_GE( checker->getJointVelocityIndex( "joint1" ), 0 );
+  EXPECT_GE( checker->getJointVelocityIndex( "joint2" ), 0 );
+  EXPECT_GE( checker->getJointVelocityIndex( "joint3" ), 0 );
+  EXPECT_GE( checker->getJointVelocityIndex( "joint4" ), 0 );
+  EXPECT_EQ( checker->getJointVelocityIndex( "nonexistent_joint" ), -1 );
+
+  // All indices should be distinct
+  std::set<int> indices;
+  for ( const auto &name : { "joint1", "joint2", "joint3", "joint4" } ) {
+    int idx = checker->getJointVelocityIndex( name );
+    EXPECT_TRUE( indices.insert( idx ).second ) << "Duplicate velocity index for " << name;
   }
 }
 

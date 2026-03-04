@@ -13,6 +13,7 @@
 #include <pinocchio/multibody/geometry.hpp>
 #include <pinocchio/multibody/model.hpp>
 
+#include <Eigen/Core>
 #include <hpp/fcl/collision.h>
 #include <limits>
 #include <unordered_map>
@@ -23,6 +24,14 @@
 struct CollisionResult {
   bool in_collision{ false }; ///< true if any pair distance <= padding
   double min_distance{ std::numeric_limits<double>::max() }; ///< global minimum pairwise distance [m]
+
+  /// Per-pair info for pairs within the safety zone (only populated when gradient computation requested).
+  struct PairInfo {
+    std::size_t pair_index;   ///< index into geom_model_.collisionPairs
+    double distance;          ///< pairwise distance [m]
+    Eigen::VectorXd gradient; ///< dd/dv (size model_.nv): positive = moving apart
+  };
+  std::vector<PairInfo> safety_zone_pairs; ///< pairs with distance < safety_zone_threshold
 };
 
 /// Self-collision checker using Pinocchio + hpp-fcl; optional RViz debug markers.
@@ -61,23 +70,38 @@ public:
 
   /**
    * @brief Collision check from name→position map.
-   * - nq==1: assign directly
-   * - continuous revolute (nq=2,nv=1): [cos(θ), sin(θ)]
-   * - others: left at neutral with warning
    * @param joint_positions rad (rev) / m (prismatic)
-   * @return CollisionResult with collision flag and minimum clearance distance
+   * @param safety_zone_threshold when > 0, computes per-pair distance gradients (dd/dv)
+   *        for all pairs with distance < threshold. Set to 0 to skip gradient computation.
+   * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
    */
-  CollisionResult checkCollision( const std::unordered_map<std::string, double> &joint_positions );
+  CollisionResult checkCollision( const std::unordered_map<std::string, double> &joint_positions,
+                                  double safety_zone_threshold = 0.0 );
 
   /**
    * @brief Collision check for full q.
-   * - FK + update placements
-   * - computeDistances() with nearest points + cached GJK
-   * - cache: reuse last collision result if q change ≤ epsilon
    * @param q size == model_.nq
-   * @return CollisionResult with collision flag and minimum clearance distance
+   * @param safety_zone_threshold when > 0, computes per-pair distance gradients (dd/dv)
+   *        for all pairs with distance < threshold. Set to 0 to skip gradient computation.
+   * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
    */
-  CollisionResult checkCollisionQ( const Eigen::VectorXd &q );
+  CollisionResult checkCollisionQ( const Eigen::VectorXd &q, double safety_zone_threshold = 0.0 );
+
+  /**
+   * @brief Get the velocity-space index for a named joint.
+   * @return starting index in model_.nv, or -1 if not found
+   */
+  int getJointVelocityIndex( const std::string &joint_name ) const;
+
+  /**
+   * @brief Get the total velocity-space dimension.
+   */
+  int getNv() const;
+
+  /**
+   * @brief Get the number of collision pairs.
+   */
+  std::size_t getNumCollisionPairs() const;
 
   /**
    * @brief Set collision padding [m].
@@ -97,10 +121,25 @@ public:
    */
   void updateCollisionCacheEpsilon( double epsilon );
 
+  /**
+   * @brief Set per-pair directional derivatives for visualization coloring.
+   * Must be called before the next collision check if you want colors to reflect motion direction.
+   * @param derivatives one value per collision pair; NaN = no info, >=0 = moving away, <0 = moving closer
+   * @param safety_zone_threshold the threshold used to classify pairs into safety zone vs safe
+   */
+  void setDirectionalInfo( const std::vector<double> &derivatives, double safety_zone_threshold );
+
 private:
   /**
-   * @brief Publish geometry and nearest-point LINE_LIST markers.
-   * - red if part of a pair with distance ≤ 0
+   * @brief Compute the distance gradient for a single collision pair.
+   * Requires FK + computeJointJacobians to have been called already.
+   * @param pair_k index into geom_model_.collisionPairs
+   * @return gradient vector of size model_.nv
+   */
+  Eigen::VectorXd computePairGradient( std::size_t pair_k ) const;
+
+  /**
+   * @brief Publish geometry and nearest-point markers with namespace-separated categories.
    */
   void publishMarkers() const;
 
@@ -127,6 +166,10 @@ private:
   bool pub_debug_geometry_{ false };
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;
+
+  // Per-pair directional derivatives for visualization (set by controller via setDirectionalInfo)
+  std::vector<double> viz_directional_derivatives_; ///< one per collision pair; NaN = no info
+  double viz_safety_zone_threshold_{ 0.0 };
 
 #ifdef SAFETY_CC_ENABLE_TIMING
   double sum_timings_{ 0.0 };

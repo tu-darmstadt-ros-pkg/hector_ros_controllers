@@ -4,10 +4,12 @@
 #include "safety_position_controller/collision_checker.hpp"
 
 #include <pinocchio/algorithm/geometry.hpp>
+#include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/multibody/geometry.hpp>
 #include <pinocchio/parsers/srdf.hpp>
 #include <pinocchio/parsers/urdf.hpp>
+#include <pinocchio/spatial/skew.hpp>
 
 #include "pinocchio/collision/distance.hpp"
 #include <cmath>
@@ -127,12 +129,13 @@ std::vector<std::string> CollisionChecker::getJointNames() const
 }
 
 CollisionResult
-CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
+CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions,
+                                  double safety_zone_threshold )
 {
 
   if ( model_.nq == 0 ) {
     RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
-    return { true, 0.0 };
+    return CollisionResult{ true, 0.0, {} };
   }
   // return collision if any position is Nan or Inf
   for ( const auto &[name, position] : joint_positions ) {
@@ -141,7 +144,7 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
           node_->get_logger(),
           "Joint position for joint '%s' is NaN or Inf (%.3f). Assuming the robot is in collision.",
           name.c_str(), position );
-      return { true, 0.0 };
+      return CollisionResult{ true, 0.0, {} };
     }
   }
   // transforms the joint positions into the pinocchio format
@@ -174,9 +177,10 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
     }
   }
 
-  return checkCollisionQ( q );
+  return checkCollisionQ( q, safety_zone_threshold );
 }
-CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
+CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
+                                                   double safety_zone_threshold )
 {
 #ifdef SAFETY_CC_ENABLE_TIMING
   using clock = std::chrono::steady_clock;
@@ -185,7 +189,7 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 
   if ( q.size() != model_.nq ) {
     RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
-    return { true, 0.0 };
+    return CollisionResult{ true, 0.0, {} };
   }
 
   // check if robot moved since the last check
@@ -236,6 +240,23 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   result.in_collision = ( global_min_distance <= collision_padding_ );
   result.min_distance = global_min_distance;
 
+  // Compute per-pair distance gradients for all pairs within the safety zone
+  if ( safety_zone_threshold > 0.0 ) {
+    // Compute all joint Jacobians (reuses FK already done above)
+    pinocchio::computeJointJacobians( model_, data_ );
+
+    for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+      const auto &dres = geom_data_.distanceResults[k];
+      if ( dres.min_distance < safety_zone_threshold ) {
+        CollisionResult::PairInfo info;
+        info.pair_index = k;
+        info.distance = dres.min_distance;
+        info.gradient = computePairGradient( k );
+        result.safety_zone_pairs.push_back( std::move( info ) );
+      }
+    }
+  }
+
 #ifdef SAFETY_CC_ENABLE_TIMING
   const auto t_end = clock::now();
   const auto us = std::chrono::duration_cast<std::chrono::microseconds>( t_end - t_begin ).count();
@@ -270,13 +291,82 @@ void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
   collision_cache_epsilon_ = epsilon;
 }
 
+Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k ) const
+{
+  Eigen::VectorXd grad = Eigen::VectorXd::Zero( model_.nv );
+
+  const auto &dres = geom_data_.distanceResults[pair_k];
+
+  // Validate nearest points
+  if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
+       !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() ) {
+    return grad; // zero gradient = no directional preference (safe fallback)
+  }
+
+  const auto &cp = geom_model_.collisionPairs[pair_k];
+  const pinocchio::JointIndex j1 = geom_model_.geometryObjects[cp.first].parentJoint;
+  const pinocchio::JointIndex j2 = geom_model_.geometryObjects[cp.second].parentJoint;
+
+  // Get 6×nv Jacobians in LOCAL_WORLD_ALIGNED frame
+  Eigen::MatrixXd J1 = Eigen::MatrixXd::Zero( 6, model_.nv );
+  Eigen::MatrixXd J2 = Eigen::MatrixXd::Zero( 6, model_.nv );
+  pinocchio::getJointJacobian( model_, data_, j1, pinocchio::LOCAL_WORLD_ALIGNED, J1 );
+  pinocchio::getJointJacobian( model_, data_, j2, pinocchio::LOCAL_WORLD_ALIGNED, J2 );
+
+  // Nearest points in world frame
+  const Eigen::Vector3d p1 = dres.nearest_points[0];
+  const Eigen::Vector3d p2 = dres.nearest_points[1];
+
+  // Offsets from joint origins to nearest points
+  const Eigen::Vector3d r1 = p1 - data_.oMi[j1].translation();
+  const Eigen::Vector3d r2 = p2 - data_.oMi[j2].translation();
+
+  // Point Jacobians: J_pt = J_linear - skew(r) * J_angular
+  const Eigen::MatrixXd Jp1 = J1.topRows( 3 ) - pinocchio::skew( r1 ) * J1.bottomRows( 3 );
+  const Eigen::MatrixXd Jp2 = J2.topRows( 3 ) - pinocchio::skew( r2 ) * J2.bottomRows( 3 );
+
+  // Direction vector: from p1 to p2 (positive distance direction)
+  const Eigen::Vector3d diff = p2 - p1;
+  const double dist_norm = diff.norm();
+  if ( dist_norm < 1e-12 ) {
+    return grad; // points coincide, gradient undefined
+  }
+  const Eigen::Vector3d n = diff / dist_norm;
+
+  // Distance gradient: dd/dv = n^T * (Jp2 - Jp1)
+  grad = ( n.transpose() * ( Jp2 - Jp1 ) ).transpose();
+  return grad;
+}
+
+int CollisionChecker::getJointVelocityIndex( const std::string &joint_name ) const
+{
+  const auto it = name_to_id_.find( joint_name );
+  if ( it == name_to_id_.end() )
+    return -1;
+  return model_.idx_vs[it->second];
+}
+
+int CollisionChecker::getNv() const { return model_.nv; }
+
+std::size_t CollisionChecker::getNumCollisionPairs() const
+{
+  return geom_model_.collisionPairs.size();
+}
+
+void CollisionChecker::setDirectionalInfo( const std::vector<double> &derivatives,
+                                           double safety_zone_threshold )
+{
+  viz_directional_derivatives_ = derivatives;
+  viz_safety_zone_threshold_ = safety_zone_threshold;
+}
+
 void CollisionChecker::publishMarkers() const
 {
   if ( !markers_pub_ )
     return;
 
   visualization_msgs::msg::MarkerArray arr;
-  arr.markers.reserve( geom_model_.geometryObjects.size() + 1 );
+  arr.markers.reserve( geom_model_.geometryObjects.size() + geom_model_.collisionPairs.size() + 4 );
   const rclcpp::Time now = node_->now();
 
   // Build a quick lookup of objects involved in "distance<=0" for coloring
@@ -300,7 +390,7 @@ void CollisionChecker::publishMarkers() const
     }
   }
 
-  // 1) Geometry markers (unchanged)
+  // 1) Geometry markers
   for ( std::size_t i = 0; i < geom_model_.geometryObjects.size(); ++i ) {
     const auto &go = geom_model_.geometryObjects[i];
     const auto &M = geom_data_.oMg[i];
@@ -369,55 +459,124 @@ void CollisionChecker::publishMarkers() const
     arr.markers.push_back( std::move( m ) );
   }
 
-  // 2) Lines between nearest points for ALL pairs (distance visualization)
-  {
-    visualization_msgs::msg::Marker lines;
-    lines.header.frame_id = "base_link";
-    lines.header.stamp = now;
-    lines.ns = "nearest_pairs";
-    lines.id = 999999; // single marker containing all segments
-    lines.type = visualization_msgs::msg::Marker::LINE_LIST;
-    lines.action = visualization_msgs::msg::Marker::ADD;
-    lines.scale.x = 0.004; // line thickness (m)
-    lines.color.r = 1.0f;
-    lines.color.g = 0.8f;
-    lines.color.b = 0.0f;
-    lines.color.a = 0.9f;
-    lines.lifetime = rclcpp::Duration::from_seconds( 0.0 );
+  // Helper to check if nearest points are valid
+  auto valid_nearest_points = []( const hpp::fcl::DistanceResult &dres ) -> bool {
+    return !dres.nearest_points[0].hasNaN() && !dres.nearest_points[1].hasNaN() &&
+           dres.nearest_points[0].allFinite() && dres.nearest_points[1].allFinite();
+  };
 
-    lines.points.reserve( geom_model_.collisionPairs.size() * 2 );
+  // Helper to create a line marker between nearest points of a pair
+  auto make_line_points = []( const hpp::fcl::DistanceResult &dres )
+      -> std::pair<geometry_msgs::msg::Point, geometry_msgs::msg::Point> {
+    geometry_msgs::msg::Point pA, pB;
+    pA.x = dres.nearest_points[0][0];
+    pA.y = dres.nearest_points[0][1];
+    pA.z = dres.nearest_points[0][2];
+    pB.x = dres.nearest_points[1][0];
+    pB.y = dres.nearest_points[1][1];
+    pB.z = dres.nearest_points[1][2];
+    return { pA, pB };
+  };
 
-    for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-      const auto &dres = geom_data_.distanceResults[k];
+  // Check if directional info is available for a given pair
+  const bool have_dir_info = !viz_directional_derivatives_.empty() &&
+                             viz_directional_derivatives_.size() == geom_model_.collisionPairs.size();
 
-      // check if nearest points are valid (no nans or infs)
-      if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
-           !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() ) {
-        RCLCPP_WARN_STREAM(
-            node_->get_logger(),
-            "Skipping invalid nearest points for pair "
-                << k << " (distance=" << dres.min_distance << "names "
-                << geom_model_.geometryObjects[geom_model_.collisionPairs[k].first].name << " - "
-                << geom_model_.geometryObjects[geom_model_.collisionPairs[k].second].name << ")" );
-        continue;
+  // 2) Distance lines — separated into namespaces by category
+  // Initialize LINE_LIST markers for each category
+  auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
+    visualization_msgs::msg::Marker m;
+    m.header.frame_id = "base_link";
+    m.header.stamp = now;
+    m.ns = ns;
+    m.id = id;
+    m.type = visualization_msgs::msg::Marker::LINE_LIST;
+    m.action = visualization_msgs::msg::Marker::ADD;
+    m.scale.x = thickness;
+    m.lifetime = rclcpp::Duration::from_seconds( 0.0 );
+    // pose defaults to identity
+    m.pose.orientation.w = 1.0;
+    return m;
+  };
+
+  // Lines for pairs outside safety zone (gray, thin)
+  visualization_msgs::msg::Marker lines_safe = make_line_marker( "distance_lines_safe", 0, 0.002 );
+  // Lines for pairs in safety zone — per-point colors used
+  visualization_msgs::msg::Marker lines_zone =
+      make_line_marker( "distance_lines_safety_zone", 0, 0.005 );
+  // Lines for pairs at/below collision padding (bright red, thick)
+  visualization_msgs::msg::Marker lines_coll =
+      make_line_marker( "distance_lines_collision", 0, 0.006 );
+
+  lines_safe.points.reserve( geom_model_.collisionPairs.size() * 2 );
+  lines_zone.points.reserve( geom_model_.collisionPairs.size() * 2 );
+  lines_zone.colors.reserve( geom_model_.collisionPairs.size() * 2 );
+  lines_coll.points.reserve( geom_model_.collisionPairs.size() * 2 );
+
+  // Default colors
+  std_msgs::msg::ColorRGBA gray;
+  gray.r = 0.5f;
+  gray.g = 0.5f;
+  gray.b = 0.5f;
+  gray.a = 0.5f;
+  std_msgs::msg::ColorRGBA bright_red;
+  bright_red.r = 1.0f;
+  bright_red.g = 0.0f;
+  bright_red.b = 0.0f;
+  bright_red.a = 1.0f;
+
+  lines_safe.color = gray;
+  lines_coll.color = bright_red;
+
+  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+    const auto &dres = geom_data_.distanceResults[k];
+    if ( !valid_nearest_points( dres ) )
+      continue;
+
+    auto [pA, pB] = make_line_points( dres );
+
+    if ( dres.min_distance <= collision_padding_ ) {
+      // Collision pair
+      lines_coll.points.push_back( pA );
+      lines_coll.points.push_back( pB );
+    } else if ( viz_safety_zone_threshold_ > 0.0 && dres.min_distance < viz_safety_zone_threshold_ ) {
+      // Safety zone pair — color by directional derivative
+      std_msgs::msg::ColorRGBA color;
+      if ( have_dir_info && !std::isnan( viz_directional_derivatives_[k] ) ) {
+        if ( viz_directional_derivatives_[k] >= 0.0 ) {
+          // Moving away: green
+          color.r = 0.0f;
+          color.g = 1.0f;
+          color.b = 0.0f;
+          color.a = 1.0f;
+        } else {
+          // Moving closer: red
+          color.r = 1.0f;
+          color.g = 0.0f;
+          color.b = 0.0f;
+          color.a = 1.0f;
+        }
+      } else {
+        // No directional info: yellow
+        color.r = 1.0f;
+        color.g = 0.8f;
+        color.b = 0.0f;
+        color.a = 0.9f;
       }
-
-      // dres.nearest_points[0] and [1] should be in the base_link frame (after placements)
-      geometry_msgs::msg::Point pA, pB;
-      pA.x = dres.nearest_points[0][0];
-      pA.y = dres.nearest_points[0][1];
-      pA.z = dres.nearest_points[0][2];
-
-      pB.x = dres.nearest_points[1][0];
-      pB.y = dres.nearest_points[1][1];
-      pB.z = dres.nearest_points[1][2];
-
-      lines.points.push_back( pA );
-      lines.points.push_back( pB );
+      lines_zone.points.push_back( pA );
+      lines_zone.colors.push_back( color );
+      lines_zone.points.push_back( pB );
+      lines_zone.colors.push_back( color );
+    } else {
+      // Safe pair (outside safety zone)
+      lines_safe.points.push_back( pA );
+      lines_safe.points.push_back( pB );
     }
-
-    arr.markers.push_back( std::move( lines ) );
   }
+
+  arr.markers.push_back( std::move( lines_safe ) );
+  arr.markers.push_back( std::move( lines_zone ) );
+  arr.markers.push_back( std::move( lines_coll ) );
 
   markers_pub_->publish( arr );
 }

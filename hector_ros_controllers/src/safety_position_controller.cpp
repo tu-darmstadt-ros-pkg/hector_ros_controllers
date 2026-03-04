@@ -152,6 +152,16 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 
   if ( collision_checker_ ) {
     collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints, false );
+
+    // Build velocity-space index mapping for directional collision scaling
+    joint_v_index_.resize( params_.joints.size(), -1 );
+    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+      joint_v_index_[i] = collision_checker_->getJointVelocityIndex( params_.joints[i] );
+      if ( joint_v_index_[i] < 0 ) {
+        RCLCPP_WARN( node->get_logger(), "Joint '%s' not found in collision model velocity space",
+                     params_.joints[i].c_str() );
+      }
+    }
   }
 
   const size_t n = params_.joints.size();
@@ -187,6 +197,10 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     return controller_interface::CallbackReturn::ERROR;
   }
   last_min_distance_ = std::numeric_limits<double>::max();
+  last_safety_zone_pairs_.clear();
+  last_distance_scale_ = 1.0;
+  last_effective_scale_ = 1.0;
+  last_worst_directional_derivative_ = std::numeric_limits<double>::max();
   if ( collision_checker_ ) {
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
@@ -397,9 +411,27 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
   }
 
   // Always apply velocity-limited stepping when collision checks are active
+  double effective_scale = distance_scale;
+  double worst_directional_derivative = std::numeric_limits<double>::max();
   if ( collision_checks_active ) {
-    apply_velocity_limits( distance_scale );
+    // Directional scaling: only slow down if moving toward any collision in safety zone
+    if ( distance_scale < 1.0 && params_.directional_collision_scaling &&
+         !last_safety_zone_pairs_.empty() ) {
+      for ( const auto &pair_info : last_safety_zone_pairs_ ) {
+        const double dir_deriv = compute_directional_derivative( pair_info.gradient );
+        worst_directional_derivative = std::min( worst_directional_derivative, dir_deriv );
+      }
+      if ( worst_directional_derivative >= 0.0 ) {
+        // ALL safety-zone pairs say motion moves away or is tangent → allow full speed
+        effective_scale = 1.0;
+      }
+      // else: at least one pair worsens → keep distance_scale
+    }
+    apply_velocity_limits( effective_scale );
   }
+  last_distance_scale_ = distance_scale;
+  last_effective_scale_ = effective_scale;
+  last_worst_directional_derivative_ = worst_directional_derivative;
 
   if ( params_.set_current_limits ) {
     success &= write_current_limits();
@@ -426,8 +458,26 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     for ( size_t i = 0; i < n; ++i ) { cc_positions_[params_.joints[i]] = cmd_positions_[i]; }
 
     if ( success_cc_setup ) {
-      const auto cc_result = collision_checker_->checkCollision( cc_positions_ );
+      // Request gradient computation when inside safety zone (or when directional scaling is on)
+      const double gradient_threshold = ( params_.directional_collision_scaling &&
+                                          last_min_distance_ < params_.collision_safety_zone )
+                                            ? params_.collision_safety_zone
+                                            : 0.0;
+      const auto cc_result = collision_checker_->checkCollision( cc_positions_, gradient_threshold );
       last_min_distance_ = cc_result.min_distance;
+      last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
+
+      // Provide directional derivative info to collision checker for visualization
+      if ( params_.debug_visualize_collisions ) {
+        const std::size_t num_pairs = collision_checker_->getNumCollisionPairs();
+        std::vector<double> per_pair_dir_derivs( num_pairs, std::numeric_limits<double>::quiet_NaN() );
+        for ( const auto &pi : last_safety_zone_pairs_ ) {
+          if ( pi.pair_index < num_pairs ) {
+            per_pair_dir_derivs[pi.pair_index] = compute_directional_derivative( pi.gradient );
+          }
+        }
+        collision_checker_->setDirectionalInfo( per_pair_dir_derivs, params_.collision_safety_zone );
+      }
 
       if ( !cc_result.in_collision ) {
         write_position_commands( cmd_positions_ );
@@ -512,12 +562,17 @@ void SafetyPositionController::enforce_limits()
 
 void SafetyPositionController::apply_velocity_limits( const double distance_scale )
 {
+  // distance_scale: 1.0 → full speed, 0.0 → stop; can be used to smoothly reduce speed when close to collisions
   const double clamped_scale = std::clamp( distance_scale, 0.0, 1.0 );
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( !std::isnan( velocity_limits_[i] ) ) {
       // shortest signed distance from current -> command
       const double diff = get_signed_distance( current_positions_[i], cmd_positions_[i] );
       const double max_step = max_allowed_distance_per_cycle_[i] * clamped_scale;
+
+      // RCLCPP_INFO( get_node()->get_logger(),
+      //             "Joint '%s': distance=%.4f, max_step=%.4f, scale=%.3f",
+      //             params_.joints[i].c_str(), diff, max_step, clamped_scale );
 
       if ( std::abs( diff ) > max_step ) {
         RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
@@ -535,6 +590,26 @@ void SafetyPositionController::apply_velocity_limits( const double distance_scal
       }
     }
   }
+}
+
+double SafetyPositionController::compute_directional_derivative( const Eigen::VectorXd &gradient ) const
+{
+  double dot_product = 0.0;
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    if ( joint_v_index_[i] < 0 || joint_v_index_[i] >= gradient.size() )
+      continue;
+
+    // For continuous joints, use shortest-path angular distance
+    double delta_q_i;
+    if ( kinds_[i] == JointType::CONTINUOUS ) {
+      delta_q_i = get_signed_distance( current_positions_[i], cmd_positions_[i] );
+    } else {
+      delta_q_i = cmd_positions_[i] - current_positions_[i];
+    }
+
+    dot_product += gradient[joint_v_index_[i]] * delta_q_i;
+  }
+  return dot_product;
 }
 
 bool SafetyPositionController::write_current_limits()
@@ -771,6 +846,11 @@ void SafetyPositionController::publish_status()
   msg.collision_check_enabled = params_.check_self_collisions;
   msg.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
   msg.position_limits_enforced = params_.enforce_position_limits;
+  msg.min_collision_distance = last_min_distance_;
+  msg.distance_scale = last_distance_scale_;
+  msg.effective_scale = last_effective_scale_;
+  msg.worst_directional_derivative = last_worst_directional_derivative_;
+  msg.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
   status_pub_->publish( msg );
 }
 

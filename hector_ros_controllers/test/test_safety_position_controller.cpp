@@ -1095,6 +1095,238 @@ TEST_F( SafetyPositionControllerCollisionTest, DistanceScaleZeroHoldsPosition )
 }
 
 // ============================================================================
+// Directional Collision Scaling Tests
+// ============================================================================
+
+TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_AwayNotScaled )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // Set last_min_distance_ halfway in safety zone -> distance_scale = 0.5
+  controller_->last_min_distance_ = 0.025;
+
+  // Create a fake safety zone pair with a gradient that says joint1 positive = moving away
+  CollisionResult::PairInfo fake_pair;
+  fake_pair.pair_index = 0;
+  fake_pair.distance = 0.025;
+  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
+  // Gradient: positive for joint1's velocity index means positive motion increases distance
+  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
+  ASSERT_GE( v_idx_j1, 0 );
+  fake_pair.gradient[v_idx_j1] = 1.0; // moving joint1 positively moves AWAY
+  controller_->last_safety_zone_pairs_ = { fake_pair };
+
+  // Current position: all zero
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // Command positive joint1 motion (away from collision)
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // Since motion is away from collision, effective_scale should be 1.0 (not 0.5)
+  // max_step = velocity_limit / update_rate * block_velocity_scaling * 1.0
+  // = 1.0 / 100 * 3.0 = 0.03
+  double full_max_step = 1.0 / kUpdateRate * 3.0;
+  EXPECT_NEAR( hw_cmd_values_[0], full_max_step, 1e-6 )
+      << "Motion away from collision should not be scaled down";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_TowardIsScaled )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // Set last_min_distance_ halfway in safety zone -> distance_scale = 0.5
+  controller_->last_min_distance_ = 0.025;
+
+  // Create a fake safety zone pair: joint1 positive = moving TOWARD collision
+  CollisionResult::PairInfo fake_pair;
+  fake_pair.pair_index = 0;
+  fake_pair.distance = 0.025;
+  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
+  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
+  ASSERT_GE( v_idx_j1, 0 );
+  fake_pair.gradient[v_idx_j1] = -1.0; // moving joint1 positively moves TOWARD collision
+  controller_->last_safety_zone_pairs_ = { fake_pair };
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5; // positive = toward collision
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // Motion toward collision -> effective_scale = distance_scale = 0.5
+  double full_max_step = 1.0 / kUpdateRate * 3.0;
+  double expected_step = full_max_step * 0.5;
+  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
+      << "Motion toward collision should be scaled down";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_AtPaddingCanEscape )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // At collision padding: distance_scale = 0.0
+  controller_->last_min_distance_ = 0.0;
+
+  // Create a safety zone pair: moving joint1 positive = AWAY from collision
+  CollisionResult::PairInfo fake_pair;
+  fake_pair.pair_index = 0;
+  fake_pair.distance = 0.0;
+  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
+  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
+  ASSERT_GE( v_idx_j1, 0 );
+  fake_pair.gradient[v_idx_j1] = 1.0; // away
+  controller_->last_safety_zone_pairs_ = { fake_pair };
+
+  setStateValue( "joint1", 0.3 );
+  setStateValue( "joint2", 0.0 );
+  setStateValue( "joint3", 0.0 );
+
+  // Command motion away
+  controller_->reference_interfaces_[0] = 0.5; // away from collision
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // Even though distance_scale=0, directional scaling overrides to 1.0
+  // because motion is away from collision
+  double full_max_step = 1.0 / kUpdateRate * 3.0;
+  double expected_cmd = 0.3 + full_max_step; // current + max step
+  EXPECT_NEAR( hw_cmd_values_[0], expected_cmd, 1e-6 )
+      << "Robot should be able to escape when moving away from collision at padding boundary";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_TwoPairsOneWorsening )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  controller_->last_min_distance_ = 0.025;
+
+  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
+  ASSERT_GE( v_idx_j1, 0 );
+  int nv = controller_->collision_checker_->getNv();
+
+  // Pair 1: joint1 positive = AWAY
+  CollisionResult::PairInfo pair1;
+  pair1.pair_index = 0;
+  pair1.distance = 0.025;
+  pair1.gradient = Eigen::VectorXd::Zero( nv );
+  pair1.gradient[v_idx_j1] = 1.0; // away
+
+  // Pair 2: joint1 positive = TOWARD
+  CollisionResult::PairInfo pair2;
+  pair2.pair_index = 1;
+  pair2.distance = 0.03;
+  pair2.gradient = Eigen::VectorXd::Zero( nv );
+  pair2.gradient[v_idx_j1] = -0.5; // toward
+
+  controller_->last_safety_zone_pairs_ = { pair1, pair2 };
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // One pair says away, one says toward → worst case is toward → scaling applied
+  double full_max_step = 1.0 / kUpdateRate * 3.0;
+  double expected_step = full_max_step * 0.5; // distance_scale = 0.5
+  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
+      << "With any pair worsening, motion should be scaled conservatively";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_DisabledByParam )
+{
+  // Use custom init with directional_collision_scaling = false
+  auto cj = controlled_joints_;
+  const auto urdf = hector_test::loadUrdfFile( "test_robot_collision.urdf" );
+
+  controller_interface::ControllerInterfaceParams params;
+  params.controller_name = "test_safety_position_cc";
+  params.robot_description = urdf;
+  params.update_rate = kUpdateRate;
+  params.controller_manager_update_rate = kUpdateRate;
+  params.node_namespace = "";
+
+  rclcpp::NodeOptions opts;
+  opts.parameter_overrides( {
+      rclcpp::Parameter( "joints", cj ),
+      rclcpp::Parameter( "unwrap_continuous_joints", true ),
+      rclcpp::Parameter( "enforce_position_limits", true ),
+      rclcpp::Parameter( "check_self_collisions", true ),
+      rclcpp::Parameter( "block_velocity_scaling", 3.0 ),
+      rclcpp::Parameter( "collision_safety_zone", 0.05 ),
+      rclcpp::Parameter( "set_current_limits", false ),
+      rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
+      rclcpp::Parameter( "safety_bypass_joint_limit_tolerance", 0.03 ),
+      rclcpp::Parameter( "publish_debug_joint_states", false ),
+      rclcpp::Parameter( "collision_padding", 0.0 ),
+      rclcpp::Parameter( "collision_cache_epsilon", 0.0 ),
+      rclcpp::Parameter( "debug_visualize_collisions", false ),
+      rclcpp::Parameter( "directional_collision_scaling", false ),
+  } );
+  params.node_options = opts;
+
+  auto result = controller_->init( params );
+  ASSERT_EQ( result, controller_interface::return_type::OK );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  controller_->last_min_distance_ = 0.025;
+
+  // Even with gradient saying "away", scaling should still be applied (param disabled)
+  CollisionResult::PairInfo fake_pair;
+  fake_pair.pair_index = 0;
+  fake_pair.distance = 0.025;
+  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
+  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
+  fake_pair.gradient[v_idx_j1] = 1.0; // away
+  controller_->last_safety_zone_pairs_ = { fake_pair };
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // With directional scaling disabled, should use distance_scale=0.5 even though moving away
+  double full_max_step = 1.0 / kUpdateRate * 3.0;
+  double expected_step = full_max_step * 0.5;
+  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
+      << "With directional scaling disabled, should always use distance-based scale";
+}
+
+// ============================================================================
 // main
 // ============================================================================
 

@@ -186,6 +186,14 @@ private:
    */
   bool wait_for_srdf();
 
+  /**
+   * @brief Compute the directional derivative of collision distance along the
+   * commanded motion direction for a given gradient vector.
+   * @param gradient dd/dv vector (size model_.nv) from CollisionChecker
+   * @return dot product (positive = moving away from collision)
+   */
+  double compute_directional_derivative( const Eigen::VectorXd &gradient ) const;
+
   void publish_debug_joint_state_in();
   void publish_debug_joint_state_out( const std::vector<double> &positions );
   void update_debug_publishers( bool enable );
@@ -225,6 +233,14 @@ private:
   bool srdf_received_ = false;                           ///< latched SRDF received
   double last_min_distance_{
       std::numeric_limits<double>::max() }; ///< previous cycle's min collision distance
+
+  // ---- Directional collision scaling ----
+  std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
+  std::vector<CollisionResult::PairInfo>
+      last_safety_zone_pairs_; ///< safety-zone pairs from previous collision check
+  double last_distance_scale_{ 1.0 };
+  double last_effective_scale_{ 1.0 };
+  double last_worst_directional_derivative_{ std::numeric_limits<double>::max() };
 
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> cmd_positions_;     ///< post-enforcement commands
