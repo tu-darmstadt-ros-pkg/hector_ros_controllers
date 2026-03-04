@@ -18,7 +18,7 @@
 #include <limits>
 #include <unordered_map>
 
-// #define SAFETY_CC_ENABLE_TIMING
+#define SAFETY_CC_ENABLE_TIMING // TODO: remove when no longer needed for optimization
 
 /// Result of a collision query: collision flag + minimum clearance.
 struct CollisionResult {
@@ -136,7 +136,7 @@ private:
    * @param pair_k index into geom_model_.collisionPairs
    * @return gradient vector of size model_.nv
    */
-  Eigen::VectorXd computePairGradient( std::size_t pair_k ) const;
+  Eigen::VectorXd computePairGradient( std::size_t pair_k );
 
   /**
    * @brief Publish geometry and nearest-point markers with namespace-separated categories.
@@ -171,9 +171,22 @@ private:
   std::vector<double> viz_directional_derivatives_; ///< one per collision pair; NaN = no info
   double viz_safety_zone_threshold_{ 0.0 };
 
+  // Pre-allocated Jacobian workspace (sized in initFromXml)
+  Eigen::MatrixXd J1_workspace_; ///< 6 × nv
+  Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+
 #ifdef SAFETY_CC_ENABLE_TIMING
-  double sum_timings_{ 0.0 };
-  int n_timings_{ 0 };
+  struct TimingStats {
+    double fk_us{ 0 };
+    double placement_us{ 0 };
+    double distance_us{ 0 };
+    double jacobian_us{ 0 };
+    double gradient_us{ 0 };
+    double total_us{ 0 };
+    int count{ 0 };
+    std::size_t num_safety_zone_pairs{ 0 };
+  };
+  TimingStats timing_stats_;
 #endif
 };
 

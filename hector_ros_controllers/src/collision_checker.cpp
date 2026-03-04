@@ -55,6 +55,11 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     }
     // Filter collision pairs based on controlled joints
     filterCollisionPairs( controlled_joints );
+
+    // Pre-allocate Jacobian workspace matrices
+    J1_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
+    J2_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
+
     return true;
   } catch ( const std::exception &e ) {
     RCLCPP_ERROR( node_->get_logger(), "CollisionChecker init failed: %s", e.what() );
@@ -184,7 +189,7 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
 {
 #ifdef SAFETY_CC_ENABLE_TIMING
   using clock = std::chrono::steady_clock;
-  const auto t_begin = clock::now();
+  const auto t0 = clock::now();
 #endif
 
   if ( q.size() != model_.nq ) {
@@ -202,25 +207,41 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
 
   // Kinematics + placements
   pinocchio::forwardKinematics( model_, data_, q );
+#ifdef SAFETY_CC_ENABLE_TIMING
+  const auto t_fk = clock::now();
+#endif
   pinocchio::updateGeometryPlacements( model_, data_, geom_model_, geom_data_ );
+#ifdef SAFETY_CC_ENABLE_TIMING
+  const auto t_placement = clock::now();
+#endif
 
-  // Configure distance queries: nearest points + GJK guess caching
-  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-    auto &dreq = geom_data_.distanceRequests[k];
-    dreq.enable_nearest_points = true;
-  }
-
-  // Distance pass (fills distanceResults + caches)
+  // --- Pass 1: distances only (no nearest points) ---
+  // When debug visualization is active, compute nearest points for ALL pairs in a single pass
+  // instead of two-pass (debug mode is not performance-critical).
+  const bool single_pass = pub_debug_geometry_;
+  for ( auto &dreq : geom_data_.distanceRequests ) { dreq.enable_nearest_points = single_pass; }
   pinocchio::computeDistances( geom_model_, geom_data_ );
 
-  // Iterate ALL pairs to find the global minimum distance
+#ifdef SAFETY_CC_ENABLE_TIMING
+  const auto t_distance = clock::now();
+#endif
+
+  // Find global minimum and identify safety-zone pairs
   double global_min_distance = std::numeric_limits<double>::max();
   bool logged_collision = false;
+  bool has_safety_zone_pairs = false;
+  std::vector<std::size_t> safety_zone_indices;
+
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
     const auto &dres = geom_data_.distanceResults[k];
 
     if ( dres.min_distance < global_min_distance ) {
       global_min_distance = dres.min_distance;
+    }
+
+    if ( safety_zone_threshold > 0.0 && dres.min_distance < safety_zone_threshold ) {
+      has_safety_zone_pairs = true;
+      safety_zone_indices.push_back( k );
     }
 
     if ( dres.min_distance <= collision_padding_ && !logged_collision ) {
@@ -236,35 +257,77 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
     }
   }
 
+  // --- Pass 2: recompute only safety-zone pairs with nearest points (for gradients) ---
+  if ( !single_pass && has_safety_zone_pairs ) {
+    for ( const std::size_t k : safety_zone_indices ) {
+      geom_data_.distanceRequests[k].enable_nearest_points = true;
+      geom_data_.distanceResults[k].clear();
+      pinocchio::computeDistance( geom_model_, geom_data_, k );
+    }
+  }
+
   CollisionResult result;
   result.in_collision = ( global_min_distance <= collision_padding_ );
   result.min_distance = global_min_distance;
 
-  // Compute per-pair distance gradients for all pairs within the safety zone
-  if ( safety_zone_threshold > 0.0 ) {
-    // Compute all joint Jacobians (reuses FK already done above)
+  // Compute per-pair distance gradients (lazy: only if pairs actually exist in safety zone)
+  if ( has_safety_zone_pairs ) {
     pinocchio::computeJointJacobians( model_, data_ );
 
-    for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-      const auto &dres = geom_data_.distanceResults[k];
-      if ( dres.min_distance < safety_zone_threshold ) {
-        CollisionResult::PairInfo info;
-        info.pair_index = k;
-        info.distance = dres.min_distance;
-        info.gradient = computePairGradient( k );
-        result.safety_zone_pairs.push_back( std::move( info ) );
-      }
+#ifdef SAFETY_CC_ENABLE_TIMING
+    const auto t_jacobian = clock::now();
+#endif
+
+    for ( const std::size_t k : safety_zone_indices ) {
+      CollisionResult::PairInfo info;
+      info.pair_index = k;
+      info.distance = geom_data_.distanceResults[k].min_distance;
+      info.gradient = computePairGradient( k );
+      result.safety_zone_pairs.push_back( std::move( info ) );
     }
+
+#ifdef SAFETY_CC_ENABLE_TIMING
+    const auto t_gradient = clock::now();
+    timing_stats_.jacobian_us +=
+        static_cast<double>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>( t_jacobian - t_distance ).count() ) /
+        1000.0;
+    timing_stats_.gradient_us +=
+        static_cast<double>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>( t_gradient - t_jacobian ).count() ) /
+        1000.0;
+#endif
   }
 
 #ifdef SAFETY_CC_ENABLE_TIMING
   const auto t_end = clock::now();
-  const auto us = std::chrono::duration_cast<std::chrono::microseconds>( t_end - t_begin ).count();
-  sum_timings_ += static_cast<double>( us );
-  n_timings_++;
-  RCLCPP_INFO_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
-                        "[CC timing] checkCollisionQ (distances) avg = %.3f µs (pairs=%zu)",
-                        sum_timings_ / n_timings_, geom_model_.collisionPairs.size() );
+  timing_stats_.fk_us +=
+      static_cast<double>( std::chrono::duration_cast<std::chrono::nanoseconds>( t_fk - t0 ).count() ) /
+      1000.0;
+  timing_stats_.placement_us +=
+      static_cast<double>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>( t_placement - t_fk ).count() ) /
+      1000.0;
+  timing_stats_.distance_us +=
+      static_cast<double>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>( t_distance - t_placement ).count() ) /
+      1000.0;
+  timing_stats_.total_us +=
+      static_cast<double>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>( t_end - t0 ).count() ) /
+      1000.0;
+  timing_stats_.num_safety_zone_pairs += safety_zone_indices.size();
+  timing_stats_.count++;
+  RCLCPP_INFO_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 2000,
+      "[CC timing] avg total=%.1f µs (FK=%.1f, placement=%.1f, dist=%.1f, "
+      "jac=%.1f, grad=%.1f) pairs=%zu, zone_pairs=%.1f",
+      timing_stats_.total_us / timing_stats_.count, timing_stats_.fk_us / timing_stats_.count,
+      timing_stats_.placement_us / timing_stats_.count,
+      timing_stats_.distance_us / timing_stats_.count,
+      timing_stats_.jacobian_us / timing_stats_.count,
+      timing_stats_.gradient_us / timing_stats_.count, geom_model_.collisionPairs.size(),
+      static_cast<double>( timing_stats_.num_safety_zone_pairs ) / timing_stats_.count );
 #endif
 
   last_collision_result_ = result;
@@ -291,7 +354,7 @@ void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
   collision_cache_epsilon_ = epsilon;
 }
 
-Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k ) const
+Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
 {
   Eigen::VectorXd grad = Eigen::VectorXd::Zero( model_.nv );
 
@@ -307,11 +370,11 @@ Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k ) cons
   const pinocchio::JointIndex j1 = geom_model_.geometryObjects[cp.first].parentJoint;
   const pinocchio::JointIndex j2 = geom_model_.geometryObjects[cp.second].parentJoint;
 
-  // Get 6×nv Jacobians in LOCAL_WORLD_ALIGNED frame
-  Eigen::MatrixXd J1 = Eigen::MatrixXd::Zero( 6, model_.nv );
-  Eigen::MatrixXd J2 = Eigen::MatrixXd::Zero( 6, model_.nv );
-  pinocchio::getJointJacobian( model_, data_, j1, pinocchio::LOCAL_WORLD_ALIGNED, J1 );
-  pinocchio::getJointJacobian( model_, data_, j2, pinocchio::LOCAL_WORLD_ALIGNED, J2 );
+  // Get 6×nv Jacobians in LOCAL_WORLD_ALIGNED frame (reuse pre-allocated workspace)
+  J1_workspace_.setZero();
+  J2_workspace_.setZero();
+  pinocchio::getJointJacobian( model_, data_, j1, pinocchio::LOCAL_WORLD_ALIGNED, J1_workspace_ );
+  pinocchio::getJointJacobian( model_, data_, j2, pinocchio::LOCAL_WORLD_ALIGNED, J2_workspace_ );
 
   // Nearest points in world frame
   const Eigen::Vector3d p1 = dres.nearest_points[0];
@@ -321,10 +384,6 @@ Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k ) cons
   const Eigen::Vector3d r1 = p1 - data_.oMi[j1].translation();
   const Eigen::Vector3d r2 = p2 - data_.oMi[j2].translation();
 
-  // Point Jacobians: J_pt = J_linear - skew(r) * J_angular
-  const Eigen::MatrixXd Jp1 = J1.topRows( 3 ) - pinocchio::skew( r1 ) * J1.bottomRows( 3 );
-  const Eigen::MatrixXd Jp2 = J2.topRows( 3 ) - pinocchio::skew( r2 ) * J2.bottomRows( 3 );
-
   // Direction vector: from p1 to p2 (positive distance direction)
   const Eigen::Vector3d diff = p2 - p1;
   const double dist_norm = diff.norm();
@@ -333,7 +392,13 @@ Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k ) cons
   }
   const Eigen::Vector3d n = diff / dist_norm;
 
-  // Distance gradient: dd/dv = n^T * (Jp2 - Jp1)
+  // Point Jacobians and gradient: dd/dv = n^T * (Jp2 - Jp1)
+  // where Jp = J_linear - skew(r) * J_angular
+  const Eigen::MatrixXd Jp1 =
+      J1_workspace_.topRows( 3 ) - pinocchio::skew( r1 ) * J1_workspace_.bottomRows( 3 );
+  const Eigen::MatrixXd Jp2 =
+      J2_workspace_.topRows( 3 ) - pinocchio::skew( r2 ) * J2_workspace_.bottomRows( 3 );
+
   grad = ( n.transpose() * ( Jp2 - Jp1 ) ).transpose();
   return grad;
 }

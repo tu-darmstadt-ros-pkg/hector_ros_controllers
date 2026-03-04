@@ -140,6 +140,15 @@ if(BUILD_TESTING)
     safety_forward_controller_parameters
     safety_position_controller_parameters)
 
+  ament_add_gmock(test_collision_checker test/test_collision_checker.cpp)
+  target_include_directories(
+    test_collision_checker PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                   ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_collision_checker ${PROJECT_NAME}::controllers_test_doubles
+    ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_collision_checker PRIVATE ${DEFS})
+
   ament_add_gmock(test_safety_forward_controller
                   test/test_safety_forward_controller.cpp)
   target_include_directories(

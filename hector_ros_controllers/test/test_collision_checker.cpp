@@ -28,6 +28,7 @@
 
 #include "pinocchio/collision/distance.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <random>
@@ -502,12 +503,14 @@ TEST_F( CollisionCheckerTest, GradientSignRetreating )
   auto checker = makeChecker();
   const double safety_zone = 1.0;
 
-  // Near collision config: joint2 folded close to PI
+  // Near collision but NOT penetrating: joint2 folded partway
   std::unordered_map<std::string, double> positions = {
-      { "joint1", 0.0 }, { "joint2", 2.5 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+      { "joint1", 0.0 }, { "joint2", 2.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
   auto result = checker->checkCollision( positions, safety_zone );
   ASSERT_FALSE( result.safety_zone_pairs.empty() );
+  ASSERT_GT( result.min_distance, 0.0 )
+      << "Config must be non-penetrating for gradient to be valid";
 
   const auto &gradient = result.safety_zone_pairs[0].gradient;
   int v_idx_j2 = checker->getJointVelocityIndex( "joint2" );
@@ -533,9 +536,9 @@ TEST_F( CollisionCheckerTest, GradientComputedForAllSafetyZonePairs )
   auto checker = makeChecker();
   const double safety_zone = 2.0; // very large to capture all pairs
 
-  // Configuration with multiple pairs relatively close
+  // Configuration with multiple pairs relatively close but NOT penetrating
   std::unordered_map<std::string, double> positions = {
-      { "joint1", 0.0 }, { "joint2", 1.5 }, { "joint3", -0.5 }, { "joint4", 0.0 } };
+      { "joint1", 0.0 }, { "joint2", 0.8 }, { "joint3", -0.3 }, { "joint4", 0.0 } };
 
   auto result = checker->checkCollision( positions, safety_zone );
 
@@ -543,12 +546,18 @@ TEST_F( CollisionCheckerTest, GradientComputedForAllSafetyZonePairs )
   EXPECT_GE( result.safety_zone_pairs.size(), 1u )
       << "Expected at least 1 pair in safety zone with threshold=" << safety_zone;
 
-  // Each pair should have a non-empty gradient
+  // Each pair should have a non-empty gradient vector
+  std::size_t non_zero_gradient_count = 0;
   for ( const auto &pi : result.safety_zone_pairs ) {
     EXPECT_GT( pi.gradient.size(), 0 ) << "Pair " << pi.pair_index << " has empty gradient";
-    // Gradient should not be all zeros (would mean no joint affects this pair)
-    EXPECT_GT( pi.gradient.norm(), 0.0 ) << "Pair " << pi.pair_index << " gradient is zero vector";
+    if ( pi.gradient.norm() > 0.0 ) {
+      non_zero_gradient_count++;
+    }
+    // Note: some pairs may have zero gradient if both bodies share the same parent joint
+    // (distance between them is invariant to any joint motion), or if they are penetrating.
   }
+  // At least one pair should have a non-zero gradient
+  EXPECT_GT( non_zero_gradient_count, 0u ) << "Expected at least one pair with non-zero gradient";
 }
 
 // ---- Test 16: No gradient when threshold is zero ----
@@ -583,6 +592,49 @@ TEST_F( CollisionCheckerTest, VelocitySpaceHelpers )
     int idx = checker->getJointVelocityIndex( name );
     EXPECT_TRUE( indices.insert( idx ).second ) << "Duplicate velocity index for " << name;
   }
+}
+
+// ---- Test 18: Performance benchmark ----
+TEST_F( CollisionCheckerTest, PerformanceBenchmark )
+{
+  auto checker = makeChecker();
+  const double safety_zone = 0.05; // realistic threshold
+
+  std::mt19937 rng( 123 );
+  std::uniform_real_distribution<double> dist( -M_PI, M_PI );
+
+  // Pre-generate configs
+  constexpr int N = 1000;
+  std::vector<std::unordered_map<std::string, double>> configs( N );
+  for ( int i = 0; i < N; ++i ) {
+    configs[i] = { { "joint1", dist( rng ) },
+                   { "joint2", dist( rng ) },
+                   { "joint3", dist( rng ) },
+                   { "joint4", dist( rng ) } };
+  }
+
+  // Warm up
+  for ( int i = 0; i < 10; ++i ) { checker->checkCollision( configs[i], safety_zone ); }
+
+  // Benchmark
+  auto t0 = std::chrono::steady_clock::now();
+  std::size_t total_safety_pairs = 0;
+  for ( int i = 0; i < N; ++i ) {
+    auto result = checker->checkCollision( configs[i], safety_zone );
+    total_safety_pairs += result.safety_zone_pairs.size();
+  }
+  auto t1 = std::chrono::steady_clock::now();
+
+  const double elapsed_us =
+      static_cast<double>( std::chrono::duration_cast<std::chrono::microseconds>( t1 - t0 ).count() );
+  const double avg_us = elapsed_us / static_cast<double>( N );
+
+  std::cout << "[Benchmark] avg checkCollision: " << avg_us << " us"
+            << " | pairs: " << checker->getNumCollisionPairs() << " | avg safety_zone_pairs: "
+            << ( static_cast<double>( total_safety_pairs ) / static_cast<double>( N ) ) << std::endl;
+
+  // Soft assertion: should complete within 10ms per call
+  EXPECT_LT( avg_us, 10000.0 ) << "Collision check too slow";
 }
 
 int main( int argc, char **argv )
