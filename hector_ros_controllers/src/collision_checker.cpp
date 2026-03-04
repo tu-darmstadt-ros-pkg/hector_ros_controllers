@@ -228,7 +228,7 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
 
   // Find global minimum and identify safety-zone pairs
   double global_min_distance = std::numeric_limits<double>::max();
-  bool logged_collision = false;
+  std::size_t min_distance_pair = 0;
   bool has_safety_zone_pairs = false;
   std::vector<std::size_t> safety_zone_indices;
 
@@ -237,24 +237,25 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
 
     if ( dres.min_distance < global_min_distance ) {
       global_min_distance = dres.min_distance;
+      min_distance_pair = k;
     }
 
     if ( safety_zone_threshold > 0.0 && dres.min_distance < safety_zone_threshold ) {
       has_safety_zone_pairs = true;
       safety_zone_indices.push_back( k );
     }
+  }
 
-    if ( dres.min_distance <= collision_padding_ && !logged_collision ) {
-      logged_collision = true;
-      const auto &cp = geom_model_.collisionPairs[k];
-      const auto &o1 = geom_model_.geometryObjects[cp.first];
-      const auto &o2 = geom_model_.geometryObjects[cp.second];
-      RCLCPP_WARN_STREAM_THROTTLE( node_->get_logger(), *node_->get_clock(), 1000,
-                                   "Collision (or contact) distance "
-                                       << dres.min_distance << " between "
-                                       << model_.frames[o1.parentFrame].name << " and "
-                                       << model_.frames[o2.parentFrame].name );
-    }
+  // Log collision outside the hot loop (throttled)
+  if ( global_min_distance <= collision_padding_ ) {
+    const auto &cp = geom_model_.collisionPairs[min_distance_pair];
+    const auto &o1 = geom_model_.geometryObjects[cp.first];
+    const auto &o2 = geom_model_.geometryObjects[cp.second];
+    RCLCPP_WARN_STREAM_THROTTLE( node_->get_logger(), *node_->get_clock(), 1000,
+                                 "Collision (or contact) distance "
+                                     << global_min_distance << " between "
+                                     << model_.frames[o1.parentFrame].name << " and "
+                                     << model_.frames[o2.parentFrame].name );
   }
 
   // --- Pass 2: recompute only safety-zone pairs with nearest points (for gradients) ---

@@ -18,7 +18,7 @@
 #include <limits>
 #include <unordered_map>
 
-#define SAFETY_CC_ENABLE_TIMING // TODO: remove when no longer needed for optimization
+// #define SAFETY_CC_ENABLE_TIMING // TODO: remove when no longer needed for optimization
 
 /// Result of a collision query: collision flag + minimum clearance.
 struct CollisionResult {

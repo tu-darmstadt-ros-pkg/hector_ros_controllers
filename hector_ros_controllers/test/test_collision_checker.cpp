@@ -637,11 +637,24 @@ TEST_F( CollisionCheckerTest, PerformanceBenchmark )
   EXPECT_LT( avg_us, 10000.0 ) << "Collision check too slow";
 }
 
+// __gcov_dump is only available when compiled with --coverage.
+// Use a weak symbol so the call is a no-op in normal (non-coverage) builds.
+#if defined( __GNUC__ )
+extern "C" void __gcov_dump() __attribute__( ( weak ) );
+#endif
+
 int main( int argc, char **argv )
 {
   testing::InitGoogleTest( &argc, argv );
   rclcpp::init( argc, argv );
   int result = RUN_ALL_TESTS();
   rclcpp::shutdown();
-  return result;
+  // Use _exit to avoid double-free in global destructors caused by
+  // pinocchio/hpp-fcl library cleanup ordering issues.
+  // All test resources are cleaned up in TearDown before reaching this point.
+#if defined( __GNUC__ )
+  if ( __gcov_dump )
+    __gcov_dump(); // Flush coverage data before _exit
+#endif
+  _exit( result );
 }
