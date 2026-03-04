@@ -3,7 +3,8 @@ namespace waypoint_controller
 {
 MoveCommand SimpleWaypointController::computeCommand( const Waypoint &goal, const Pose &pose,
                                                       const double &curr_linear_vel,
-                                                      const double &curr_angular_vel )
+                                                      const double &curr_angular_vel,
+                                                      const bool &is_final_goal )
 {
   MoveCommand cmd;
 

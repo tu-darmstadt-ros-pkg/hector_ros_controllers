@@ -8,7 +8,7 @@ namespace waypoint_controller
 class SimpleWaypointController : public waypoint_controller::WaypointControllerBase
 {
   MoveCommand computeCommand( const Waypoint &goal, const Pose &pose, const double &curr_linear_vel,
-                              const double &curr_angular_vel ) override;
+                              const double &curr_angular_vel, const bool &is_final_goal ) override;
 };
 
 } // namespace waypoint_controller

@@ -106,8 +106,8 @@ public:
 
 protected:
   virtual MoveCommand computeCommand( const Waypoint &goal, const Pose &pose,
-                                      const double &curr_linear_vel,
-                                      const double &curr_angular_vel ) = 0;
+                                      const double &curr_linear_vel, const double &curr_angular_vel,
+                                      const bool &is_final_goal ) = 0;
 
   virtual bool check_goal_completion( const Waypoint &goal, const Pose &pose, bool is_final_goal );
 

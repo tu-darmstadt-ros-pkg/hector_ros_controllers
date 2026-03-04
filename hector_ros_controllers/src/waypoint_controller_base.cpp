@@ -391,7 +391,7 @@ WaypointControllerBase::update( const rclcpp::Time & /*time*/, const rclcpp::Dur
 
   if ( check_goal_completion( current_goal_, *current_pose_.readFromRT(),
                               current_goal_idx_ ==
-                                  active_trajectory_->waypoint_trajectory.size() - 1 ) ) {
+                                  ( active_trajectory_->waypoint_trajectory.size() - 1 ) ) ) {
     current_goal_idx_ += 1;
 
     if ( current_goal_idx_ == active_trajectory_->waypoint_trajectory.size() ) {
@@ -413,7 +413,9 @@ WaypointControllerBase::update( const rclcpp::Time & /*time*/, const rclcpp::Dur
     }
   }
 
-  const auto velCmd = computeCommand( current_goal_, *current_pose_.readFromRT(), 0.0, 0.0 );
+  const auto velCmd =
+      computeCommand( current_goal_, *current_pose_.readFromRT(), 0.0, 0.0,
+                      current_goal_idx_ == ( active_trajectory_->waypoint_trajectory.size() - 1 ) );
 
   bool success = set_base_velocities( velCmd );
   if ( !success ) {
