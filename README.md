@@ -30,7 +30,18 @@ A **safety layer for joint position commands**, usable both
     * Returns minimum pairwise clearance distance, not just a binary collision flag.
     * When `check_self_collisions` is enabled, per-cycle joint motion is automatically limited based on URDF velocity limits (`block_velocity_scaling`) and **scaled down proportionally** as the robot approaches collision geometry.
     * **Safety zone**: Between `collision_padding` and `collision_safety_zone`, velocity is linearly interpolated from 0% to 100%. Beyond `collision_safety_zone`, full velocity is allowed. At or below `collision_padding`, motion is blocked entirely.
+    * **Directional scaling** (`directional_collision_scaling`): When enabled, the controller computes collision distance gradients w.r.t. joint velocities for all pairs within the safety zone. Only motions that *decrease* a collision distance are slowed down — motions moving away from all collisions proceed at full speed. This prevents the robot from becoming trapped near collisions. The check is conservative: if *any* safety-zone pair's distance would decrease, the full distance-based scaling is applied.
     * This replaces the former `block_if_too_far` parameter with a mandatory, distance-aware velocity limiting system.
+* **Collision debug visualization** (RViz markers):
+
+    * When `debug_visualize_collisions` is enabled, publishes `MarkerArray` on `~/debug_collision_geometry` with separate namespaces for toggling in RViz:
+        * `collision_geometry` — all collision geometry objects (gray = safe, red = colliding).
+        * `distance_lines_safe` — nearest-point lines for pairs outside the safety zone (gray).
+        * `distance_lines_safety_zone` — nearest-point lines for safety-zone pairs, colored per-pair: green = motion increases distance, red = motion decreases distance, yellow = no directional info.
+        * `distance_lines_collision` — nearest-point lines for colliding pairs (bright red, thicker).
+* **Status topic** (`~/status`):
+
+    * Publishes `SafetyPositionControllerStatus` (latched) with diagnostic fields: `min_collision_distance`, `distance_scale`, `effective_scale`, `worst_directional_derivative`, `num_pairs_in_safety_zone`, plus safety bypass, E-stop, and mode flags.
 * **E-Stop**:
 
     * Subscribes to `~/safety_estop` (`std_msgs/Bool`).
@@ -60,9 +71,10 @@ A **safety layer for joint position commands**, usable both
 | `check_self_collisions`            | `bool`     | `true`  | If `true`, performs self-collision checks and enables distance-based velocity scaling.                               |
 | `collision_padding`                | `double`   | `0.0`   | Minimum allowed link-to-link distance [m]; distances ≤ padding are treated as collision.                            |
 | `collision_safety_zone`            | `double`   | `0.05`  | Outer safety zone distance [m]. Between `collision_padding` and this value, velocity is linearly scaled down. Must be > `collision_padding`. |
+| `directional_collision_scaling`    | `bool`     | `true`  | If `true`, velocity scaling near collisions is direction-aware: only motions that decrease any collision distance in the safety zone are slowed down. Motions moving away proceed at full speed. Requires `check_self_collisions`. |
 | `collision_cache_epsilon`          | `double`   | `1e-6`  | Threshold for reusing the previous collision result (skip recomputation if the pose change is below this value).    |
 | `block_velocity_scaling`           | `double`   | `1.5`   | Scales maximum per-cycle motion: allowed step = `velocity_limit / update_rate * block_velocity_scaling`. Capped at 3.0. Only active when `check_self_collisions` is true. |
-| `debug_visualize_collisions`       | `bool`     | `false` | If `true`, publishes collision debug markers for RViz (via `CollisionChecker`).                                     |
+| `debug_visualize_collisions`       | `bool`     | `false` | If `true`, publishes collision debug markers for RViz (via `CollisionChecker`). Uses separate marker namespaces for toggling. |
 | `set_current_limits`               | `bool`     | `false` | If `true`, enables writing `<joint>/current` limits for compliant/stiff modes. *(configured at startup)*            |
 | `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint current limit in **compliant** mode [A].                                                                  |
 | `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint current limit in **stiff** mode [A].                                                                      |
@@ -84,14 +96,14 @@ A **safety layer for joint position commands**, usable both
 | `~/safety_estop`             | `std_msgs/Bool`                     | E-Stop control. `true` → latch and hold current positions; `false` → resume. |
 | `robot_description_semantic` | `std_msgs/String` (transient local) | SRDF XML for self-collision checking.                                        |
 
-**Publications (debug, optional)**
+**Publications**
 
-Enabled if `publish_debug_joint_states = true`:
-
-| Topic                      | Type                     | Content                                                                |
-| -------------------------- | ------------------------ | ---------------------------------------------------------------------- |
-| `~/debug_in_joint_states`  | `sensor_msgs/JointState` | Names = `joints`, positions = current **references** (input commands). |
-| `~/debug_out_joint_states` | `sensor_msgs/JointState` | Names = `joints`, positions = final **commanded** joint positions.     |
+| Topic                           | Type                                    | Content                                                                | Condition |
+| ------------------------------- | --------------------------------------- | ---------------------------------------------------------------------- | --------- |
+| `~/status`                      | `SafetyPositionControllerStatus`        | Latched diagnostics: collision distances, scaling factors, safety state. | Always |
+| `~/debug_collision_geometry`    | `visualization_msgs/MarkerArray`        | Collision geometry, distance lines, colored by directional scaling.     | `debug_visualize_collisions = true` |
+| `~/debug_in_joint_states`       | `sensor_msgs/JointState`                | Names = `joints`, positions = current **references** (input commands). | `publish_debug_joint_states = true` |
+| `~/debug_out_joint_states`      | `sensor_msgs/JointState`                | Names = `joints`, positions = final **commanded** joint positions.     | `publish_debug_joint_states = true` |
 
 **Services**
 
@@ -243,6 +255,7 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
       check_self_collisions: true
       collision_padding: 0.01
       collision_safety_zone: 0.05
+      directional_collision_scaling: true
       debug_visualize_collisions: false
       block_velocity_scaling: 1.5
       set_current_limits: true
