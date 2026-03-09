@@ -7,15 +7,20 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
+#include <realtime_tools/realtime_publisher.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/geometry.hpp>
 #include <pinocchio/multibody/model.hpp>
 
+#include <pinocchio/collision/broadphase-manager.hpp>
+
 #include <Eigen/Core>
+#include <hpp/fcl/broadphase/broadphase_dynamic_AABB_tree.h>
 #include <hpp/fcl/collision.h>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 
 // #define SAFETY_CC_ENABLE_TIMING // TODO: remove when no longer needed for optimization
@@ -46,7 +51,7 @@ public:
    * @param pub_debug_geometry publish MarkerArray on ~/debug_collision_geometry
    */
   explicit CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
-                             double collision_padding = 0.0, double collision_cache_epsilon = 1e-4,
+                             double collision_padding = 0.0, double collision_cache_epsilon = 1e-6,
                              bool pub_debug_geometry = false );
 
   /**
@@ -129,6 +134,25 @@ public:
    */
   void setDirectionalInfo( const std::vector<double> &derivatives, double safety_zone_threshold );
 
+  /**
+   * @brief Toggle lightweight collision distance visualization.
+   * Publishes only safety-zone and collision distance lines via a realtime publisher.
+   * Ignored when full debug visualization is active.
+   * @param enable on/off
+   */
+  void updatePublishCollisionDistances( bool enable );
+
+  /**
+   * @brief Enable/disable broadphase AABB-tree acceleration for distance queries.
+   * Call before initFromXml, or re-call initFromXml after changing.
+   */
+  void setBroadphase( bool enable );
+
+  /**
+   * @brief Whether broadphase acceleration is enabled.
+   */
+  bool isBroadphaseEnabled() const;
+
 private:
   /**
    * @brief Compute the distance gradient for a single collision pair.
@@ -142,6 +166,12 @@ private:
    * @brief Publish geometry and nearest-point markers with namespace-separated categories.
    */
   void publishMarkers() const;
+
+  /**
+   * @brief Publish lightweight distance-only markers for safety zone and collision pairs.
+   * Uses realtime publisher (non-blocking). Skips geometry markers and safe-pair lines.
+   */
+  void publishMinimalMarkers();
 
   /**
    * @brief Keep only pairs attached to controlled joints (and ancestors).
@@ -162,8 +192,10 @@ private:
   CollisionResult last_collision_result_;
 
   double collision_padding_{ 0.0 };
-  double collision_cache_epsilon_{ 1e-4 };
+  double collision_cache_epsilon_{ 1e-6 };
   bool pub_debug_geometry_{ false };
+  bool pub_collision_distances_{ false };
+  std::shared_ptr<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>> rt_markers_pub_;
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;
 
@@ -174,6 +206,12 @@ private:
   // Pre-allocated Jacobian workspace (sized in initFromXml)
   Eigen::MatrixXd J1_workspace_; ///< 6 × nv
   Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+
+  // Broadphase acceleration
+  bool use_broadphase_{ true };
+  using BroadPhaseManager =
+      pinocchio::BroadPhaseManagerTpl<hpp::fcl::DynamicAABBTreeCollisionManager>;
+  std::unique_ptr<BroadPhaseManager> broadphase_manager_;
 
 #ifdef SAFETY_CC_ENABLE_TIMING
   struct TimingStats {

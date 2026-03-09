@@ -14,9 +14,90 @@
 #include "pinocchio/collision/distance.hpp"
 #include <cmath>
 #include <hpp/fcl/collision_data.h>
+#include <hpp/fcl/distance.h>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/fcl.hpp>
 #include <pinocchio/multibody/model.hpp>
+
+namespace
+{
+/// Custom hpp-fcl broadphase distance callback that collects all safety-zone pairs
+/// and tracks the global minimum distance. Follows the same pattern as
+/// pinocchio::CollisionCallBackDefault (broadphase-callbacks.hpp:90-96).
+struct SafetyZoneDistanceCallback : hpp::fcl::DistanceCallBackBase {
+  // Inputs (set before each broadphase scan)
+  const pinocchio::GeometryModel *geom_model_ptr{ nullptr };
+  pinocchio::GeometryData *geom_data_ptr{ nullptr };
+  double safety_zone_threshold{ 0.0 };
+  bool compute_nearest_points{ false }; ///< true in single-pass (debug_viz) mode
+
+  // Outputs (filled during traversal)
+  double global_min_distance{ std::numeric_limits<double>::max() };
+  std::size_t min_distance_pair{ 0 };
+  std::vector<std::size_t> safety_zone_indices;
+
+  void init() override
+  {
+    global_min_distance = std::numeric_limits<double>::max();
+    min_distance_pair = 0;
+    safety_zone_indices.clear();
+  }
+
+  bool distance( hpp::fcl::CollisionObject *o1, hpp::fcl::CollisionObject *o2,
+                 hpp::fcl::FCL_REAL &dist ) override
+  {
+    // Cast to pinocchio::CollisionObject to get geometry indices
+    // (safe: pinocchio creates these objects in BroadPhaseManagerTpl::init)
+    auto &co1 = reinterpret_cast<pinocchio::CollisionObject &>( *o1 );
+    auto &co2 = reinterpret_cast<pinocchio::CollisionObject &>( *o2 );
+
+    auto go1 = static_cast<Eigen::DenseIndex>( co1.geometryObjectIndex );
+    auto go2 = static_cast<Eigen::DenseIndex>( co2.geometryObjectIndex );
+
+    // collisionPairMapping is upper triangular: needs go1 < go2
+    if ( go1 > go2 )
+      std::swap( go1, go2 );
+
+    // Look up collision pair index (-1 if not a tracked pair)
+    const int pair_index = geom_model_ptr->collisionPairMapping( go1, go2 );
+    if ( pair_index < 0 )
+      return false; // not a tracked pair, skip
+
+    const auto k = static_cast<std::size_t>( pair_index );
+
+    // Check if pair is active
+    if ( !geom_data_ptr->activeCollisionPairs[k] )
+      return false;
+
+    // Run narrow-phase distance via hpp-fcl
+    auto &dreq = geom_data_ptr->distanceRequests[k];
+    auto &dres = geom_data_ptr->distanceResults[k];
+    dreq.enable_nearest_points = compute_nearest_points;
+    dres.clear();
+
+    hpp::fcl::distance( o1, o2, dreq, dres );
+    const double d = dres.min_distance;
+
+    // Update outputs
+    if ( d < global_min_distance ) {
+      global_min_distance = d;
+      min_distance_pair = k;
+    }
+
+    if ( safety_zone_threshold > 0.0 && d < safety_zone_threshold ) {
+      safety_zone_indices.push_back( k );
+    }
+
+    // Set the AABB pruning bound: the tree skips subtrees whose AABB lower
+    // bound exceeds dist. We need both the global minimum AND all safety zone
+    // pairs, so the bound must be max(global_min, safety_zone_threshold).
+    dist = ( safety_zone_threshold > 0.0 ) ? std::max( global_min_distance, safety_zone_threshold )
+                                           : global_min_distance;
+
+    return false; // never stop early — we need ALL safety zone pairs
+  }
+};
+} // namespace
 
 CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                                     double collision_padding, double collision_cache_epsilon,
@@ -59,6 +140,9 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     // Pre-allocate Jacobian workspace matrices
     J1_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
     J2_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
+
+    // Always create broadphase manager (cheap); use_broadphase_ controls which path is taken
+    broadphase_manager_ = std::make_unique<BroadPhaseManager>( &model_, &geom_model_, &geom_data_ );
 
     return true;
   } catch ( const std::exception &e ) {
@@ -114,6 +198,15 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
   }
 
   geom_model_.collisionPairs.swap( filtered );
+
+  // Rebuild collisionPairMapping matrix to match new pair indices
+  geom_model_.collisionPairMapping.setConstant( -1 );
+  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+    const auto &cp = geom_model_.collisionPairs[k];
+    geom_model_.collisionPairMapping( static_cast<Eigen::DenseIndex>( cp.first ),
+                                      static_cast<Eigen::DenseIndex>( cp.second ) ) =
+        static_cast<int>( k );
+  }
 
   //  re-create GeometryData so requests/results match new pair count
   geom_data_ = pinocchio::GeometryData( geom_model_ );
@@ -215,36 +308,71 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
   const auto t_placement = clock::now();
 #endif
 
-  // --- Pass 1: distances only (no nearest points) ---
-  // When debug visualization is active, compute nearest points for ALL pairs in a single pass
-  // instead of two-pass (debug mode is not performance-critical).
   const bool single_pass = pub_debug_geometry_;
-  for ( auto &dreq : geom_data_.distanceRequests ) { dreq.enable_nearest_points = single_pass; }
-  pinocchio::computeDistances( geom_model_, geom_data_ );
 
-#ifdef SAFETY_CC_ENABLE_TIMING
-  const auto t_distance = clock::now();
-#endif
-
-  // Find global minimum and identify safety-zone pairs
   double global_min_distance = std::numeric_limits<double>::max();
   std::size_t min_distance_pair = 0;
   bool has_safety_zone_pairs = false;
   std::vector<std::size_t> safety_zone_indices;
 
-  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-    const auto &dres = geom_data_.distanceResults[k];
+  if ( use_broadphase_ && broadphase_manager_ ) {
+    // --- Broadphase path: AABB-tree pruned distance scan ---
+    broadphase_manager_->update( false ); // sync transforms from oMg, rebuild AABB tree
 
-    if ( dres.min_distance < global_min_distance ) {
-      global_min_distance = dres.min_distance;
-      min_distance_pair = k;
+    SafetyZoneDistanceCallback callback;
+    callback.geom_model_ptr = &geom_model_;
+    callback.geom_data_ptr = &geom_data_;
+    callback.safety_zone_threshold = safety_zone_threshold;
+    callback.compute_nearest_points = single_pass;
+    callback.init();
+
+    broadphase_manager_->getManager().distance( &callback );
+
+    global_min_distance = callback.global_min_distance;
+    min_distance_pair = callback.min_distance_pair;
+    safety_zone_indices = std::move( callback.safety_zone_indices );
+    has_safety_zone_pairs = !safety_zone_indices.empty();
+
+    // Pass 2: recompute safety-zone pairs with nearest points (for gradients)
+    if ( !single_pass && has_safety_zone_pairs ) {
+      for ( const std::size_t k : safety_zone_indices ) {
+        geom_data_.distanceRequests[k].enable_nearest_points = true;
+        geom_data_.distanceResults[k].clear();
+        pinocchio::computeDistance( geom_model_, geom_data_, k );
+      }
+    }
+  } else {
+    // --- Brute-force path: compute distances for ALL pairs ---
+    for ( auto &dreq : geom_data_.distanceRequests ) { dreq.enable_nearest_points = single_pass; }
+    pinocchio::computeDistances( geom_model_, geom_data_ );
+
+    for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+      const auto &dres = geom_data_.distanceResults[k];
+
+      if ( dres.min_distance < global_min_distance ) {
+        global_min_distance = dres.min_distance;
+        min_distance_pair = k;
+      }
+
+      if ( safety_zone_threshold > 0.0 && dres.min_distance < safety_zone_threshold ) {
+        has_safety_zone_pairs = true;
+        safety_zone_indices.push_back( k );
+      }
     }
 
-    if ( safety_zone_threshold > 0.0 && dres.min_distance < safety_zone_threshold ) {
-      has_safety_zone_pairs = true;
-      safety_zone_indices.push_back( k );
+    // Pass 2: recompute only safety-zone pairs with nearest points (for gradients)
+    if ( !single_pass && has_safety_zone_pairs ) {
+      for ( const std::size_t k : safety_zone_indices ) {
+        geom_data_.distanceRequests[k].enable_nearest_points = true;
+        geom_data_.distanceResults[k].clear();
+        pinocchio::computeDistance( geom_model_, geom_data_, k );
+      }
     }
   }
+
+#ifdef SAFETY_CC_ENABLE_TIMING
+  const auto t_distance = clock::now();
+#endif
 
   // Log collision outside the hot loop (throttled)
   if ( global_min_distance <= collision_padding_ ) {
@@ -256,15 +384,6 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
                                      << global_min_distance << " between "
                                      << model_.frames[o1.parentFrame].name << " and "
                                      << model_.frames[o2.parentFrame].name );
-  }
-
-  // --- Pass 2: recompute only safety-zone pairs with nearest points (for gradients) ---
-  if ( !single_pass && has_safety_zone_pairs ) {
-    for ( const std::size_t k : safety_zone_indices ) {
-      geom_data_.distanceRequests[k].enable_nearest_points = true;
-      geom_data_.distanceResults[k].clear();
-      pinocchio::computeDistance( geom_model_, geom_data_, k );
-    }
   }
 
   CollisionResult result;
@@ -334,6 +453,8 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
   last_collision_result_ = result;
   if ( pub_debug_geometry_ )
     publishMarkers();
+  else if ( pub_collision_distances_ )
+    publishMinimalMarkers();
   return result;
 }
 
@@ -353,6 +474,126 @@ void CollisionChecker::updateCollisionPadding( const double collision_padding )
 void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
 {
   collision_cache_epsilon_ = epsilon;
+}
+
+void CollisionChecker::setBroadphase( bool enable ) { use_broadphase_ = enable; }
+
+bool CollisionChecker::isBroadphaseEnabled() const { return use_broadphase_; }
+
+void CollisionChecker::updatePublishCollisionDistances( bool enable )
+{
+  pub_collision_distances_ = enable;
+  if ( enable && !rt_markers_pub_ ) {
+    auto pub = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+        "~/debug_collision_geometry", 1 );
+    rt_markers_pub_ =
+        std::make_shared<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>>(
+            pub );
+  }
+}
+
+void CollisionChecker::publishMinimalMarkers()
+{
+  if ( !rt_markers_pub_ || !rt_markers_pub_->trylock() )
+    return;
+
+  auto &arr = rt_markers_pub_->msg_;
+  arr.markers.clear();
+
+  const rclcpp::Time now = node_->now();
+
+  // Delete all previous markers
+  visualization_msgs::msg::Marker delete_all;
+  delete_all.header.frame_id = "base_link";
+  delete_all.header.stamp = now;
+  delete_all.action = visualization_msgs::msg::Marker::DELETEALL;
+  arr.markers.push_back( std::move( delete_all ) );
+
+  const auto &result = last_collision_result_;
+  if ( result.safety_zone_pairs.empty() && !result.in_collision ) {
+    rt_markers_pub_->unlockAndPublish();
+    return;
+  }
+
+  // Check if directional info is available
+  const bool have_dir_info = !viz_directional_derivatives_.empty() &&
+                             viz_directional_derivatives_.size() == geom_model_.collisionPairs.size();
+
+  // Build LINE_LIST markers for safety zone and collision pairs
+  auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
+    visualization_msgs::msg::Marker m;
+    m.header.frame_id = "base_link";
+    m.header.stamp = now;
+    m.ns = ns;
+    m.id = id;
+    m.type = visualization_msgs::msg::Marker::LINE_LIST;
+    m.action = visualization_msgs::msg::Marker::ADD;
+    m.scale.x = thickness;
+    m.lifetime = rclcpp::Duration::from_seconds( 0.0 );
+    m.pose.orientation.w = 1.0;
+    return m;
+  };
+
+  visualization_msgs::msg::Marker lines_zone =
+      make_line_marker( "distance_lines_safety_zone", 0, 0.005 );
+  visualization_msgs::msg::Marker lines_coll =
+      make_line_marker( "distance_lines_collision", 0, 0.006 );
+
+  std_msgs::msg::ColorRGBA bright_red;
+  bright_red.r = 1.0f;
+  bright_red.g = 0.0f;
+  bright_red.b = 0.0f;
+  bright_red.a = 1.0f;
+  lines_coll.color = bright_red;
+
+  for ( const auto &pair : result.safety_zone_pairs ) {
+    const auto &dres = geom_data_.distanceResults[pair.pair_index];
+    if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
+         !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() )
+      continue;
+
+    geometry_msgs::msg::Point pA, pB;
+    pA.x = dres.nearest_points[0][0];
+    pA.y = dres.nearest_points[0][1];
+    pA.z = dres.nearest_points[0][2];
+    pB.x = dres.nearest_points[1][0];
+    pB.y = dres.nearest_points[1][1];
+    pB.z = dres.nearest_points[1][2];
+
+    if ( pair.distance <= collision_padding_ ) {
+      lines_coll.points.push_back( pA );
+      lines_coll.points.push_back( pB );
+    } else {
+      std_msgs::msg::ColorRGBA color;
+      if ( have_dir_info && !std::isnan( viz_directional_derivatives_[pair.pair_index] ) ) {
+        if ( viz_directional_derivatives_[pair.pair_index] >= 0.0 ) {
+          color.r = 0.0f;
+          color.g = 1.0f;
+          color.b = 0.0f;
+          color.a = 1.0f;
+        } else {
+          color.r = 1.0f;
+          color.g = 0.0f;
+          color.b = 0.0f;
+          color.a = 1.0f;
+        }
+      } else {
+        color.r = 1.0f;
+        color.g = 0.8f;
+        color.b = 0.0f;
+        color.a = 0.9f;
+      }
+      lines_zone.points.push_back( pA );
+      lines_zone.colors.push_back( color );
+      lines_zone.points.push_back( pB );
+      lines_zone.colors.push_back( color );
+    }
+  }
+
+  arr.markers.push_back( std::move( lines_zone ) );
+  arr.markers.push_back( std::move( lines_coll ) );
+
+  rt_markers_pub_->unlockAndPublish();
 }
 
 Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )

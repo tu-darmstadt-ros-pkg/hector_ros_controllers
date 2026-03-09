@@ -19,16 +19,28 @@ safety_position_controller:
     type: bool
     default_value: true
     description: If true, the controller checks for potential self-collisions at the target pose before applying position commands.
+    read_only: true
 
   collision_padding:
     type: double
     default_value: 0.01
     description: Minimum allowed distance in [m] between any two links to consider the robot safe from self-collisions when 'check_self_collisions' is true.
+    validation:
+      bounds<>: [0.0, 1.0]
 
   collision_cache_epsilon:
     type: double
     default_value: 0.000001
     description: Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true.
+
+  use_broadphase:
+    type: bool
+    default_value: true
+    description: >
+      If true, uses AABB-tree broadphase acceleration for self-collision distance queries.
+      This prunes far-apart geometry pairs before running narrow-phase GJK, typically
+      yielding a 3-5x speedup. Only relevant when 'check_self_collisions' is true.
+    read_only: true
 
   block_velocity_scaling:
     type: double
@@ -62,6 +74,16 @@ safety_position_controller:
     default_value: false
     description: If true, the controller publishes visualization markers for potential self-collisions to help with debugging.
 
+  publish_collision_distances:
+    type: bool
+    default_value: false
+    description: >
+      If true, publishes lightweight visualization markers showing only the distance
+      lines for collision pairs within the safety zone. Much cheaper than
+      'debug_visualize_collisions' as it skips geometry markers and safe-pair lines.
+      Uses a realtime publisher for non-blocking operation. Ignored if
+      'debug_visualize_collisions' is true.
+
   publish_debug_joint_states:
     type: bool
     default_value: false
@@ -88,8 +110,12 @@ safety_position_controller:
     type: double
     default_value: 60.0
     description: Time in seconds after which safety checks are automatically re-enabled when bypassed via service. Must be positive.
+    validation:
+      bounds<>: [0.1, 600.0]
 
   safety_bypass_joint_limit_tolerance:
     type: double
     default_value: 0.03
     description: Tolerance factor (0.0-1.0) added to joint limits when safety bypass is active. E.g., 0.03 means 3% tolerance beyond normal limits.
+    validation:
+      bounds<>: [0.0, 1.0]

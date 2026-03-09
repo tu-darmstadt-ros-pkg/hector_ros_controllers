@@ -55,6 +55,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
 
   if ( params_.check_self_collisions ) {
     collision_checker_ = std::make_unique<CollisionChecker>( node, params_.collision_padding,
+                                                             params_.collision_cache_epsilon,
                                                              params_.debug_visualize_collisions );
   }
 
@@ -151,7 +152,12 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   }
 
   if ( collision_checker_ ) {
-    collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints, false );
+    collision_checker_->setBroadphase( params_.use_broadphase );
+    if ( !collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints,
+                                           false ) ) {
+      RCLCPP_ERROR( node->get_logger(), "Failed to initialize collision checker from URDF/SRDF." );
+      return controller_interface::CallbackReturn::ERROR;
+    }
 
     // Build velocity-space index mapping for directional collision scaling
     joint_v_index_.resize( params_.joints.size(), -1 );
@@ -183,8 +189,6 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
-  on_hold_ = false;
-
   // reset reference interfaces
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
 
@@ -205,7 +209,19 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
     collision_checker_->updateDoDebugVisualization( params_.debug_visualize_collisions );
+    collision_checker_->updatePublishCollisionDistances( params_.publish_collision_distances );
   }
+
+  RCLCPP_INFO( get_node()->get_logger(),
+               "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
+               "padding=%.4f, safety_zone=%.4f, cache_eps=%.1e, directional=%s, debug_viz=%s, "
+               "publish_distances=%s",
+               params_.joints.size(), params_.check_self_collisions ? "ON" : "OFF",
+               params_.use_broadphase ? "ON" : "OFF", params_.collision_padding,
+               params_.collision_safety_zone, params_.collision_cache_epsilon,
+               params_.directional_collision_scaling ? "ON" : "OFF",
+               params_.debug_visualize_collisions ? "ON" : "OFF",
+               params_.publish_collision_distances ? "ON" : "OFF" );
 
   // compute max allowed distance per cycle
   for ( size_t n = 0; n < params_.joints.size(); ++n ) {
@@ -239,8 +255,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
         }
       } );
 
-  if ( is_chained_ ) {
-    // Non-chained command subscriber (RT buffer)
+  if ( !is_chained_ ) {
+    // Non-chained mode: re-create command subscriber (destroyed in on_deactivate)
     joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
         "~/commands", rclcpp::SystemDefaultsQoS(),
         [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
@@ -468,7 +484,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
 
       // Provide directional derivative info to collision checker for visualization
-      if ( params_.debug_visualize_collisions ) {
+      if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
         const std::size_t num_pairs = collision_checker_->getNumCollisionPairs();
         std::vector<double> per_pair_dir_derivs( num_pairs, std::numeric_limits<double>::quiet_NaN() );
         for ( const auto &pi : last_safety_zone_pairs_ ) {
@@ -567,7 +583,9 @@ void SafetyPositionController::apply_velocity_limits( const double distance_scal
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( !std::isnan( velocity_limits_[i] ) ) {
       // shortest signed distance from current -> command
-      const double diff = get_signed_distance( current_positions_[i], cmd_positions_[i] );
+      const double diff = ( kinds_[i] == JointType::CONTINUOUS )
+                              ? get_signed_distance( current_positions_[i], cmd_positions_[i] )
+                              : ( cmd_positions_[i] - current_positions_[i] );
       const double max_step = max_allowed_distance_per_cycle_[i] * clamped_scale;
 
       // RCLCPP_INFO( get_node()->get_logger(),

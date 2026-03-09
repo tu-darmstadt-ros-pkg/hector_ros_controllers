@@ -68,19 +68,21 @@ A **safety layer for joint position commands**, usable both
 | `joints`                           | `string[]` | `[]`    | Names of joints controlled. Must match URDF. *(effectively read-only; set via params at startup)*                   |
 | `unwrap_continuous_joints`         | `bool`     | `true`  | If `true`, continuous joints are unwrapped to stay close to the current angle.                                      |
 | `enforce_position_limits`          | `bool`     | `true`  | If `true`, clamps joint commands to URDF position limits.                                                           |
-| `check_self_collisions`            | `bool`     | `true`  | If `true`, performs self-collision checks and enables distance-based velocity scaling.                               |
-| `collision_padding`                | `double`   | `0.0`   | Minimum allowed link-to-link distance [m]; distances ≤ padding are treated as collision.                            |
+| `check_self_collisions`            | `bool`     | `true`  | If `true`, performs self-collision checks and enables distance-based velocity scaling. *(read-only)*                 |
+| `collision_padding`                | `double`   | `0.01`  | Minimum allowed link-to-link distance [m]; distances ≤ padding are treated as collision. Bounds: [0.0, 1.0].       |
 | `collision_safety_zone`            | `double`   | `0.05`  | Outer safety zone distance [m]. Between `collision_padding` and this value, velocity is linearly scaled down. Must be > `collision_padding`. |
 | `directional_collision_scaling`    | `bool`     | `true`  | If `true`, velocity scaling near collisions is direction-aware: only motions that decrease any collision distance in the safety zone are slowed down. Motions moving away proceed at full speed. Requires `check_self_collisions`. |
-| `collision_cache_epsilon`          | `double`   | `1e-6`  | Threshold for reusing the previous collision result (skip recomputation if the pose change is below this value).    |
-| `block_velocity_scaling`           | `double`   | `1.5`   | Scales maximum per-cycle motion: allowed step = `velocity_limit / update_rate * block_velocity_scaling`. Capped at 3.0. Only active when `check_self_collisions` is true. |
+| `collision_cache_epsilon`          | `double`   | `1e-6`  | Threshold [rad] for reusing the previous collision result (skip recomputation if the pose change is below this value). |
+| `use_broadphase`                   | `bool`     | `true`  | If `true`, uses AABB-tree broadphase acceleration for self-collision distance queries (3–5× speedup). Only relevant when `check_self_collisions` is true. *(read-only)* |
+| `block_velocity_scaling`           | `double`   | `1.5`   | Scales maximum per-cycle motion: allowed step = `velocity_limit / update_rate * block_velocity_scaling`. Bounds: [0.01, 15.0]. Only active when `check_self_collisions` is true. |
 | `debug_visualize_collisions`       | `bool`     | `false` | If `true`, publishes collision debug markers for RViz (via `CollisionChecker`). Uses separate marker namespaces for toggling. |
-| `set_current_limits`               | `bool`     | `false` | If `true`, enables writing `<joint>/current` limits for compliant/stiff modes. *(configured at startup)*            |
+| `publish_collision_distances`      | `bool`     | `false` | If `true`, publishes lightweight distance-only markers for safety zone / collision pairs via a realtime publisher. Cheaper than `debug_visualize_collisions`. Ignored when full debug visualization is active. |
+| `set_current_limits`               | `bool`     | `false` | If `true`, enables writing `<joint>/current` limits for compliant/stiff modes. *(read-only)*                        |
 | `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint current limit in **compliant** mode [A].                                                                  |
 | `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint current limit in **stiff** mode [A].                                                                      |
 | `publish_debug_joint_states`       | `bool`     | `false` | If `true`, publishes debug `JointState` messages for incoming references and outgoing commands.                     |
-| `safety_bypass_timeout`            | `double`   | `60.0`  | Time in seconds after which safety bypass auto-disables. Must be positive.                                          |
-| `safety_bypass_joint_limit_tolerance` | `double` | `0.03`  | Tolerance factor (0.0-1.0) added to joint limits during bypass. E.g., 0.03 = 3% beyond normal limits.               |
+| `safety_bypass_timeout`            | `double`   | `60.0`  | Time in seconds after which safety bypass auto-disables. Bounds: [0.1, 600.0].                                     |
+| `safety_bypass_joint_limit_tolerance` | `double` | `0.03`  | Tolerance factor added to joint limits during bypass. E.g., 0.03 = 3% of the total joint range added to both sides. Bounds: [0.0, 1.0]. |
 
 > **Note:** Parameters are read/updated at `on_activate()`. To apply runtime changes reliably, deactivate and reactivate the controller.
 
@@ -101,7 +103,7 @@ A **safety layer for joint position commands**, usable both
 | Topic                           | Type                                    | Content                                                                | Condition |
 | ------------------------------- | --------------------------------------- | ---------------------------------------------------------------------- | --------- |
 | `~/status`                      | `SafetyPositionControllerStatus`        | Latched diagnostics: collision distances, scaling factors, safety state. | Always |
-| `~/debug_collision_geometry`    | `visualization_msgs/MarkerArray`        | Collision geometry, distance lines, colored by directional scaling.     | `debug_visualize_collisions = true` |
+| `~/debug_collision_geometry`    | `visualization_msgs/MarkerArray`        | Collision geometry, distance lines, colored by directional scaling.     | `debug_visualize_collisions = true` or `publish_collision_distances = true` |
 | `~/debug_in_joint_states`       | `sensor_msgs/JointState`                | Names = `joints`, positions = current **references** (input commands). | `publish_debug_joint_states = true` |
 | `~/debug_out_joint_states`      | `sensor_msgs/JointState`                | Names = `joints`, positions = final **commanded** joint positions.     | `publish_debug_joint_states = true` |
 
@@ -109,7 +111,7 @@ A **safety layer for joint position commands**, usable both
 
 | Service                    | Type               | Description                                                                                          |
 | -------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------- |
-| `~/enforce_current_limits` | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) compliant mode (switch between compliant/stiff current limits). |
+| `~/enforce_current_limits` | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) compliant mode (switch between compliant/stiff current limits). Only available when `set_current_limits = true`. |
 | `~/bypass_safety_checks`   | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) safety bypass mode. Disables collision checks and relaxes joint limits. Auto-disables after `safety_bypass_timeout` seconds. Joint wrapping remains active. |
 
 ---

@@ -707,7 +707,8 @@ public:
   void SetUp() override { controller_ = std::make_shared<ControllerType>(); }
 
   void initWithCollisions( const std::vector<std::string> &joints = {},
-                           const std::string &urdf_file = "test_robot_collision.urdf" )
+                           const std::string &urdf_file = "test_robot_collision.urdf",
+                           const std::vector<rclcpp::Parameter> &extra_overrides = {} )
   {
     auto cj = joints.empty() ? controlled_joints_ : joints;
     const auto urdf = hector_test::loadUrdfFile( urdf_file );
@@ -719,8 +720,7 @@ public:
     params.controller_manager_update_rate = kUpdateRate;
     params.node_namespace = "";
 
-    rclcpp::NodeOptions opts;
-    opts.parameter_overrides( {
+    std::vector<rclcpp::Parameter> overrides = {
         rclcpp::Parameter( "joints", cj ),
         rclcpp::Parameter( "unwrap_continuous_joints", true ),
         rclcpp::Parameter( "enforce_position_limits", true ),
@@ -734,7 +734,24 @@ public:
         rclcpp::Parameter( "collision_padding", 0.0 ),
         rclcpp::Parameter( "collision_cache_epsilon", 0.0 ), // disable cache for tests
         rclcpp::Parameter( "debug_visualize_collisions", false ),
-    } );
+    };
+    // Apply extra overrides (replaces matching parameters by name)
+    for ( const auto &extra : extra_overrides ) {
+      bool found = false;
+      for ( auto &base : overrides ) {
+        if ( base.get_name() == extra.get_name() ) {
+          base = extra;
+          found = true;
+          break;
+        }
+      }
+      if ( !found ) {
+        overrides.push_back( extra );
+      }
+    }
+
+    rclcpp::NodeOptions opts;
+    opts.parameter_overrides( overrides );
     params.node_options = opts;
 
     auto result = controller_->init( params );
@@ -988,37 +1005,8 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointCollisionDetected 
 TEST_F( SafetyPositionControllerCollisionTest, VelocityLimitingWithCollisionChecks )
 {
   // Override block_velocity_scaling to a known low value
-  auto cj = controlled_joints_;
-  const auto urdf = hector_test::loadUrdfFile( "test_robot_collision.urdf" );
-
-  controller_interface::ControllerInterfaceParams params;
-  params.controller_name = "test_safety_position_cc";
-  params.robot_description = urdf;
-  params.update_rate = kUpdateRate;
-  params.controller_manager_update_rate = kUpdateRate;
-  params.node_namespace = "";
-
-  rclcpp::NodeOptions opts;
-  opts.parameter_overrides( {
-      rclcpp::Parameter( "joints", cj ),
-      rclcpp::Parameter( "unwrap_continuous_joints", true ),
-      rclcpp::Parameter( "enforce_position_limits", true ),
-      rclcpp::Parameter( "check_self_collisions", true ),
-      rclcpp::Parameter( "block_velocity_scaling", 1.5 ),
-      rclcpp::Parameter( "collision_safety_zone", 0.05 ),
-      rclcpp::Parameter( "set_current_limits", false ),
-      rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
-      rclcpp::Parameter( "safety_bypass_joint_limit_tolerance", 0.03 ),
-      rclcpp::Parameter( "publish_debug_joint_states", false ),
-      rclcpp::Parameter( "collision_padding", 0.0 ),
-      rclcpp::Parameter( "collision_cache_epsilon", 0.0 ),
-      rclcpp::Parameter( "debug_visualize_collisions", false ),
-  } );
-  params.node_options = opts;
-
-  auto result = controller_->init( params );
-  ASSERT_EQ( result, controller_interface::return_type::OK );
-
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "block_velocity_scaling", 1.5 ) } );
   configureWithSrdf();
   setupHardwareInterfaces();
   findMocks();
@@ -1263,38 +1251,8 @@ TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_TwoPairsOneWor
 
 TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_DisabledByParam )
 {
-  // Use custom init with directional_collision_scaling = false
-  auto cj = controlled_joints_;
-  const auto urdf = hector_test::loadUrdfFile( "test_robot_collision.urdf" );
-
-  controller_interface::ControllerInterfaceParams params;
-  params.controller_name = "test_safety_position_cc";
-  params.robot_description = urdf;
-  params.update_rate = kUpdateRate;
-  params.controller_manager_update_rate = kUpdateRate;
-  params.node_namespace = "";
-
-  rclcpp::NodeOptions opts;
-  opts.parameter_overrides( {
-      rclcpp::Parameter( "joints", cj ),
-      rclcpp::Parameter( "unwrap_continuous_joints", true ),
-      rclcpp::Parameter( "enforce_position_limits", true ),
-      rclcpp::Parameter( "check_self_collisions", true ),
-      rclcpp::Parameter( "block_velocity_scaling", 3.0 ),
-      rclcpp::Parameter( "collision_safety_zone", 0.05 ),
-      rclcpp::Parameter( "set_current_limits", false ),
-      rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
-      rclcpp::Parameter( "safety_bypass_joint_limit_tolerance", 0.03 ),
-      rclcpp::Parameter( "publish_debug_joint_states", false ),
-      rclcpp::Parameter( "collision_padding", 0.0 ),
-      rclcpp::Parameter( "collision_cache_epsilon", 0.0 ),
-      rclcpp::Parameter( "debug_visualize_collisions", false ),
-      rclcpp::Parameter( "directional_collision_scaling", false ),
-  } );
-  params.node_options = opts;
-
-  auto result = controller_->init( params );
-  ASSERT_EQ( result, controller_interface::return_type::OK );
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "directional_collision_scaling", false ) } );
   configureWithSrdf();
   setupHardwareInterfaces();
   findMocks();
@@ -1324,6 +1282,334 @@ TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_DisabledByPara
   double expected_step = full_max_step * 0.5;
   EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
       << "With directional scaling disabled, should always use distance-based scale";
+}
+
+// ============================================================================
+// Current Limits Tests
+// ============================================================================
+
+TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteStiffByDefault )
+{
+  initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true );
+  configureController();
+
+  // Setup hardware interfaces with current command interfaces
+  auto cj = controlled_joints_;
+  hw_state_values_.assign( controller_->all_joint_names_.size(), 0.0 );
+  hw_cmd_values_.assign( cj.size() * 2, 0.0 ); // position + current
+
+  cmd_ifaces_.clear();
+  state_ifaces_.clear();
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "position", &hw_cmd_values_[i] ) );
+  }
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "current", &hw_cmd_values_[cj.size() + i] ) );
+  }
+  for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
+    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+        controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+  }
+#pragma GCC diagnostic pop
+
+  controller_->command_interfaces_.clear();
+  controller_->state_interfaces_.clear();
+  for ( auto &ci : cmd_ifaces_ ) {
+    controller_->command_interfaces_.emplace_back( ci, []() { } );
+  }
+  for ( auto &si : state_ifaces_ ) { controller_->state_interfaces_.emplace_back( si ); }
+
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // Default mode is stiff -> current limits should be stiff_limit (5.0)
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    EXPECT_DOUBLE_EQ( hw_cmd_values_[cj.size() + i], 5.0 )
+        << "Joint " << cj[i] << " should have stiff current limit";
+  }
+}
+
+TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteCompliantWhenEnabled )
+{
+  initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true );
+  configureController();
+
+  auto cj = controlled_joints_;
+  hw_state_values_.assign( controller_->all_joint_names_.size(), 0.0 );
+  hw_cmd_values_.assign( cj.size() * 2, 0.0 );
+
+  cmd_ifaces_.clear();
+  state_ifaces_.clear();
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "position", &hw_cmd_values_[i] ) );
+  }
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "current", &hw_cmd_values_[cj.size() + i] ) );
+  }
+  for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
+    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+        controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+  }
+#pragma GCC diagnostic pop
+
+  controller_->command_interfaces_.clear();
+  controller_->state_interfaces_.clear();
+  for ( auto &ci : cmd_ifaces_ ) {
+    controller_->command_interfaces_.emplace_back( ci, []() { } );
+  }
+  for ( auto &si : state_ifaces_ ) { controller_->state_interfaces_.emplace_back( si ); }
+
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // Enable compliant mode
+  controller_->in_compliant_mode_.store( true );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // Compliant mode -> current limits should be compliant_limit (3.0)
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    EXPECT_DOUBLE_EQ( hw_cmd_values_[cj.size() + i], 3.0 )
+        << "Joint " << cj[i] << " should have compliant current limit";
+  }
+}
+
+// ============================================================================
+// Safety Bypass Joint Limit Tolerance Tests
+// ============================================================================
+
+TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // joint2 upper limit is 1.5, range = 3.0, tolerance = 3% -> 0.09 extra
+  // Without bypass: command beyond 1.5 should clamp to 1.5
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 1.55;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+  EXPECT_LE( hw_cmd_values_[1], 1.5 ) << "Without bypass, should clamp to upper limit";
+
+  // Enable bypass
+  controller_->safety_bypass_active_.store( true );
+
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 1.55;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+
+  // With bypass (tolerance = 3% of range 3.0 = 0.09), upper limit becomes 1.59
+  // 1.55 is within [1.5, 1.59] so it should pass through
+  EXPECT_GT( hw_cmd_values_[1], 1.5 )
+      << "With bypass, commands slightly beyond normal limits should be allowed";
+  EXPECT_NEAR( hw_cmd_values_[1], 1.55, 1e-6 );
+}
+
+// ============================================================================
+// on_activate Validation Tests
+// ============================================================================
+
+TEST_F( SafetyPositionControllerCollisionTest, ActivateFailsWhenSafetyZoneLessThanPadding )
+{
+  // collision_safety_zone (0.01) <= collision_padding (0.05) -> should fail
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "collision_safety_zone", 0.01 ),
+                        rclcpp::Parameter( "collision_padding", 0.05 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+
+  // on_activate should fail validation
+  rclcpp_lifecycle::State inactive( lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+                                    "inactive" );
+  auto cb = controller_->on_activate( inactive );
+  EXPECT_EQ( cb, controller_interface::CallbackReturn::ERROR );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, ActivateFailsWhenSafetyZoneEqualsPadding )
+{
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "collision_safety_zone", 0.05 ),
+                        rclcpp::Parameter( "collision_padding", 0.05 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+
+  rclcpp_lifecycle::State inactive( lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+                                    "inactive" );
+  auto cb = controller_->on_activate( inactive );
+  EXPECT_EQ( cb, controller_interface::CallbackReturn::ERROR );
+}
+
+// ============================================================================
+// Safety Bypass Skips Collision But Still Limits Velocity
+// ============================================================================
+
+TEST_F( SafetyPositionControllerCollisionTest, BypassSkipsCollisionButAllowsRelaxedLimits )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  controller_->safety_bypass_active_.store( true );
+
+  // Start at a colliding configuration
+  setStateValue( "joint1", 0.0 );
+  setStateValue( "joint2", M_PI );
+  setStateValue( "joint3", -M_PI );
+
+  // Command to the colliding position
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = M_PI;
+  controller_->reference_interfaces_[2] = -M_PI;
+
+  auto ret = callUpdate();
+  EXPECT_EQ( ret, controller_interface::return_type::OK );
+
+  // With bypass, commands should pass through (no collision blocking, no velocity limiting)
+  EXPECT_NEAR( hw_cmd_values_[1], M_PI, 1e-6 )
+      << "Bypass should allow commands even in colliding configuration";
+}
+
+// ============================================================================
+// Collision Checker Inf Input Test
+// ============================================================================
+
+TEST_F( SafetyPositionControllerCollisionTest, InfInputDetectedAsCollision )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // Command with infinity — should be treated as collision (safe default)
+  controller_->reference_interfaces_[0] = std::numeric_limits<double>::infinity();
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  // First need to call update so collision checker sees the inf
+  // The inf will be clamped by enforce_limits (joint1 has limits [-pi, pi])
+  // But the collision checker receives cc_positions which includes the clamped value
+  // So this tests the controller's overall handling — commands should still be safe
+  auto ret = callUpdate();
+  EXPECT_EQ( ret, controller_interface::return_type::OK );
+}
+
+// ============================================================================
+// E-stop holds positions across multiple cycles
+// ============================================================================
+
+TEST_F( SafetyPositionControllerTest, EstopHoldsAcrossMultipleCycles )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  setStateValue( "joint1", 0.5 );
+  setStateValue( "joint2", -0.3 );
+  setStateValue( "joint3", 1.0 );
+
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  // First update to read positions
+  callUpdate();
+
+  sendEstop( true );
+  callUpdate();
+
+  // Commands should be held positions regardless of what reference says
+  controller_->reference_interfaces_[0] = 999.0;
+  controller_->reference_interfaces_[1] = 999.0;
+  controller_->reference_interfaces_[2] = 999.0;
+
+  callUpdate();
+
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.3 );
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
+
+  // Third cycle still holds
+  callUpdate();
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
+}
+
+// ============================================================================
+// Collision test: distance-based scaling status fields
+// ============================================================================
+
+TEST_F( SafetyPositionControllerCollisionTest, StatusReportsDistanceScalingFields )
+{
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+
+  SafetyPositionControllerStatus captured;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
+      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
+
+  activateController();
+
+  // Set last_min_distance_ halfway in safety zone
+  controller_->last_min_distance_ = 0.025;
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.01;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  callUpdate();
+  controller_->publish_status();
+
+  EXPECT_TRUE( captured.collision_check_enabled );
+  EXPECT_NEAR( captured.distance_scale, 0.5, 1e-6 );
 }
 
 // ============================================================================

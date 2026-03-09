@@ -169,6 +169,19 @@ if(BUILD_TESTING)
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_safety_position_controller PRIVATE ${DEFS})
 
+  find_package(ament_cmake_google_benchmark REQUIRED)
+  ament_add_google_benchmark(benchmark_collision_checker
+                             test/benchmark_collision_checker.cpp)
+  if(TARGET benchmark_collision_checker)
+    target_include_directories(
+      benchmark_collision_checker PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                          ${PROJECT_SOURCE_DIR}/test)
+    target_link_libraries(
+      benchmark_collision_checker ${PROJECT_NAME}::controllers_test_doubles
+      ament_index_cpp::ament_index_cpp)
+    target_compile_definitions(benchmark_collision_checker PRIVATE ${DEFS})
+  endif()
+
   ament_add_gmock(test_velocity_to_position_command_controller
                   test/test_velocity_to_position_command_controller.cpp)
   target_include_directories(

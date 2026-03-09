@@ -11,6 +11,7 @@
 // not the exact penetration depth. For non-penetrating configurations, broadphase
 // and brute-force should agree exactly.
 //
+#include <algorithm>
 #include <gtest/gtest.h>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -437,8 +438,10 @@ TEST_F( CollisionCheckerTest, GradientMatchesFiniteDifference )
     if ( result.safety_zone_pairs.empty() )
       continue;
 
-    // Use the first (closest) pair's gradient
-    const auto &closest = result.safety_zone_pairs[0];
+    // Find the closest pair (min distance) — broadphase may return pairs in any order
+    const auto &closest =
+        *std::min_element( result.safety_zone_pairs.begin(), result.safety_zone_pairs.end(),
+                           []( const auto &a, const auto &b ) { return a.distance < b.distance; } );
     const auto &gradient = closest.gradient;
 
     // Finite-difference validation for each controlled joint
@@ -635,6 +638,243 @@ TEST_F( CollisionCheckerTest, PerformanceBenchmark )
 
   // Soft assertion: should complete within 10ms per call
   EXPECT_LT( avg_us, 10000.0 ) << "Collision check too slow";
+}
+
+// ============================================================
+// Broadphase correctness tests
+// ============================================================
+
+// Test fixture that runs tests with broadphase enabled
+class CollisionCheckerBroadphaseTest : public CollisionCheckerTest
+{
+protected:
+  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0,
+                                                 bool debug_viz = false )
+  {
+    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon, debug_viz );
+    checker->setBroadphase( true );
+    std::vector<std::string> all_joints;
+    for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
+      all_joints.push_back( ref_model_.names[jid] );
+    }
+    bool ok = checker->initFromXml( urdf_xml_, "", all_joints );
+    EXPECT_TRUE( ok );
+    EXPECT_TRUE( checker->isBroadphaseEnabled() );
+    return checker;
+  }
+};
+
+// Re-run key correctness tests with broadphase
+TEST_F( CollisionCheckerBroadphaseTest, ZeroConfig )
+{
+  auto checker = makeChecker();
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+
+  auto result = checker->checkCollision( positions );
+
+  Eigen::VectorXd q = buildQ( ref_model_, positions );
+  double bf_min = bruteForceMinDistance( ref_model_, ref_data_, ref_geom_model_, ref_geom_data_, q );
+
+  EXPECT_FALSE( result.in_collision );
+  EXPECT_GT( result.min_distance, 0.0 );
+  EXPECT_NEAR( result.min_distance, bf_min, 1e-10 );
+}
+
+TEST_F( CollisionCheckerBroadphaseTest, CollisionConfig )
+{
+  auto checker = makeChecker( 0.0 );
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", M_PI }, { "joint3", -M_PI / 2.0 }, { "joint4", 0.0 } };
+
+  auto result = checker->checkCollision( positions );
+
+  Eigen::VectorXd q = buildQ( ref_model_, positions );
+  double bf_min = bruteForceMinDistance( ref_model_, ref_data_, ref_geom_model_, ref_geom_data_, q );
+
+  EXPECT_TRUE( result.in_collision );
+  EXPECT_LT( bf_min, 0.0 );
+  EXPECT_GE( result.min_distance, bf_min );
+  EXPECT_LE( result.min_distance, 0.0 );
+}
+
+TEST_F( CollisionCheckerBroadphaseTest, RandomConfigurations )
+{
+  auto checker = makeChecker();
+
+  std::mt19937 rng( 42 );
+  std::uniform_real_distribution<double> dist( -M_PI, M_PI );
+
+  for ( int i = 0; i < 50; ++i ) {
+    std::unordered_map<std::string, double> positions = { { "joint1", dist( rng ) },
+                                                          { "joint2", dist( rng ) },
+                                                          { "joint3", dist( rng ) },
+                                                          { "joint4", dist( rng ) } };
+
+    auto result = checker->checkCollision( positions );
+
+    Eigen::VectorXd q = buildQ( ref_model_, positions );
+    double bf_min =
+        bruteForceMinDistance( ref_model_, ref_data_, ref_geom_model_, ref_geom_data_, q );
+
+    expectDistanceMatch( result.min_distance, bf_min, 0.0,
+                         "broadphase config " + std::to_string( i ) );
+  }
+}
+
+TEST_F( CollisionCheckerBroadphaseTest, GradientMatchesFiniteDifference )
+{
+  auto checker = makeChecker();
+  const double eps = 1e-6;
+  const double safety_zone = 1.0;
+
+  std::vector<std::unordered_map<std::string, double>> configs = {
+      { { "joint1", 0.0 }, { "joint2", 0.5 }, { "joint3", -0.3 }, { "joint4", 0.0 } },
+      { { "joint1", 0.3 }, { "joint2", 2.0 }, { "joint3", -1.0 }, { "joint4", 0.5 } },
+      { { "joint1", -0.2 }, { "joint2", 1.5 }, { "joint3", -0.8 }, { "joint4", -0.3 } },
+      { { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } },
+  };
+
+  for ( size_t ci = 0; ci < configs.size(); ++ci ) {
+    const auto &positions = configs[ci];
+    auto result = checker->checkCollision( positions, safety_zone );
+    if ( result.safety_zone_pairs.empty() )
+      continue;
+
+    // Find the closest pair (min distance) — broadphase may return pairs in any order
+    const auto &closest =
+        *std::min_element( result.safety_zone_pairs.begin(), result.safety_zone_pairs.end(),
+                           []( const auto &a, const auto &b ) { return a.distance < b.distance; } );
+    const auto &gradient = closest.gradient;
+
+    for ( const auto &[name, val] : positions ) {
+      auto perturbed = positions;
+      perturbed[name] = val + eps;
+      auto result_plus = checker->checkCollision( perturbed, safety_zone );
+      double fd_gradient = ( result_plus.min_distance - result.min_distance ) / eps;
+
+      int v_idx = checker->getJointVelocityIndex( name );
+      ASSERT_GE( v_idx, 0 ) << "Joint " << name << " not found";
+      ASSERT_LT( v_idx, gradient.size() );
+
+      EXPECT_NEAR( gradient[v_idx], fd_gradient, 1e-3 )
+          << "Broadphase gradient mismatch for joint " << name << " at config " << ci;
+    }
+  }
+}
+
+// ---- Direct comparison: broadphase vs brute-force on same configs ----
+TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForce )
+{
+  auto bf_checker = makeChecker();
+  bf_checker->setBroadphase( false ); // force brute-force for comparison
+  // Create broadphase checker
+  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0, false );
+  bp_checker->setBroadphase( true );
+  std::vector<std::string> all_joints;
+  for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
+    all_joints.push_back( ref_model_.names[jid] );
+  }
+  ASSERT_TRUE( bp_checker->initFromXml( urdf_xml_, "", all_joints ) );
+
+  std::mt19937 rng( 999 );
+  std::uniform_real_distribution<double> dist( -M_PI, M_PI );
+  const double safety_zone = 0.1;
+
+  for ( int i = 0; i < 200; ++i ) {
+    std::unordered_map<std::string, double> positions = { { "joint1", dist( rng ) },
+                                                          { "joint2", dist( rng ) },
+                                                          { "joint3", dist( rng ) },
+                                                          { "joint4", dist( rng ) } };
+
+    auto bf_result = bf_checker->checkCollision( positions, safety_zone );
+    auto bp_result = bp_checker->checkCollision( positions, safety_zone );
+
+    EXPECT_EQ( bp_result.in_collision, bf_result.in_collision ) << "Config " << i;
+
+    if ( bf_result.min_distance > 0.0 ) {
+      EXPECT_NEAR( bp_result.min_distance, bf_result.min_distance, 1e-9 )
+          << "Non-penetrating distance mismatch at config " << i;
+    } else {
+      EXPECT_LE( bp_result.min_distance, 0.0 ) << "Both should detect collision at config " << i;
+    }
+
+    // Sort both by pair_index (broadphase traverses in AABB-tree order, not sequential)
+    auto sort_by_pair = []( auto &pairs ) {
+      std::sort( pairs.begin(), pairs.end(),
+                 []( const auto &a, const auto &b ) { return a.pair_index < b.pair_index; } );
+    };
+    sort_by_pair( bp_result.safety_zone_pairs );
+    sort_by_pair( bf_result.safety_zone_pairs );
+
+    EXPECT_EQ( bp_result.safety_zone_pairs.size(), bf_result.safety_zone_pairs.size() )
+        << "Safety zone pair count mismatch at config " << i;
+
+    // Compare gradients
+    for ( size_t j = 0;
+          j < std::min( bp_result.safety_zone_pairs.size(), bf_result.safety_zone_pairs.size() );
+          ++j ) {
+      EXPECT_EQ( bp_result.safety_zone_pairs[j].pair_index, bf_result.safety_zone_pairs[j].pair_index )
+          << "Pair index mismatch at config " << i << " pair " << j;
+
+      if ( bp_result.safety_zone_pairs[j].gradient.size() ==
+           bf_result.safety_zone_pairs[j].gradient.size() ) {
+        for ( int k = 0; k < bp_result.safety_zone_pairs[j].gradient.size(); ++k ) {
+          EXPECT_NEAR( bp_result.safety_zone_pairs[j].gradient[k],
+                       bf_result.safety_zone_pairs[j].gradient[k], 1e-6 )
+              << "Gradient mismatch at config " << i << " pair " << j << " element " << k;
+        }
+      }
+    }
+  }
+}
+
+// ---- Broadphase vs brute-force with Athena robot ----
+TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForceAthena )
+{
+  std::string athena_urdf, athena_srdf;
+  try {
+    athena_urdf = loadUrdfFile( "athena.urdf" );
+    athena_srdf = loadUrdfFile( "athena.srdf" );
+  } catch ( ... ) {
+    GTEST_SKIP() << "Athena URDF/SRDF not available";
+  }
+
+  const std::vector<std::string> arm_joints = { "arm_joint_1", "arm_joint_2", "arm_joint_3",
+                                                "arm_joint_4", "arm_joint_5", "arm_joint_6",
+                                                "arm_joint_7" };
+
+  auto bf_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0, false );
+  bf_checker->setBroadphase( false ); // force brute-force for comparison
+  ASSERT_TRUE( bf_checker->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
+
+  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0, false );
+  bp_checker->setBroadphase( true );
+  ASSERT_TRUE( bp_checker->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
+
+  std::mt19937 rng( 77 );
+  std::uniform_real_distribution<double> dist( -M_PI, M_PI );
+  const double safety_zone = 0.05;
+
+  for ( int i = 0; i < 100; ++i ) {
+    std::unordered_map<std::string, double> positions;
+    for ( const auto &name : arm_joints ) { positions[name] = dist( rng ); }
+
+    auto bf_result = bf_checker->checkCollision( positions, safety_zone );
+    auto bp_result = bp_checker->checkCollision( positions, safety_zone );
+
+    EXPECT_EQ( bp_result.in_collision, bf_result.in_collision ) << "Athena config " << i;
+
+    if ( bf_result.min_distance > 0.0 ) {
+      // Broadphase uses hpp::fcl::distance directly on manager objects while brute-force
+      // uses pinocchio::computeDistances — small numerical differences are expected from GJK.
+      EXPECT_NEAR( bp_result.min_distance, bf_result.min_distance, 1e-6 )
+          << "Athena distance mismatch at config " << i;
+    }
+
+    EXPECT_EQ( bp_result.safety_zone_pairs.size(), bf_result.safety_zone_pairs.size() )
+        << "Athena safety zone pair count mismatch at config " << i;
+  }
 }
 
 // __gcov_dump is only available when compiled with --coverage.

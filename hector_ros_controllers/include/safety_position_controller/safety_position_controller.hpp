@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
 #include <safety_position_controller/collision_checker.hpp>
@@ -200,8 +201,8 @@ private:
   void publish_status();
 
   // ---- Configuration / mode ----
-  bool is_chained_ = true;         ///< chained-only controller (hold if false)
-  bool in_compliant_mode_ = false; ///< selects compliant vs. stiff current limits
+  bool is_chained_ = true;                       ///< chained-only controller (hold if false)
+  std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
 
   // ---- E-stop ----
   std::atomic<bool> estop_active_{ false };  ///< last requested E-stop state
@@ -230,7 +231,7 @@ private:
   std::unordered_map<std::string, double> cc_positions_; ///< name→position map for CC
   std::unique_ptr<CollisionChecker> collision_checker_;  ///< optional self-collision checker
   std::string srdf_;                                     ///< SRDF XML (semantic)
-  bool srdf_received_ = false;                           ///< latched SRDF received
+  std::atomic<bool> srdf_received_{ false };             ///< latched SRDF received
   double last_min_distance_{
       std::numeric_limits<double>::max() }; ///< previous cycle's min collision distance
 
@@ -245,8 +246,7 @@ private:
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> cmd_positions_;     ///< post-enforcement commands
   std::vector<double> current_positions_; ///< latest measured positions
-  bool on_hold_{ false };                 ///< non-chained fallback
-  std::vector<double> hold_positions_;    ///< positions to hold when not chained
+  std::vector<double> hold_positions_;    ///< positions to hold during E-stop
 
   // ---- Parameters ----
   std::shared_ptr<ParamListener> param_listener_;
