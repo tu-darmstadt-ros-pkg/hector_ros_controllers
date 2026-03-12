@@ -153,6 +153,14 @@ public:
    */
   bool isBroadphaseEnabled() const;
 
+  /**
+   * @brief Compute the Yoshikawa manipulability index for a given end-effector frame.
+   * Requires FK and joint Jacobians to have been called (i.e., after checkCollision).
+   * @param ee_frame_name name of the end-effector frame in the URDF
+   * @return w = sqrt(det(J * J^T)), 0 if singular or frame not found
+   */
+  double computeManipulability( const std::string &ee_frame_name );
+
 private:
   /**
    * @brief Compute the distance gradient for a single collision pair.

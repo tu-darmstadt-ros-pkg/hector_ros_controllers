@@ -3,6 +3,7 @@
 //
 #include "safety_position_controller/collision_checker.hpp"
 
+#include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
@@ -886,4 +887,25 @@ void CollisionChecker::publishMarkers() const
   arr.markers.push_back( std::move( lines_coll ) );
 
   markers_pub_->publish( arr );
+}
+
+double CollisionChecker::computeManipulability( const std::string &ee_frame_name )
+{
+  if ( !model_.existFrame( ee_frame_name ) ) {
+    return 0.0;
+  }
+  const auto frame_id = model_.getFrameId( ee_frame_name );
+
+  // Compute frame Jacobian in LOCAL_WORLD_ALIGNED frame
+  Eigen::MatrixXd J = Eigen::MatrixXd::Zero( 6, model_.nv );
+  // data_ has been updated by checkCollision (FK + computeJointJacobians already called)
+  pinocchio::getFrameJacobian( model_, data_, frame_id, pinocchio::LOCAL_WORLD_ALIGNED, J );
+
+  // Yoshikawa manipulability: w = sqrt(det(J * J^T))
+  const Eigen::MatrixXd JJt = J * J.transpose(); // 6x6
+  const double det = JJt.determinant();
+  if ( det <= 0.0 ) {
+    return 0.0;
+  }
+  return std::sqrt( det );
 }

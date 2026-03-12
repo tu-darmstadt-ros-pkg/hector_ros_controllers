@@ -234,6 +234,7 @@ private:
   std::atomic<bool> srdf_received_{ false };             ///< latched SRDF received
   double last_min_distance_{
       std::numeric_limits<double>::max() }; ///< previous cycle's min collision distance
+  double last_manipulability_{ 0.0 };       ///< latest Yoshikawa manipulability index
 
   // ---- Directional collision scaling ----
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
@@ -271,8 +272,9 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
 
-  // Status publisher (latched)
+  // Status publisher (latched) + periodic timer
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>::SharedPtr status_pub_;
+  rclcpp::TimerBase::SharedPtr status_timer_;
 
   static constexpr int throttle_logging_msg = 2000; ///< ms; throttle for WARN/ERROR logs
 };

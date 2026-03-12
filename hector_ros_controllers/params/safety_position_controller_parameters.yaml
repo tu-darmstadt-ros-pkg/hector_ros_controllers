@@ -106,6 +106,22 @@ safety_position_controller:
         default_value: 5.0
         description: Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off.
 
+  manipulability_ee_frame:
+    type: string
+    default_value: arm_end_link
+    description: >
+      Name of the URDF frame used for manipulability index computation
+      (Yoshikawa w = sqrt(det(J*J^T))). Set to empty string to disable.
+
+  status_publish_rate:
+    type: double
+    default_value: 10.0
+    description: >
+      Rate in Hz at which the safety controller status (including collision distance
+      and manipulability) is published. Set to 0 to only publish on events.
+    validation:
+      bounds<>: [0.0, 100.0]
+
   safety_bypass_timeout:
     type: double
     default_value: 60.0

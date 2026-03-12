@@ -121,6 +121,12 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       node->create_publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>(
           "~/status", qos_latched );
 
+  // Periodic status publishing
+  if ( params_.status_publish_rate > 0.0 ) {
+    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
+    status_timer_ = node->create_wall_timer( period, [this]() { publish_status(); } );
+  }
+
   // Debug joint state publishers (dynamically reconfigurable)
   param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( node );
   update_debug_publishers( params_.publish_debug_joint_states );
@@ -511,6 +517,12 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     }
   }
 
+  // Compute manipulability index if collision checker is available (FK already done)
+  if ( collision_checker_ && !params_.manipulability_ee_frame.empty() ) {
+    last_manipulability_ =
+        collision_checker_->computeManipulability( params_.manipulability_ee_frame );
+  }
+
   return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
 }
 
@@ -869,6 +881,7 @@ void SafetyPositionController::publish_status()
   msg.effective_scale = last_effective_scale_;
   msg.worst_directional_derivative = last_worst_directional_derivative_;
   msg.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
+  msg.manipulability = last_manipulability_;
 
   // Populate active current limits per joint
   if ( params_.set_current_limits ) {
@@ -879,6 +892,14 @@ void SafetyPositionController::publish_status()
                               ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
                               : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
       msg.current_limits.push_back( limit );
+    }
+  } else {
+    // Simulate current limits for testing: start at 10A for joint 1, subtract 1A every 2 joints
+    msg.joint_names = params_.joints;
+    msg.current_limits.reserve( params_.joints.size() );
+    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+      const double simulated_limit = 10.0 - static_cast<double>( i / 2 );
+      msg.current_limits.push_back( simulated_limit );
     }
   }
 
