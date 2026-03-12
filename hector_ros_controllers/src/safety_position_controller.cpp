@@ -869,6 +869,19 @@ void SafetyPositionController::publish_status()
   msg.effective_scale = last_effective_scale_;
   msg.worst_directional_derivative = last_worst_directional_derivative_;
   msg.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
+
+  // Populate active current limits per joint
+  if ( params_.set_current_limits ) {
+    msg.joint_names = params_.joints;
+    msg.current_limits.reserve( params_.joints.size() );
+    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+      const auto &limit = in_compliant_mode_
+                              ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
+                              : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
+      msg.current_limits.push_back( limit );
+    }
+  }
+
   status_pub_->publish( msg );
 }
 
