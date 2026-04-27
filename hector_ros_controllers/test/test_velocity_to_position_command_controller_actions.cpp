@@ -7,7 +7,6 @@
 
 using VelToPosController =
     velocity_to_position_command_controller::VelocityToPositionCommandController;
-using MoveState = velocity_to_position_command_controller::MoveState;
 using GroupActionState = velocity_to_position_command_controller::GroupActionState;
 using DriveFlipperGroupAction = hector_ros_controllers_msgs::action::DriveFlipperGroup;
 using SyncFlipperGroupAction = hector_ros_controllers_msgs::action::SyncFlipperGroup;
@@ -441,6 +440,118 @@ TEST_F( VelToPosControllerActionTest, SyncFlipperGroup_PerGroupSubset )
   EXPECT_EQ( controller_->group_action_states_[g_b_idx].load(), GroupActionState::IDLE );
 }
 
+// Verify partial-failure rollback: if an early group starts successfully but
+// a later group fails (e.g. all-NaN positions), the already-started group must
+// be cancelled before the goal is aborted. Otherwise the operator gets a
+// "failed" result while the robot keeps moving the early group.
+TEST_F( VelToPosControllerActionTest, SyncFlipperGroup_PartialFailureRollsBackStartedGroups )
+{
+  // Use deterministic group names so g_a sorts before g_b.
+  initController( { "g_a", "g_a", "g_b" } );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // Inject a position snapshot where g_a (joints 0,1) is valid but g_b (joint 2)
+  // has NaN — that makes valid_count==0 for g_b and triggers the abort path.
+  std::vector<double> positions{ 0.0, 0.4, std::numeric_limits<double>::quiet_NaN() };
+  controller_->rt_joint_position_snapshot_.set( positions );
+
+  auto goal = std::make_shared<SyncFlipperGroupAction::Goal>();
+  // Empty group_names -> all groups, in sorted order: [g_a, g_b]. g_a starts,
+  // then g_b fails with valid_count==0.
+  goal->max_velocity = 5.0;
+  goal->max_acceleration = 20.0;
+
+  auto mock_goal_handle = rtest::experimental::createMockGoalHandle<SyncFlipperGroupAction>( goal );
+
+  std::shared_ptr<SyncFlipperGroupAction::Result> captured_result;
+  EXPECT_CALL( *mock_goal_handle, abort( _ ) ).Times( 1 ).WillOnce( SaveArg<0>( &captured_result ) );
+  EXPECT_CALL( *mock_goal_handle, succeed( _ ) ).Times( 0 );
+
+  controller_->handle_sync_accepted( mock_goal_handle );
+
+  ASSERT_TRUE( captured_result );
+  EXPECT_FALSE( captured_result->success );
+  EXPECT_NE( captured_result->message.find( "valid joint positions" ), std::string::npos );
+
+  // Both groups must end in a non-EXECUTING state. g_a was started and must be
+  // rolled back to IDLE; g_b never started so it stays IDLE.
+  size_t g_a_idx = controller_->group_index_map_["g_a"];
+  size_t g_b_idx = controller_->group_index_map_["g_b"];
+  EXPECT_EQ( controller_->group_action_states_[g_a_idx].load(), GroupActionState::IDLE )
+      << "g_a should have been rolled back to IDLE after g_b's failure";
+  EXPECT_EQ( controller_->group_action_states_[g_b_idx].load(), GroupActionState::IDLE );
+}
+
+// ============================================================================
+// Overlap rejection tests
+// ============================================================================
+
+// A second drive goal targeting an EXECUTING group must be REJECTed by the
+// goal callback, not silently accepted (which would hijack the first goal).
+TEST_F( VelToPosControllerActionTest, DriveFlipperGroup_RejectsOverlappingGoal )
+{
+  initController( { "g_a", "g_a", "g_b" } );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  auto server_mock = rtest::experimental::findActionServer<DriveFlipperGroupAction>(
+      controller_->get_node(), "~/drive_flipper_group" );
+  ASSERT_TRUE( server_mock );
+
+  // Force g_a into EXECUTING without spawning a real monitor thread.
+  size_t g_a_idx = controller_->group_index_map_["g_a"];
+  controller_->group_action_states_[g_a_idx].store( GroupActionState::EXECUTING );
+
+  // Second goal on the same group must be rejected.
+  auto goal = std::make_shared<DriveFlipperGroupAction::Goal>();
+  goal->group_name = "g_a";
+  goal->target_position = 0.5;
+
+  rclcpp_action::GoalUUID uuid{};
+  EXPECT_EQ( server_mock->goal_callback( uuid, goal ), rclcpp_action::GoalResponse::REJECT );
+
+  // Reset so TearDown's deactivate doesn't try to cancel a fake goal handle.
+  controller_->group_action_states_[g_a_idx].store( GroupActionState::IDLE );
+}
+
+// SyncFlipperGroup with explicit group_names must reject when any target group
+// is already executing.
+TEST_F( VelToPosControllerActionTest, SyncFlipperGroup_RejectsWhenAnyTargetGroupExecuting )
+{
+  initController( { "g_a", "g_a", "g_b" } );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  auto server_mock = rtest::experimental::findActionServer<SyncFlipperGroupAction>(
+      controller_->get_node(), "~/sync_flipper_group" );
+  ASSERT_TRUE( server_mock );
+
+  // g_b is busy.
+  size_t g_b_idx = controller_->group_index_map_["g_b"];
+  controller_->group_action_states_[g_b_idx].store( GroupActionState::EXECUTING );
+
+  auto goal = std::make_shared<SyncFlipperGroupAction::Goal>();
+  goal->group_names = { "g_a", "g_b" };
+  rclcpp_action::GoalUUID uuid{};
+  EXPECT_EQ( server_mock->goal_callback( uuid, goal ), rclcpp_action::GoalResponse::REJECT );
+
+  // Same with empty group_names (= all groups), which includes g_b.
+  auto goal_all = std::make_shared<SyncFlipperGroupAction::Goal>();
+  EXPECT_EQ( server_mock->goal_callback( uuid, goal_all ), rclcpp_action::GoalResponse::REJECT );
+
+  // A goal that targets only g_a (not busy) must still be accepted.
+  auto goal_a = std::make_shared<SyncFlipperGroupAction::Goal>();
+  goal_a->group_names = { "g_a" };
+  EXPECT_EQ( server_mock->goal_callback( uuid, goal_a ),
+             rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE );
+
+  controller_->group_action_states_[g_b_idx].store( GroupActionState::IDLE );
+}
+
 // ============================================================================
 // Monitor thread reaping
 // ============================================================================
@@ -498,10 +609,10 @@ TEST_F( VelToPosControllerActionTest, MonitorThread_ReapsAfterCompletion )
              rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE );
   controller_->handle_drive_accepted( mgh2 );
 
-  // After reaping, only the new (still-running) thread should remain.
+  // After reaping, exactly one thread (the new one) should remain.
   {
     std::lock_guard<std::mutex> lock( controller_->action_monitor_threads_mutex_ );
-    EXPECT_LE( controller_->action_monitor_threads_.size(), 1u )
+    EXPECT_EQ( controller_->action_monitor_threads_.size(), 1u )
         << "First monitor thread should have been reaped before the second was added";
   }
 

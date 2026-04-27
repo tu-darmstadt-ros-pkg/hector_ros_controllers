@@ -1339,6 +1339,74 @@ TEST_F( VelocityToPositionCommandControllerTest, GroupActionClampsToUrdfLimits )
   EXPECT_LE( hw_cmd_values_[1], 1.5 + 1e-9 );
 }
 
+// Verify the COMPLETION path also clamps to URDF limits — the in-flight branch
+// caps the joint, but on the last tick the controller previously jumped to the
+// unclamped target_position. This test runs a SHORT profile (so we reach
+// COMPLETED) with a target far outside joint2's [-1.5, 1.5] URDF range, and
+// asserts the final command is clamped, not the raw target.
+TEST_F( VelocityToPositionCommandControllerTest, GroupActionCompletionClampsToUrdfLimits )
+{
+  std::vector<std::string> sync_groups = { "group_a", "group_b", "group_c" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  size_t group_idx = controller_->group_index_map_["group_b"];
+
+  // Profile: 0 -> 3.0, max_vel=4, max_accel=10
+  // dist_for_full = 16/10 = 1.6; abs_distance = 3.0 >= 1.6 -> full trapezoid
+  // t_accel = 4/10 = 0.4, cruise_distance = 3.0-1.6 = 1.4, t_cruise = 0.35
+  // total_time = 0.4 + 0.35 + 0.4 = 1.15s = 115 cycles
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 3.0;
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 3.0, 4.0, 10.0 );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  // Run well past total_time so the controller hits the completion branch.
+  for ( int i = 0; i < 200; i++ ) { callUpdate(); }
+
+  ASSERT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
+  EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPED );
+  // Final command must be clamped to the URDF upper limit, NOT the unclamped 3.0.
+  EXPECT_NEAR( hw_cmd_values_[1], 1.5, 1e-9 );
+  EXPECT_NEAR( controller_->hold_positions_[1], 1.5, 1e-9 );
+  EXPECT_NEAR( controller_->desired_positions_[1], 1.5, 1e-9 );
+}
+
+// Defense-in-depth: even if the goal callback failed to reject an overlapping
+// goal (e.g. due to a race), start_group_action must refuse to overwrite an
+// EXECUTING group's RT command/state.
+TEST_F( VelocityToPositionCommandControllerTest, StartGroupActionRejectsAlreadyExecutingGroup )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  size_t group_idx = controller_->group_index_map_["group1"];
+
+  // Pretend a goal is already in flight.
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  // Try to start a second goal on the same group — must return an error.
+  std::vector<double> targets{ 0.5, 0.5 };
+  const auto error = controller_->start_group_action( "group1", targets, 1.0, 2.0 );
+  EXPECT_FALSE( error.empty() );
+  EXPECT_NE( error.find( "already executing" ), std::string::npos );
+
+  // State must NOT have been clobbered.
+  EXPECT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::EXECUTING );
+
+  // Reset for clean teardown.
+  controller_->group_action_states_[group_idx].store( GroupActionState::IDLE );
+}
+
 // ============================================================================
 // Velocity Timeout -> Braking Transition
 // ============================================================================

@@ -27,6 +27,14 @@ std::string VelocityToPositionCommandController::start_group_action(
   const size_t group_idx = group_index_it->second;
   const auto &group_joint_indices = group_it->second;
 
+  // Defense in depth: even if the goal callback accepted, refuse to overwrite
+  // an in-flight goal's RT command/state. Without this, a second client could
+  // silently hijack the first goal and the first monitor thread would report
+  // success for the wrong motion.
+  if ( group_action_states_[group_idx].load() == GroupActionState::EXECUTING ) {
+    return "Group '" + group_name + "' is already executing";
+  }
+
   if ( target_positions_per_joint.size() != group_joint_indices.size() ) {
     return "Target positions size mismatch for group '" + group_name + "'";
   }
@@ -141,8 +149,18 @@ rclcpp_action::GoalResponse VelocityToPositionCommandController::handle_drive_go
     const rclcpp_action::GoalUUID & /*uuid*/,
     std::shared_ptr<const DriveFlipperGroupAction::Goal> goal )
 {
-  if ( group_index_map_.find( goal->group_name ) == group_index_map_.end() ) {
+  const auto group_index_it = group_index_map_.find( goal->group_name );
+  if ( group_index_it == group_index_map_.end() ) {
     RCLCPP_WARN( get_node()->get_logger(), "DriveFlipperGroup: unknown group '%s'",
+                 goal->group_name.c_str() );
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  // Refuse to overlap an in-flight goal. The client must cancel the current
+  // goal first; otherwise we'd silently hijack it and the first goal handle
+  // would later receive a misleading result.
+  if ( group_action_states_[group_index_it->second].load() == GroupActionState::EXECUTING ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "DriveFlipperGroup: group '%s' already executing; rejecting overlapping goal",
                  goal->group_name.c_str() );
     return rclcpp_action::GoalResponse::REJECT;
   }
@@ -159,8 +177,19 @@ void VelocityToPositionCommandController::handle_drive_accepted(
     std::shared_ptr<DriveFlipperGroupGoalHandle> goal_handle )
 {
   const auto goal = goal_handle->get_goal();
-  const auto &group_joint_indices = groups_[goal->group_name];
-  const size_t group_idx = group_index_map_[goal->group_name];
+  // Goal callback validated the name and rejected overlap, so find() should
+  // succeed; abort cleanly if it doesn't (e.g. groups_ changed concurrently).
+  const auto group_it = groups_.find( goal->group_name );
+  const auto group_index_it = group_index_map_.find( goal->group_name );
+  if ( group_it == groups_.end() || group_index_it == group_index_map_.end() ) {
+    auto result = std::make_shared<DriveFlipperGroupAction::Result>();
+    result->success = false;
+    result->message = "Unknown group '" + goal->group_name + "'";
+    goal_handle->abort( result );
+    return;
+  }
+  const auto &group_joint_indices = group_it->second;
+  const size_t group_idx = group_index_it->second;
 
   const double target =
       ( goal->target_position == 0.0 ) ? params_.upright_position : goal->target_position;
@@ -244,6 +273,20 @@ rclcpp_action::GoalResponse VelocityToPositionCommandController::handle_sync_goa
       }
     }
   }
+  // Refuse to overlap an in-flight goal on any target group. With empty
+  // group_names we sync everything, so check all groups; otherwise just the
+  // requested ones.
+  const std::vector<std::string> &check_names = names.empty() ? group_names_ : names;
+  for ( const auto &name : check_names ) {
+    const auto it = group_index_map_.find( name );
+    if ( it != group_index_map_.end() &&
+         group_action_states_[it->second].load() == GroupActionState::EXECUTING ) {
+      RCLCPP_WARN( get_node()->get_logger(),
+                   "SyncFlipperGroup: group '%s' already executing; rejecting overlapping goal",
+                   name.c_str() );
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+  }
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -270,15 +313,26 @@ void VelocityToPositionCommandController::handle_sync_accepted(
 
   std::vector<size_t> target_group_indices;
   std::vector<double> group_avg_positions;
+  // Track which groups we've successfully started so we can roll them back if
+  // a later group fails — otherwise the operator gets a "failed" goal result
+  // while earlier groups keep moving.
+  std::vector<size_t> started_group_indices;
+
+  auto abort_with = [&]( const std::string &message ) {
+    if ( !started_group_indices.empty() ) {
+      cancel_group_actions( started_group_indices );
+    }
+    auto result = std::make_shared<SyncFlipperGroupAction::Result>();
+    result->success = false;
+    result->message = message;
+    goal_handle->abort( result );
+  };
 
   for ( const auto &group_name : target_groups ) {
     const auto group_index_it = group_index_map_.find( group_name );
     const auto group_it = groups_.find( group_name );
     if ( group_index_it == group_index_map_.end() || group_it == groups_.end() ) {
-      auto result = std::make_shared<SyncFlipperGroupAction::Result>();
-      result->success = false;
-      result->message = "Unknown group '" + group_name + "'";
-      goal_handle->abort( result );
+      abort_with( "Unknown group '" + group_name + "'" );
       return;
     }
     const auto &group_joint_indices = group_it->second;
@@ -295,10 +349,7 @@ void VelocityToPositionCommandController::handle_sync_accepted(
     }
 
     if ( valid_count == 0 ) {
-      auto result = std::make_shared<SyncFlipperGroupAction::Result>();
-      result->success = false;
-      result->message = "Group '" + group_name + "' has no valid joint positions";
-      goal_handle->abort( result );
+      abort_with( "Group '" + group_name + "' has no valid joint positions" );
       return;
     }
 
@@ -309,12 +360,10 @@ void VelocityToPositionCommandController::handle_sync_accepted(
     std::vector<double> targets( group_joint_indices.size(), avg );
     const auto error = start_group_action( group_name, targets, max_vel, max_accel );
     if ( !error.empty() ) {
-      auto result = std::make_shared<SyncFlipperGroupAction::Result>();
-      result->success = false;
-      result->message = error;
-      goal_handle->abort( result );
+      abort_with( error );
       return;
     }
+    started_group_indices.push_back( group_index_it->second );
 
     RCLCPP_INFO( get_node()->get_logger(), "SyncFlipperGroup: syncing group '%s' to avg=%.4f",
                  group_name.c_str(), avg );
@@ -419,10 +468,15 @@ bool VelocityToPositionCommandController::process_group_actions( const rclcpp::T
     }
 
     if ( all_complete ) {
-      // Hold at target
+      // Hold at target — clamp to URDF limits before writing, matching the
+      // in-flight branch. Without this, a target outside joint limits would
+      // produce an out-of-range command on the completion tick.
       for ( size_t i = 0; i < group_joint_indices.size(); i++ ) {
         const size_t idx = group_joint_indices[i];
-        const double target = cmd_ptr->joint_profiles[i].target_position;
+        double target = cmd_ptr->joint_profiles[i].target_position;
+        if ( !std::isnan( joint_lower_limits_[idx] ) ) {
+          target = std::clamp( target, joint_lower_limits_[idx], joint_upper_limits_[idx] );
+        }
         desired_positions_[idx] = target;
         hold_positions_[idx] = target;
         move_states_[idx] = STOPPED;
