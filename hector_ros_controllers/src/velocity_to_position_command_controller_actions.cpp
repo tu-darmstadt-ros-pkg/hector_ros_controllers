@@ -166,7 +166,9 @@ void VelocityToPositionCommandController::handle_drive_accepted(
   RCLCPP_INFO( get_node()->get_logger(), "DriveFlipperGroup: driving group '%s' to %.4f",
                goal->group_name.c_str(), target );
 
-  action_monitor_threads_.emplace_back( [this, goal_handle, group_idx, group_joint_indices]() {
+  reap_finished_monitor_threads();
+  auto done_flag = std::make_shared<std::atomic<bool>>( false );
+  std::thread t( [this, goal_handle, group_idx, group_joint_indices, done_flag]() {
     monitor_group_actions(
         { group_idx }, [&]() { return goal_handle->is_canceling(); },
         /*on_complete*/
@@ -191,12 +193,20 @@ void VelocityToPositionCommandController::handle_drive_accepted(
         [&]( double progress ) {
           auto feedback = std::make_shared<DriveFlipperGroupAction::Feedback>();
           feedback->progress = progress;
+          const auto positions = rt_joint_position_snapshot_.get();
           for ( size_t idx : group_joint_indices ) {
-            feedback->current_positions.push_back( joint_position_states_[idx] );
+            if ( idx < positions.size() ) {
+              feedback->current_positions.push_back( positions[idx] );
+            }
           }
           goal_handle->publish_feedback( feedback );
         } );
+    done_flag->store( true );
   } );
+  {
+    std::lock_guard<std::mutex> lock( action_monitor_threads_mutex_ );
+    action_monitor_threads_.push_back( { std::move( t ), done_flag } );
+  }
 }
 
 rclcpp_action::GoalResponse VelocityToPositionCommandController::handle_sync_goal(
@@ -280,47 +290,55 @@ void VelocityToPositionCommandController::handle_sync_accepted(
                  group_name.c_str(), avg );
   }
 
-  action_monitor_threads_.emplace_back( [this, goal_handle, target_groups, target_group_indices,
-                                         group_avg_positions]() {
-    monitor_group_actions(
-        target_group_indices, [&]() { return goal_handle->is_canceling(); },
-        /*on_complete*/
-        [&]() {
-          auto result = std::make_shared<SyncFlipperGroupAction::Result>();
-          result->success = true;
-          result->message = "All groups synced";
-          result->synced_positions = group_avg_positions;
-          goal_handle->succeed( result );
-        },
-        /*on_abort*/
-        [&]( const std::string &reason ) {
-          auto result = std::make_shared<SyncFlipperGroupAction::Result>();
-          result->success = false;
-          result->message = reason;
-          if ( reason.find( "client" ) != std::string::npos ) {
-            goal_handle->canceled( result );
-          } else {
-            goal_handle->abort( result );
-          }
-        },
-        /*on_feedback*/
-        [&]( double progress ) {
-          auto feedback = std::make_shared<SyncFlipperGroupAction::Feedback>();
-          feedback->progress = progress;
-          // Compute max position error across all groups
-          double max_error = 0.0;
-          for ( size_t g = 0; g < target_groups.size(); g++ ) {
-            for ( size_t idx : groups_[target_groups[g]] ) {
-              if ( !std::isnan( joint_position_states_[idx] ) ) {
-                max_error = std::max(
-                    max_error, std::abs( joint_position_states_[idx] - group_avg_positions[g] ) );
+  reap_finished_monitor_threads();
+  auto done_flag = std::make_shared<std::atomic<bool>>( false );
+  std::thread t(
+      [this, goal_handle, target_groups, target_group_indices, group_avg_positions, done_flag]() {
+        monitor_group_actions(
+            target_group_indices, [&]() { return goal_handle->is_canceling(); },
+            /*on_complete*/
+            [&]() {
+              auto result = std::make_shared<SyncFlipperGroupAction::Result>();
+              result->success = true;
+              result->message = "All groups synced";
+              result->synced_positions = group_avg_positions;
+              goal_handle->succeed( result );
+            },
+            /*on_abort*/
+            [&]( const std::string &reason ) {
+              auto result = std::make_shared<SyncFlipperGroupAction::Result>();
+              result->success = false;
+              result->message = reason;
+              if ( reason.find( "client" ) != std::string::npos ) {
+                goal_handle->canceled( result );
+              } else {
+                goal_handle->abort( result );
               }
-            }
-          }
-          feedback->max_position_error = max_error;
-          goal_handle->publish_feedback( feedback );
-        } );
-  } );
+            },
+            /*on_feedback*/
+            [&]( double progress ) {
+              auto feedback = std::make_shared<SyncFlipperGroupAction::Feedback>();
+              feedback->progress = progress;
+              // Compute max position error across all groups using an RT snapshot.
+              const auto positions = rt_joint_position_snapshot_.get();
+              double max_error = 0.0;
+              for ( size_t g = 0; g < target_groups.size(); g++ ) {
+                for ( size_t idx : groups_[target_groups[g]] ) {
+                  if ( idx < positions.size() && !std::isnan( positions[idx] ) ) {
+                    max_error =
+                        std::max( max_error, std::abs( positions[idx] - group_avg_positions[g] ) );
+                  }
+                }
+              }
+              feedback->max_position_error = max_error;
+              goal_handle->publish_feedback( feedback );
+            } );
+        done_flag->store( true );
+      } );
+  {
+    std::lock_guard<std::mutex> lock( action_monitor_threads_mutex_ );
+    action_monitor_threads_.push_back( { std::move( t ), done_flag } );
+  }
 }
 
 // ---------------------------------------------------------------------------

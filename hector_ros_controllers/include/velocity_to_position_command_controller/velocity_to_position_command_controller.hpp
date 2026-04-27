@@ -2,7 +2,9 @@
 #define VELOCITY_TO_POSITION_COMMAND_CONTROLLER__VELOCITY_TO_POSITION_COMMAND_CONTROLLER_HPP_
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -15,6 +17,7 @@
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
 #include "realtime_tools/realtime_publisher.hpp"
+#include "realtime_tools/realtime_thread_safe_box.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
@@ -219,6 +222,10 @@ private:
   std::vector<realtime_tools::RealtimeBuffer<GroupActionCommand>> rt_group_action_cmds_;
   std::vector<std::atomic<GroupActionState>> group_action_states_;
 
+  // RT-safe snapshot of joint position states for use by non-RT monitor threads (action feedback).
+  // Written from update_and_write_commands() via try_set, read from monitor_group_actions().
+  realtime_tools::RealtimeThreadSafeBox<std::vector<double>> rt_joint_position_snapshot_;
+
   // Action servers
   rclcpp_action::Server<DriveFlipperGroupAction>::SharedPtr drive_flipper_action_server_;
   rclcpp_action::Server<SyncFlipperGroupAction>::SharedPtr sync_flipper_action_server_;
@@ -263,9 +270,17 @@ private:
   /// Process active group actions in update loop
   bool process_group_actions( const rclcpp::Time &time );
 
-  // Action monitoring threads
-  std::vector<std::thread> action_monitor_threads_;
-  void cleanup_monitor_threads();
+  // Action monitoring threads. Each thread sets its `done` flag at the end so
+  // finished threads can be joined and erased opportunistically (rather than
+  // accumulating until on_deactivate).
+  struct MonitorThread {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> done;
+  };
+  std::vector<MonitorThread> action_monitor_threads_;
+  std::mutex action_monitor_threads_mutex_;
+  void reap_finished_monitor_threads(); ///< Join+erase threads that signaled done.
+  void cleanup_monitor_threads();       ///< Join+erase all threads (used on deactivate).
 };
 
 } // namespace velocity_to_position_command_controller

@@ -4,8 +4,8 @@
 
 # Goal
 string[] group_names        # groups to sync; empty = sync all groups
-float64 max_velocity        # max velocity in rad/s (0 = use max_action_velocity parameter)
-float64 max_acceleration    # max acceleration in rad/s^2 (0 = use max_action_acceleration parameter)
+float64 max_velocity        # max velocity in rad/s (0 = use max_velocity parameter)
+float64 max_acceleration    # max acceleration in rad/s^2 (0 = use max_acceleration parameter)
 ---
 # Result
 bool success

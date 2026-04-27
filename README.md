@@ -135,7 +135,7 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | **passthrough_controller**      | `string`       | `""`                     | Prefix for the lower-level controller exposing command interfaces.                                                                              |
 | **e_stop_topic**                | `string`       | `estop_board/hard_estop` | Topic for emergency stop messages (`std_msgs/Bool`).                                                                                            |
 | **velocity_command_timeout**    | `double`       | `0.0`                    | Timeout in seconds. If no non-zero velocity command arrives within this duration, references are zeroed. 0 disables.                            |
-| **upright_position**            | `double`       | `3.14159265`             | Default target position for the drive flipper group action (rad).                                                                               |
+| **upright_position**            | `double`       | `1.517`                  | Default target position for the drive flipper group action (rad).                                                                               |
 | **publish_debug_joint_states**  | `bool`         | `false`                  | If `true`, publishes `~/debug_in_joint_states` (velocity refs) and `~/debug_out_joint_states` (position cmds) as `sensor_msgs/JointState`.     |
 
 ### Topics
@@ -147,7 +147,13 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | `~/debug_in_joint_states`  | `sensor_msgs/JointState` | Incoming velocity references (only when `publish_debug_joint_states`). |
 | `~/debug_out_joint_states` | `sensor_msgs/JointState` | Outgoing position commands (only when `publish_debug_joint_states`).   |
 
-<<<<<<< Updated upstream
+### Actions
+
+| Action                      | Type                                              | Description                                                                                                                                     |
+|-----------------------------|---------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `~/drive_flipper_group`     | `hector_ros_controllers_msgs/DriveFlipperGroup`   | Drives all joints in a synchronous group to a target position using trapezoidal profiles. Cancelled immediately by velocity commands on the group. |
+| `~/sync_flipper_group`      | `hector_ros_controllers_msgs/SyncFlipperGroup`    | Syncs one or more flipper groups to their average positions. Supports simultaneous multi-group sync. Cancelled immediately by velocity commands.  |
+
 ---
 
 ## 4. Safety Position Controller
@@ -216,15 +222,6 @@ A **safety layer for joint position commands**, usable both
 | `safety_bypass_joint_limit_tolerance` | `double` | `0.03`  | Tolerance factor (0.0-1.0) added to joint limits during bypass. E.g., 0.03 = 3% beyond normal limits.               |
 
 > **Note:** Parameters are read/updated at `on_activate()`. To apply runtime changes reliably, deactivate and reactivate the controller.
-=======
-### Actions
-
-| Action                      | Type                                              | Description                                                                                                                                     |
-|-----------------------------|---------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `~/drive_flipper_group`     | `hector_ros_controllers_msgs/DriveFlipperGroup`   | Drives all joints in a synchronous group to a target position using trapezoidal profiles. Cancelled immediately by velocity commands on the group. |
-| `~/sync_flipper_group`      | `hector_ros_controllers_msgs/SyncFlipperGroup`    | Syncs one or more flipper groups to their average positions. Supports simultaneous multi-group sync. Cancelled immediately by velocity commands.  |
-
->>>>>>> Stashed changes
 
 ---
 

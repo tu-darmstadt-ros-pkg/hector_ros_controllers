@@ -34,8 +34,8 @@ struct TrapezoidalProfile {
     p.direction = ( distance >= 0.0 ) ? 1 : -1;
     const double abs_distance = std::abs( distance );
 
-    if ( abs_distance < 1e-9 || p.acceleration < 1e-9 ) {
-      // Already at target or no acceleration configured
+    if ( abs_distance < 1e-9 || p.acceleration < 1e-9 || p.max_velocity < 1e-9 ) {
+      // Already at target, no acceleration, or no velocity configured
       p.total_time = 0.0;
       return p;
     }

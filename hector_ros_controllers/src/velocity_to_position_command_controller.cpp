@@ -364,6 +364,9 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
     group_action_states_[i].store( GroupActionState::IDLE );
   }
 
+  // Seed snapshot so non-RT readers see a correctly sized vector before the first update tick.
+  rt_joint_position_snapshot_.set( joint_position_states_ );
+
   // Create action servers
   using namespace std::placeholders;
   drive_flipper_action_server_ = rclcpp_action::create_server<DriveFlipperGroupAction>(
@@ -402,12 +405,29 @@ VelocityToPositionCommandController::on_deactivate( const rclcpp_lifecycle::Stat
 
 void VelocityToPositionCommandController::cleanup_monitor_threads()
 {
-  for ( auto &t : action_monitor_threads_ ) {
-    if ( t.joinable() ) {
-      t.join();
+  std::lock_guard<std::mutex> lock( action_monitor_threads_mutex_ );
+  for ( auto &mt : action_monitor_threads_ ) {
+    if ( mt.thread.joinable() ) {
+      mt.thread.join();
     }
   }
   action_monitor_threads_.clear();
+}
+
+void VelocityToPositionCommandController::reap_finished_monitor_threads()
+{
+  std::lock_guard<std::mutex> lock( action_monitor_threads_mutex_ );
+  auto it = action_monitor_threads_.begin();
+  while ( it != action_monitor_threads_.end() ) {
+    if ( it->done && it->done->load() ) {
+      if ( it->thread.joinable() ) {
+        it->thread.join();
+      }
+      it = action_monitor_threads_.erase( it );
+    } else {
+      ++it;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +802,9 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
 {
   update_joint_states_if_valid();
 
+  // Snapshot positions for non-RT consumers (action feedback). try_set is non-blocking.
+  rt_joint_position_snapshot_.try_set( joint_position_states_ );
+
   publish_debug_joint_state_in();
 
   // Velocity command timeout: zero references if no non-zero command received within timeout
@@ -849,9 +872,10 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       continue;
     }
 
-    // Clamp velocity reference to max_velocity
+    // Clamp velocity reference to max_velocity (use abs to be safe if param is set negative)
+    const double velocity_limit = std::abs( max_velocity_ );
     const double vel_command =
-        std::clamp( reference_interfaces_[joint_idx], -max_velocity_, max_velocity_ );
+        std::clamp( reference_interfaces_[joint_idx], -velocity_limit, velocity_limit );
 
     update_move_states( vel_command, joint_idx, time );
 
