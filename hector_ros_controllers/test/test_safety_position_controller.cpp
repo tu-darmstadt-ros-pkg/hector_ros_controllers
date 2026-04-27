@@ -1477,7 +1477,7 @@ TEST_F( SafetyPositionControllerCollisionTest, ActivateFailsWhenSafetyZoneEquals
 }
 
 // ============================================================================
-// Safety Bypass Skips Collision But Still Limits Velocity
+// Safety Bypass Skips Collision And Allows Relaxed Limits
 // ============================================================================
 
 TEST_F( SafetyPositionControllerCollisionTest, BypassSkipsCollisionButAllowsRelaxedLimits )

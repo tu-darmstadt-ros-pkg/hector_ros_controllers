@@ -75,22 +75,34 @@ public:
 
   /**
    * @brief Collision check from name→position map.
+   * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
    * @param joint_positions rad (rev) / m (prismatic)
-   * @param safety_zone_threshold when > 0, computes per-pair distance gradients (dd/dv)
-   *        for all pairs with distance < threshold. Set to 0 to skip gradient computation.
    * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
    */
-  CollisionResult checkCollision( const std::unordered_map<std::string, double> &joint_positions,
-                                  double safety_zone_threshold = 0.0 );
+  CollisionResult checkCollision( const std::unordered_map<std::string, double> &joint_positions );
 
   /**
    * @brief Collision check for full q.
+   * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
    * @param q size == model_.nq
-   * @param safety_zone_threshold when > 0, computes per-pair distance gradients (dd/dv)
-   *        for all pairs with distance < threshold. Set to 0 to skip gradient computation.
    * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
    */
-  CollisionResult checkCollisionQ( const Eigen::VectorXd &q, double safety_zone_threshold = 0.0 );
+  CollisionResult checkCollisionQ( const Eigen::VectorXd &q );
+
+  /**
+   * @brief Set the safety-zone threshold used by subsequent collision queries.
+   * When > 0, the next query computes per-pair distance gradients (dd/dv) for all
+   * pairs with distance < threshold; otherwise gradient computation is skipped.
+   * If the new threshold is larger than the previously cached one, the cache is
+   * invalidated so the next call cannot reuse a result that omitted now-relevant pairs.
+   * @param threshold new threshold in [m]; 0 disables gradient computation
+   */
+  void setSafetyZoneThreshold( double threshold );
+
+  /**
+   * @brief Currently configured safety-zone threshold [m].
+   */
+  double getSafetyZoneThreshold() const;
 
   /**
    * @brief Get the velocity-space index for a named joint.
@@ -155,7 +167,7 @@ public:
 
   /**
    * @brief Compute the Yoshikawa manipulability index for a given end-effector frame.
-   * Requires FK and joint Jacobians to have been called (i.e., after checkCollision).
+   * Evaluated at the configuration of the last collision check (q_last_).
    * @param ee_frame_name name of the end-effector frame in the URDF
    * @return w = sqrt(det(J * J^T)), 0 if singular or frame not found
    */
@@ -201,6 +213,7 @@ private:
 
   double collision_padding_{ 0.0 };
   double collision_cache_epsilon_{ 1e-6 };
+  double safety_zone_threshold_{ 0.0 }; ///< 0 = no gradient computation
   bool pub_debug_geometry_{ false };
   bool pub_collision_distances_{ false };
   std::shared_ptr<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>> rt_markers_pub_;

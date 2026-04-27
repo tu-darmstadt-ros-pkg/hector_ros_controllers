@@ -136,11 +136,12 @@ void BM_CollisionChecker_TwoPass( benchmark::State &state )
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
   auto checker = bs.makeChecker( padding, /*debug_viz=*/false );
+  checker->setSafetyZoneThreshold( safety_zone );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config, safety_zone );
+    auto result = checker->checkCollision( config );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -156,11 +157,12 @@ void BM_CollisionChecker_SinglePass( benchmark::State &state )
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
   auto checker = bs.makeChecker( padding, /*debug_viz=*/true );
+  checker->setSafetyZoneThreshold( safety_zone );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config, safety_zone );
+    auto result = checker->checkCollision( config );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -189,11 +191,12 @@ void BM_CollisionChecker_TwoPass_Folded( benchmark::State &state )
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
   auto checker = bs.makeChecker( padding, /*debug_viz=*/false );
+  checker->setSafetyZoneThreshold( safety_zone );
   auto configs = generatePerturbedConfigs( POSES[0].positions, 500 );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
-    auto result = checker->checkCollision( configs[i % configs.size()], safety_zone );
+    auto result = checker->checkCollision( configs[i % configs.size()] );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -208,11 +211,12 @@ void BM_CollisionChecker_SinglePass_Folded( benchmark::State &state )
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
   auto checker = bs.makeChecker( padding, /*debug_viz=*/true );
+  checker->setSafetyZoneThreshold( safety_zone );
   auto configs = generatePerturbedConfigs( POSES[0].positions, 500 );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
-    auto result = checker->checkCollision( configs[i % configs.size()], safety_zone );
+    auto result = checker->checkCollision( configs[i % configs.size()] );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -230,7 +234,7 @@ void BM_CollisionChecker_DistanceOnly( benchmark::State &state )
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config, 0.0 );
+    auto result = checker->checkCollision( config );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -248,11 +252,12 @@ void BM_Broadphase_TwoPass( benchmark::State &state )
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
   auto checker = bs.makeBroadphaseChecker( padding, /*debug_viz=*/false );
+  checker->setSafetyZoneThreshold( safety_zone );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config, safety_zone );
+    auto result = checker->checkCollision( config );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -268,11 +273,12 @@ void BM_Broadphase_SinglePass( benchmark::State &state )
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
   auto checker = bs.makeBroadphaseChecker( padding, /*debug_viz=*/true );
+  checker->setSafetyZoneThreshold( safety_zone );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config, safety_zone );
+    auto result = checker->checkCollision( config );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -288,11 +294,12 @@ void BM_Broadphase_TwoPass_Folded( benchmark::State &state )
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
   auto checker = bs.makeBroadphaseChecker( padding, /*debug_viz=*/false );
+  checker->setSafetyZoneThreshold( safety_zone );
   auto configs = generatePerturbedConfigs( POSES[0].positions, 500 );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
-    auto result = checker->checkCollision( configs[i % configs.size()], safety_zone );
+    auto result = checker->checkCollision( configs[i % configs.size()] );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -310,7 +317,7 @@ void BM_Broadphase_DistanceOnly( benchmark::State &state )
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config, 0.0 );
+    auto result = checker->checkCollision( config );
     benchmark::DoNotOptimize( result );
     ++i;
   }

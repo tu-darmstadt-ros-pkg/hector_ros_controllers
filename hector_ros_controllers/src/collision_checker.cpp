@@ -228,8 +228,7 @@ std::vector<std::string> CollisionChecker::getJointNames() const
 }
 
 CollisionResult
-CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions,
-                                  double safety_zone_threshold )
+CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
 {
 
   if ( model_.nq == 0 ) {
@@ -276,11 +275,11 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
     }
   }
 
-  return checkCollisionQ( q, safety_zone_threshold );
+  return checkCollisionQ( q );
 }
-CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q,
-                                                   double safety_zone_threshold )
+CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
+  const double safety_zone_threshold = safety_zone_threshold_;
 #ifdef SAFETY_CC_ENABLE_TIMING
   using clock = std::chrono::steady_clock;
   const auto t0 = clock::now();
@@ -476,6 +475,18 @@ void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
 {
   collision_cache_epsilon_ = epsilon;
 }
+
+void CollisionChecker::setSafetyZoneThreshold( double threshold )
+{
+  if ( threshold > safety_zone_threshold_ ) {
+    // Cached result was computed with a smaller threshold and may be missing
+    // pairs that now fall inside the wider safety zone — invalidate it.
+    q_last_.resize( 0 );
+  }
+  safety_zone_threshold_ = threshold;
+}
+
+double CollisionChecker::getSafetyZoneThreshold() const { return safety_zone_threshold_; }
 
 void CollisionChecker::setBroadphase( bool enable ) { use_broadphase_ = enable; }
 
@@ -894,12 +905,17 @@ double CollisionChecker::computeManipulability( const std::string &ee_frame_name
   if ( !model_.existFrame( ee_frame_name ) ) {
     return 0.0;
   }
+  if ( q_last_.size() != model_.nq ) {
+    return 0.0; // no collision check yet, cannot evaluate manipulability
+  }
   const auto frame_id = model_.getFrameId( ee_frame_name );
 
-  // Compute frame Jacobian in LOCAL_WORLD_ALIGNED frame
+  // computeFrameJacobian internally refreshes the kinematics it needs, so the result
+  // is correct independent of which pinocchio passes ran during the previous collision
+  // check (computeJointJacobians is only called when safety-zone pairs exist).
   Eigen::MatrixXd J = Eigen::MatrixXd::Zero( 6, model_.nv );
-  // data_ has been updated by checkCollision (FK + computeJointJacobians already called)
-  pinocchio::getFrameJacobian( model_, data_, frame_id, pinocchio::LOCAL_WORLD_ALIGNED, J );
+  pinocchio::computeFrameJacobian( model_, data_, q_last_, frame_id, pinocchio::LOCAL_WORLD_ALIGNED,
+                                   J );
 
   // Yoshikawa manipulability: w = sqrt(det(J * J^T))
   const Eigen::MatrixXd JJt = J * J.transpose(); // 6x6

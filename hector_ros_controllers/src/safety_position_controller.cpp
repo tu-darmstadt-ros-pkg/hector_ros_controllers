@@ -485,7 +485,8 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
                                           last_min_distance_ < params_.collision_safety_zone )
                                             ? params_.collision_safety_zone
                                             : 0.0;
-      const auto cc_result = collision_checker_->checkCollision( cc_positions_, gradient_threshold );
+      collision_checker_->setSafetyZoneThreshold( gradient_threshold );
+      const auto cc_result = collision_checker_->checkCollision( cc_positions_ );
       last_min_distance_ = cc_result.min_distance;
       last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
 
@@ -883,7 +884,7 @@ void SafetyPositionController::publish_status()
   msg.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
   msg.manipulability = last_manipulability_;
 
-  // Populate active current limits per joint
+  // Populate active current limits per joint (only meaningful when current_limits_enabled)
   if ( params_.set_current_limits ) {
     msg.joint_names = params_.joints;
     msg.current_limits.reserve( params_.joints.size() );
@@ -892,14 +893,6 @@ void SafetyPositionController::publish_status()
                               ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
                               : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
       msg.current_limits.push_back( limit );
-    }
-  } else {
-    // Simulate current limits for testing: start at 10A for joint 1, subtract 1A every 2 joints
-    msg.joint_names = params_.joints;
-    msg.current_limits.reserve( params_.joints.size() );
-    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-      const double simulated_limit = 10.0 - static_cast<double>( i / 2 );
-      msg.current_limits.push_back( simulated_limit );
     }
   }
 
