@@ -28,6 +28,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     hpp-fcl
     pinocchio
     rclcpp
+    rclcpp_action
     rclcpp_lifecycle
     realtime_tools
     sensor_msgs
@@ -63,6 +64,7 @@ add_library(
   controllers SHARED
   src/safety_forward_controller.cpp
   src/velocity_to_position_command_controller.cpp
+  src/velocity_to_position_command_controller_actions.cpp
   src/self_collision_avoidance_controller.cpp
   src/safety_position_controller.cpp
   src/collision_checker.cpp)
@@ -125,6 +127,7 @@ if(BUILD_TESTING)
     ${hector_ros_controllers_msgs_TARGETS}
     ${visualization_msgs_TARGETS}
     rclcpp::rclcpp
+    rclcpp_action::rclcpp_action
     rclcpp_lifecycle::rclcpp_lifecycle
     controller_interface::controller_interface
     hardware_interface::hardware_interface

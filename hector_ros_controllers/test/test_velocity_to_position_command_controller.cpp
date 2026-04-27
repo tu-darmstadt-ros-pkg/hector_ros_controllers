@@ -124,10 +124,15 @@ protected:
     ASSERT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
   }
 
+  int update_count_ = 0;
+
   controller_interface::return_type callUpdate()
   {
-    rclcpp::Time now( 0, 0, RCL_ROS_TIME );
+    // Advance time by 10ms per call so that time-dependent logic (braking profiles, timeout) works
+    auto ns = static_cast<int64_t>( update_count_ ) * 10'000'000LL; // 10ms in ns
+    rclcpp::Time now( ns, RCL_ROS_TIME );
     rclcpp::Duration period( std::chrono::milliseconds( 10 ) ); // dt = 0.01s
+    update_count_++;
     return controller_->update_and_write_commands( now, period );
   }
 
@@ -358,8 +363,8 @@ TEST_F( VelocityToPositionCommandControllerTest, StoppedHoldsPosition )
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
 }
 
-// Verify state machine transition MOVING -> STOPPING -> STOPPED with braking deceleration
-TEST_F( VelocityToPositionCommandControllerTest, MovingToStoppingWithBrakingDeceleration )
+// Verify state machine transition MOVING -> STOPPING -> STOPPED with trapezoidal braking profile
+TEST_F( VelocityToPositionCommandControllerTest, MovingToStoppingWithBrakingProfile )
 {
   initController();
   configureController();
@@ -379,21 +384,23 @@ TEST_F( VelocityToPositionCommandControllerTest, MovingToStoppingWithBrakingDece
   setPosition( 0, 0.5 );
   setVelocity( 0, 0.5 );
 
-  // Stop commanding -> should enter STOPPING and begin braking
+  // Stop commanding -> should enter STOPPING with a trapezoidal braking profile
   controller_->reference_interfaces_[0] = 0.0;
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
-  // desired_positions was re-synced to current position on entering STOPPING
-  // Then position_control integrated with the decelerating stopping velocity
-  // stopping_vel starts at 0.5, after one cycle: 0.5 - 5.0*0.01 = 0.45
-  EXPECT_NEAR( controller_->stopping_velocities_[0], 0.45, 1e-9 );
 
-  // Continue braking until stopped. At 5.0 rad/s^2 and starting at 0.5 rad/s,
-  // it takes 0.5/5.0 = 0.1s = 10 cycles to stop.
-  // We already did 1 cycle, so 9 more should bring it to STOPPED.
-  for ( int i = 0; i < 9; i++ ) { callUpdate(); }
+  // Braking profile: from pos=0.5 with vel=0.5, decel=4.0 (max_deceleration default)
+  // braking_distance = 0.5*0.5 / (2*4.0) = 0.03125, target = 0.53125
+  // profile duration = 0.5/4.0 = 0.125s = 12.5 cycles -> 13 cycles to complete
+  EXPECT_NEAR( controller_->braking_profiles_[0].target_position, 0.53125, 1e-9 );
+  EXPECT_NEAR( controller_->braking_profiles_[0].total_time, 0.125, 1e-9 );
+
+  // Continue braking until profile completes (we already did 1 cycle in STOPPING)
+  for ( int i = 0; i < 13; i++ ) { callUpdate(); }
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
-  EXPECT_DOUBLE_EQ( controller_->stopping_velocities_[0], 0.0 );
+
+  // Should hold at the braking target position
+  EXPECT_NEAR( controller_->hold_positions_[0], 0.53125, 1e-9 );
 }
 
 // Verify desired_positions re-syncs to actual position on STOPPED -> MOVING transition
@@ -772,9 +779,10 @@ TEST_F( VelocityToPositionCommandControllerTest, ContinuousJointNotClamped )
   EXPECT_TRUE( std::isnan( controller_->joint_lower_limits_[0] ) );
   EXPECT_TRUE( std::isnan( controller_->joint_upper_limits_[0] ) );
 
-  // Command high velocity for many cycles -> should exceed any typical limit
-  controller_->reference_interfaces_[0] = 10.0;
-  for ( int i = 0; i < 200; i++ ) { callUpdate(); }
+  // Command velocity at max_velocity for many cycles -> should exceed any typical limit
+  // max_velocity defaults to 1.0, so 500 cycles * 0.01 * 1.0 = 5.0 rad
+  controller_->reference_interfaces_[0] = 10.0; // clamped to max_velocity (1.0)
+  for ( int i = 0; i < 500; i++ ) { callUpdate(); }
 
   // Should have integrated freely past any typical revolute limit
   EXPECT_GT( hw_cmd_values_[0], 3.14159 );
@@ -806,9 +814,9 @@ TEST_F( VelocityToPositionCommandControllerTest, DesiredPositionClampedPreventsW
 // Synced Braking Tests
 // ============================================================================
 
-// Verify synced braking: when two synced joints stop together, the faster one
-// slows its braking to maintain the position difference with the weaker one.
-TEST_F( VelocityToPositionCommandControllerTest, IndependentBraking )
+// Verify braking with trapezoidal profiles: joints with different velocities
+// get different profile durations and stop at different times.
+TEST_F( VelocityToPositionCommandControllerTest, IndependentBrakingWithProfiles )
 {
   std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
   initController( sync_groups );
@@ -838,11 +846,14 @@ TEST_F( VelocityToPositionCommandControllerTest, IndependentBraking )
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
   EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPING );
 
-  // After a few cycles, joint0 should be STOPPED independently (no waiting for partner)
-  for ( int i = 0; i < 5; i++ ) { callUpdate(); }
+  // joint0 profile: vel=0.1, decel=4.0 -> duration=0.1/4.0=0.025s = 2.5 cycles
+  // joint1 profile: vel=0.8, decel=4.0 -> duration=0.8/4.0=0.2s = 20 cycles
+  EXPECT_NEAR( controller_->braking_profiles_[0].total_time, 0.025, 1e-9 );
+  EXPECT_NEAR( controller_->braking_profiles_[1].total_time, 0.2, 1e-9 );
 
+  // After 3 cycles, joint0 should be STOPPED
+  for ( int i = 0; i < 3; i++ ) { callUpdate(); }
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
-  // joint1 should still be braking (0.8 / (5.0 * 0.01) = 16 cycles)
   EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPING );
 
   // Continue until joint1 also finishes
@@ -947,6 +958,225 @@ TEST_F( VelocityToPositionCommandControllerTest, SyncRestoredAfterRepeatedStopSt
   // Allow some tolerance — sync P-control can't perfectly correct drift,
   // but it should prevent unbounded accumulation
   EXPECT_LT( final_diff, 0.5 ) << "Position difference after 5 cycles: " << final_diff;
+}
+
+// ============================================================================
+// Trapezoidal Profile Unit Tests
+// ============================================================================
+
+using TrapProfile = velocity_to_position_command_controller::TrapezoidalProfile;
+
+// Verify full trapezoidal profile (accel + cruise + decel)
+TEST( TrapezoidalProfileTest, FullTrapezoidalProfile )
+{
+  auto p = TrapProfile::compute( 0.0, 2.0, 1.0, 2.0 );
+
+  // t_accel = 1.0/2.0 = 0.5s, dist_accel = 0.5*2.0*0.25 = 0.25
+  // dist_decel = 0.25, cruise_dist = 2.0 - 0.5 = 1.5, t_cruise = 1.5/1.0 = 1.5
+  // total = 0.5 + 1.5 + 0.5 = 2.5
+  EXPECT_NEAR( p.total_time, 2.5, 1e-9 );
+  EXPECT_NEAR( p.t_accel, 0.5, 1e-9 );
+  EXPECT_NEAR( p.t_cruise, 1.5, 1e-9 );
+  EXPECT_NEAR( p.t_decel, 0.5, 1e-9 );
+
+  // At t=0: pos=0, vel=0
+  auto [pos0, vel0] = p.evaluate( 0.0 );
+  EXPECT_NEAR( pos0, 0.0, 1e-9 );
+  EXPECT_NEAR( vel0, 0.0, 1e-9 );
+
+  // At t=total: pos=target, vel=0
+  auto [posEnd, velEnd] = p.evaluate( p.total_time );
+  EXPECT_NEAR( posEnd, 2.0, 1e-9 );
+  EXPECT_NEAR( velEnd, 0.0, 1e-9 );
+
+  // At t=0.5 (end of accel): vel should be max_velocity
+  auto [posAccel, velAccel] = p.evaluate( 0.5 );
+  EXPECT_NEAR( velAccel, 1.0, 1e-9 );
+}
+
+// Verify triangular profile (distance too short for full cruise)
+TEST( TrapezoidalProfileTest, TriangularProfile )
+{
+  // Distance = 0.1, max_vel = 10.0, accel = 2.0
+  // dist_for_full = 10^2/2 = 50 >> 0.1, so triangular
+  // v_peak = sqrt(0.1 * 2.0) = sqrt(0.2) ≈ 0.4472
+  // t_accel = v_peak / 2.0 ≈ 0.2236
+  auto p = TrapProfile::compute( 1.0, 1.1, 10.0, 2.0 );
+
+  EXPECT_NEAR( p.t_cruise, 0.0, 1e-9 );
+  EXPECT_GT( p.total_time, 0.0 );
+
+  auto [posEnd, velEnd] = p.evaluate( p.total_time );
+  EXPECT_NEAR( posEnd, 1.1, 1e-6 );
+  EXPECT_NEAR( velEnd, 0.0, 1e-6 );
+}
+
+// Verify negative direction profile
+TEST( TrapezoidalProfileTest, NegativeDirection )
+{
+  auto p = TrapProfile::compute( 2.0, 0.0, 1.0, 2.0 );
+
+  EXPECT_EQ( p.direction, -1 );
+
+  auto [posEnd, velEnd] = p.evaluate( p.total_time );
+  EXPECT_NEAR( posEnd, 0.0, 1e-9 );
+  EXPECT_NEAR( velEnd, 0.0, 1e-9 );
+}
+
+// Verify zero-distance profile
+TEST( TrapezoidalProfileTest, ZeroDistance )
+{
+  auto p = TrapProfile::compute( 1.0, 1.0, 1.0, 2.0 );
+  EXPECT_NEAR( p.total_time, 0.0, 1e-9 );
+
+  auto [pos, vel] = p.evaluate( 0.0 );
+  EXPECT_NEAR( pos, 1.0, 1e-9 );
+}
+
+// ============================================================================
+// Velocity Command Timeout Tests
+// ============================================================================
+
+TEST_F( VelocityToPositionCommandControllerTest, VelocityTimeoutZerosReferences )
+{
+  initController();
+
+  // Set timeout parameter before configure
+  controller_->get_node()->set_parameter( rclcpp::Parameter( "velocity_command_timeout", 0.05 ) );
+
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // Send non-zero velocity for a few cycles
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate(); // t=0ms, resets last_command_time
+
+  // Now send zero velocity for enough cycles to exceed timeout (50ms = 5 cycles)
+  controller_->reference_interfaces_[0] = 0.0;
+  for ( int i = 0; i < 6; i++ ) { callUpdate(); }
+
+  // After timeout, references should remain 0 (already were 0, timeout just ensures it)
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.0 );
+}
+
+TEST_F( VelocityToPositionCommandControllerTest, VelocityTimeoutDisabledByDefault )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // Default timeout is 0 (disabled). Sending NaN-ish references should not crash.
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 100; i++ ) { callUpdate(); }
+  // Should not crash, references remain 0
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.0 );
+}
+
+// ============================================================================
+// Velocity Clamping Tests
+// ============================================================================
+
+TEST_F( VelocityToPositionCommandControllerTest, VelocityClampedToMaxVelocity )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // max_velocity defaults to 1.0
+  // Command 10.0 rad/s -> should be clamped to 1.0 in the update loop
+  controller_->reference_interfaces_[0] = 10.0;
+  controller_->reference_interfaces_[1] = -10.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate();
+
+  // desired_pos should integrate with clamped velocity (1.0), not 10.0
+  // desired_pos = 0 + 1.0 * 0.01 = 0.01
+  EXPECT_NEAR( controller_->desired_positions_[0], 0.01, 1e-9 );
+  // Negative clamping: desired_pos = 0 + (-1.0) * 0.01 = -0.01
+  EXPECT_NEAR( controller_->desired_positions_[1], -0.01, 1e-9 );
+}
+
+// ============================================================================
+// Group Action Cancellation by Velocity Command Tests
+// ============================================================================
+
+using GroupActionState = velocity_to_position_command_controller::GroupActionState;
+using GroupActionCommand = velocity_to_position_command_controller::GroupActionCommand;
+using TrapezoidalProfile = velocity_to_position_command_controller::TrapezoidalProfile;
+
+// Verify that an active group action is cancelled when a non-zero velocity command arrives
+TEST_F( VelocityToPositionCommandControllerTest, GroupActionCancelledByVelocityCommand )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // Manually set up a group action on group1 (joints 0 and 1)
+  size_t group_idx = controller_->group_index_map_["group1"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 1.0;
+  cmd.joint_profiles.push_back( TrapezoidalProfile::compute( 0.0, 1.0, 1.0, 2.0 ) );
+  cmd.joint_profiles.push_back( TrapezoidalProfile::compute( 0.0, 1.0, 1.0, 2.0 ) );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  // First update with zero velocities -- action should continue
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate();
+  EXPECT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::EXECUTING );
+
+  // Now send a non-zero velocity command on joint 0 (in group1) -> action must be cancelled
+  controller_->reference_interfaces_[0] = 0.5;
+  callUpdate();
+  EXPECT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::CANCELLED );
+
+  // Joint 0 should now be in normal velocity control (MOVING)
+  EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
+}
+
+// Verify that a velocity command on one group does NOT cancel an action on another group
+TEST_F( VelocityToPositionCommandControllerTest, GroupActionNotCancelledByOtherGroupVelocity )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  size_t group1_idx = controller_->group_index_map_["group1"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 1.0;
+  cmd.joint_profiles.push_back( TrapezoidalProfile::compute( 0.0, 1.0, 1.0, 2.0 ) );
+  cmd.joint_profiles.push_back( TrapezoidalProfile::compute( 0.0, 1.0, 1.0, 2.0 ) );
+  controller_->rt_group_action_cmds_[group1_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group1_idx].store( GroupActionState::EXECUTING );
+
+  // Send velocity command on joint 2 (group2) -- should NOT affect group1's action
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 1.0;
+  callUpdate();
+
+  // group1 action should still be executing
+  EXPECT_EQ( controller_->group_action_states_[group1_idx].load(), GroupActionState::EXECUTING );
 }
 
 // ============================================================================

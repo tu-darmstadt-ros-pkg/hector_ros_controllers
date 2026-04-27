@@ -16,6 +16,12 @@ velocity_to_position_command_controller:
 
   stopping_velocity_threshold: {type: double, default_value: 0.005, description: Velocity threshold below which a joint is considered stopped}
 
-  braking_deceleration: {type: double, default_value: 5.0, description: Deceleration in rad/s^2 used to smoothly bring joints to a stop when velocity command becomes zero. Higher values mean faster braking.}
+  max_velocity: {type: double, default_value: 1.0, description: Maximum velocity in rad/s. Clamps incoming velocity references and limits velocity during action profiles.}
+  max_acceleration: {type: double, default_value: 2.0, description: Maximum acceleration in rad/s^2. Used for drive actions and sync actions.}
+  max_deceleration: {type: double, default_value: 4.0, description: Maximum deceleration in rad/s^2. Used for braking profiles when velocity commands go to zero. Higher than max_acceleration for faster stopping.}
 
   publish_debug_joint_states: {type: bool, default_value: false, description: 'If true, publishes ~/debug_in_joint_states (velocity references) and ~/debug_out_joint_states (position commands) as sensor_msgs/JointState'}
+
+  velocity_command_timeout: {type: double, default_value: 0.0, description: 'Timeout in seconds. If no new non-zero velocity command arrives within this duration, velocity references are zeroed. 0 disables the timeout.'}
+
+  upright_position: {type: double, default_value: 1.517, description: Default target position for the upright action in radians}

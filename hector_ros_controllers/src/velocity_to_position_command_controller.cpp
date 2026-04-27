@@ -17,8 +17,9 @@ namespace velocity_to_position_command_controller
 
 VelocityToPositionCommandController::VelocityToPositionCommandController()
     : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
+      max_velocity_( 1.0 ), max_acceleration_( 2.0 ), max_deceleration_( 4.0 ),
       e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
-      rt_buffer_ptr_( nullptr )
+      velocity_command_timeout_( 0.0 ), rt_buffer_ptr_( nullptr )
 {
 }
 
@@ -97,7 +98,8 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   hold_positions_.resize( num_joints );
   desired_positions_.resize( num_joints );
   move_states_.resize( num_joints );
-  stopping_velocities_.assign( num_joints, 0.0 );
+  braking_profiles_.resize( num_joints );
+  braking_start_times_.resize( num_joints );
 
   // Initialize limits to NaN (= no limit) by default
   joint_lower_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
@@ -111,7 +113,21 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   sync_velocity_factor_ = params_.sync_velocity_factor;
   sync_velocity_min_threshold_ = params_.sync_velocity_min_threshold;
   stopping_vel_threshold_ = params_.stopping_velocity_threshold;
-  braking_deceleration_ = params_.braking_deceleration;
+  max_velocity_ = params_.max_velocity;
+  max_acceleration_ = params_.max_acceleration;
+  max_deceleration_ = params_.max_deceleration;
+  velocity_command_timeout_ = params_.velocity_command_timeout;
+
+  // Build group index map and RT buffers for group actions
+  group_index_map_.clear();
+  group_names_.clear();
+  for ( const auto &group : groups_ ) {
+    group_index_map_[group.first] = group_names_.size();
+    group_names_.push_back( group.first );
+  }
+  rt_group_action_cmds_.resize( group_names_.size() );
+  group_action_states_ = std::vector<std::atomic<GroupActionState>>( group_names_.size() );
+  for ( auto &state : group_action_states_ ) { state.store( GroupActionState::IDLE ); }
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -186,8 +202,12 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
       sync_velocity_factor_ = val;
     } else if ( p.get_name() == "sync_velocity_min_threshold" ) {
       sync_velocity_min_threshold_ = val;
-    } else if ( p.get_name() == "braking_deceleration" ) {
-      braking_deceleration_ = val;
+    } else if ( p.get_name() == "max_velocity" ) {
+      max_velocity_ = val;
+    } else if ( p.get_name() == "max_acceleration" ) {
+      max_acceleration_ = val;
+    } else if ( p.get_name() == "max_deceleration" ) {
+      max_deceleration_ = val;
     }
     RCLCPP_INFO( get_node()->get_logger(), "Reconfigured %s to %f", p.get_name().c_str(), val );
   }
@@ -235,8 +255,18 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
-    cb_handle_braking_decel_ = param_subscriber_->add_parameter_callback(
-        "braking_deceleration",
+    cb_handle_max_velocity_ = param_subscriber_->add_parameter_callback(
+        "max_velocity",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_max_acceleration_ = param_subscriber_->add_parameter_callback(
+        "max_acceleration",
+        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        get_node()->get_name() );
+
+    cb_handle_max_deceleration_ = param_subscriber_->add_parameter_callback(
+        "max_deceleration",
         std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
         get_node()->get_name() );
 
@@ -323,6 +353,31 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
   }
   for ( size_t i = 0; i < joints_.size(); i++ ) { reset_sync_offsets( i ); }
 
+  // Initialize velocity command timeout (use Time(0) as default; update loop will set it)
+  last_command_time_ = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+
+  // Reset group action states
+  for ( size_t i = 0; i < group_names_.size(); i++ ) {
+    GroupActionCommand idle_cmd;
+    idle_cmd.active = false;
+    rt_group_action_cmds_[i].writeFromNonRT( idle_cmd );
+    group_action_states_[i].store( GroupActionState::IDLE );
+  }
+
+  // Create action servers
+  using namespace std::placeholders;
+  drive_flipper_action_server_ = rclcpp_action::create_server<DriveFlipperGroupAction>(
+      get_node(), "~/drive_flipper_group",
+      std::bind( &VelocityToPositionCommandController::handle_drive_goal, this, _1, _2 ),
+      std::bind( &VelocityToPositionCommandController::handle_drive_cancel, this, _1 ),
+      std::bind( &VelocityToPositionCommandController::handle_drive_accepted, this, _1 ) );
+
+  sync_flipper_action_server_ = rclcpp_action::create_server<SyncFlipperGroupAction>(
+      get_node(), "~/sync_flipper_group",
+      std::bind( &VelocityToPositionCommandController::handle_sync_goal, this, _1, _2 ),
+      std::bind( &VelocityToPositionCommandController::handle_sync_cancel, this, _1 ),
+      std::bind( &VelocityToPositionCommandController::handle_sync_accepted, this, _1 ) );
+
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -330,10 +385,29 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
 controller_interface::CallbackReturn
 VelocityToPositionCommandController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
+  // Cancel all active group actions
+  for ( size_t i = 0; i < group_names_.size(); i++ ) {
+    group_action_states_[i].store( GroupActionState::CANCELLED );
+  }
+
+  cleanup_monitor_threads();
+
+  drive_flipper_action_server_.reset();
+  sync_flipper_action_server_.reset();
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
   cmd_sub_.reset();
   hard_estop_sub_.reset();
   return controller_interface::CallbackReturn::SUCCESS;
+}
+
+void VelocityToPositionCommandController::cleanup_monitor_threads()
+{
+  for ( auto &t : action_monitor_threads_ ) {
+    if ( t.joinable() ) {
+      t.join();
+    }
+  }
+  action_monitor_threads_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -434,14 +508,32 @@ void VelocityToPositionCommandController::update_joint_states_if_valid()
 // State machine
 // ---------------------------------------------------------------------------
 
-void VelocityToPositionCommandController::update_move_states( double vel_command, size_t joint_idx )
+void VelocityToPositionCommandController::update_move_states( double vel_command, size_t joint_idx,
+                                                              const rclcpp::Time &time )
 {
   switch ( move_states_[joint_idx] ) {
   case MOVING:
     if ( vel_command == 0.0 ) {
+      const double current_pos = joint_position_states_[joint_idx];
+      const double current_vel = joint_velocity_states_[joint_idx];
+
+      braking_profiles_[joint_idx] =
+          TrapezoidalProfile::compute_braking( current_pos, current_vel, max_deceleration_ );
+
+      // Clamp target to URDF limits
+      if ( !std::isnan( joint_lower_limits_[joint_idx] ) ) {
+        braking_profiles_[joint_idx].target_position =
+            std::clamp( braking_profiles_[joint_idx].target_position,
+                        joint_lower_limits_[joint_idx], joint_upper_limits_[joint_idx] );
+      }
+      braking_start_times_[joint_idx] = time;
       move_states_[joint_idx] = STOPPING;
-      stopping_velocities_[joint_idx] = joint_velocity_states_[joint_idx];
-      desired_positions_[joint_idx] = joint_position_states_[joint_idx];
+
+      RCLCPP_INFO( get_node()->get_logger(),
+                   "[BRAKE] %s: MOVING->STOPPING  vel=%.4f  pos=%.4f  target=%.4f  duration=%.4f",
+                   joints_[joint_idx].c_str(), current_vel, current_pos,
+                   braking_profiles_[joint_idx].target_position,
+                   braking_profiles_[joint_idx].total_time );
     }
     break;
 
@@ -591,12 +683,18 @@ void VelocityToPositionCommandController::update_debug_publishers( bool enable )
           std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(
               get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states",
                                                                           10 ) );
+      // Pre-allocate message fields once
+      rt_debug_in_js_pub_->msg_.name = joints_;
+      rt_debug_in_js_pub_->msg_.velocity.resize( joints_.size(), 0.0 );
     }
     if ( !rt_debug_out_js_pub_ ) {
       rt_debug_out_js_pub_ =
           std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(
               get_node()->create_publisher<sensor_msgs::msg::JointState>(
                   "~/debug_out_joint_states", 10 ) );
+      // Pre-allocate message fields once
+      rt_debug_out_js_pub_->msg_.name = joints_;
+      rt_debug_out_js_pub_->msg_.position.resize( joints_.size(), 0.0 );
     }
     if ( !rt_sync_status_pub_ ) {
       rt_sync_status_pub_ =
@@ -604,8 +702,12 @@ void VelocityToPositionCommandController::update_debug_publishers( bool enable )
               get_node()->create_publisher<hector_ros_controllers_msgs::msg::SyncStatus>(
                   "~/sync_status", 10 ) );
     }
+    // Set flag last -- publishers are fully initialized before RT loop sees them
+    debug_pubs_enabled_.store( true, std::memory_order_release );
     RCLCPP_INFO( get_node()->get_logger(), "Debug publishers enabled" );
   } else {
+    // Clear flag first -- RT loop stops accessing publishers before we destroy them
+    debug_pubs_enabled_.store( false, std::memory_order_release );
     rt_debug_in_js_pub_.reset();
     rt_debug_out_js_pub_.reset();
     rt_sync_status_pub_.reset();
@@ -614,26 +716,30 @@ void VelocityToPositionCommandController::update_debug_publishers( bool enable )
 
 void VelocityToPositionCommandController::publish_debug_joint_state_in()
 {
-  if ( !rt_debug_in_js_pub_ || !rt_debug_in_js_pub_->trylock() )
+  if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
+    return;
+  if ( !rt_debug_in_js_pub_->trylock() )
     return;
 
-  auto &msg = rt_debug_in_js_pub_->msg_;
-  msg.header.stamp = get_node()->now();
-  msg.name = joints_;
-  msg.velocity = reference_interfaces_;
+  rt_debug_in_js_pub_->msg_.header.stamp = get_node()->now();
+  for ( size_t i = 0; i < joints_.size(); i++ ) {
+    rt_debug_in_js_pub_->msg_.velocity[i] = reference_interfaces_[i];
+  }
   rt_debug_in_js_pub_->unlockAndPublish();
 }
 
 void VelocityToPositionCommandController::publish_debug_joint_state_out(
     const std::vector<double> &positions )
 {
-  if ( !rt_debug_out_js_pub_ || !rt_debug_out_js_pub_->trylock() )
+  if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
+    return;
+  if ( !rt_debug_out_js_pub_->trylock() )
     return;
 
-  auto &msg = rt_debug_out_js_pub_->msg_;
-  msg.header.stamp = get_node()->now();
-  msg.name = joints_;
-  msg.position = positions;
+  rt_debug_out_js_pub_->msg_.header.stamp = get_node()->now();
+  for ( size_t i = 0; i < positions.size(); i++ ) {
+    rt_debug_out_js_pub_->msg_.position[i] = positions[i];
+  }
   rt_debug_out_js_pub_->unlockAndPublish();
 }
 
@@ -671,12 +777,32 @@ void VelocityToPositionCommandController::publish_sync_status( const std::vector
 // ---------------------------------------------------------------------------
 
 controller_interface::return_type
-VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Time & /*time*/,
+VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Time &time,
                                                                 const rclcpp::Duration &period )
 {
   update_joint_states_if_valid();
 
   publish_debug_joint_state_in();
+
+  // Velocity command timeout: zero references if no non-zero command received within timeout
+  if ( velocity_command_timeout_ > 0.0 ) {
+    bool has_nonzero_command = false;
+    for ( size_t i = 0; i < reference_interfaces_.size(); i++ ) {
+      if ( !std::isnan( reference_interfaces_[i] ) && reference_interfaces_[i] != 0.0 ) {
+        has_nonzero_command = true;
+        break;
+      }
+    }
+    if ( has_nonzero_command ) {
+      last_command_time_ = time;
+    } else if ( ( time - last_command_time_ ).seconds() > velocity_command_timeout_ ) {
+      for ( size_t i = 0; i < reference_interfaces_.size(); i++ ) {
+        if ( !std::isnan( reference_interfaces_[i] ) ) {
+          reference_interfaces_[i] = 0.0;
+        }
+      }
+    }
+  }
 
   bool successful = true;
   // TODO: e-stop
@@ -692,6 +818,10 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
   //                         "E-Stop active, holding current joint positions" );
   //   return controller_interface::return_type::OK;
   // }
+
+  // Process active group actions (drive/sync). This may write position commands directly
+  // and set reference_interfaces_ to NaN for controlled joints to skip normal control.
+  successful &= process_group_actions( time );
 
   update_sync_states( reference_interfaces_ );
   update_sync_offsets();
@@ -719,9 +849,11 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       continue;
     }
 
-    const double vel_command = reference_interfaces_[joint_idx];
+    // Clamp velocity reference to max_velocity
+    const double vel_command =
+        std::clamp( reference_interfaces_[joint_idx], -max_velocity_, max_velocity_ );
 
-    update_move_states( vel_command, joint_idx );
+    update_move_states( vel_command, joint_idx, time );
 
     double pos_command = std::numeric_limits<double>::quiet_NaN();
     switch ( move_states_[joint_idx] ) {
@@ -730,29 +862,23 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
       break;
 
     case STOPPING: {
-      if ( stopping_velocities_[joint_idx] == 0.0 ) {
-        pos_command = hold_positions_[joint_idx];
-        move_states_[joint_idx] = STOPPED;
-        break;
-      }
+      const double elapsed = ( time - braking_start_times_[joint_idx] ).seconds();
+      const auto [pos, vel] = braking_profiles_[joint_idx].evaluate( elapsed );
 
-      const double sign = ( stopping_velocities_[joint_idx] > 0.0 ) ? 1.0 : -1.0;
-
-      stopping_velocities_[joint_idx] -= sign * braking_deceleration_ * dt;
-
-      // Check if we crossed zero or reached threshold
-      if ( std::abs( stopping_velocities_[joint_idx] ) <= stopping_vel_threshold_ ||
-           sign * stopping_velocities_[joint_idx] < 0.0 ) {
-        stopping_velocities_[joint_idx] = 0.0;
-        hold_positions_[joint_idx] = joint_position_states_[joint_idx];
-        desired_positions_[joint_idx] = joint_position_states_[joint_idx];
-        pos_command = hold_positions_[joint_idx];
+      if ( elapsed >= braking_profiles_[joint_idx].total_time ) {
+        // Profile complete -- hold at target
+        const double target = braking_profiles_[joint_idx].target_position;
+        hold_positions_[joint_idx] = target;
+        desired_positions_[joint_idx] = target;
+        pos_command = target;
         move_states_[joint_idx] = STOPPED;
 
+        RCLCPP_INFO( get_node()->get_logger(), "[BRAKE] %s: stopped at pos=%.4f",
+                     joints_[joint_idx].c_str(), target );
       } else {
-        desired_positions_[joint_idx] += stopping_velocities_[joint_idx] * dt;
-        pos_command = desired_positions_[joint_idx];
-        hold_positions_[joint_idx] = desired_positions_[joint_idx];
+        desired_positions_[joint_idx] = pos;
+        pos_command = pos;
+        hold_positions_[joint_idx] = pos;
       }
       break;
     }
