@@ -1180,6 +1180,232 @@ TEST_F( VelocityToPositionCommandControllerTest, GroupActionNotCancelledByOtherG
 }
 
 // ============================================================================
+// Trapezoidal Profile Edge Cases
+// ============================================================================
+
+// Verify compute() returns total_time=0 when max_velocity is zero (division-by-zero guard)
+TEST( TrapezoidalProfileTest, ZeroMaxVelocityGuard )
+{
+  auto p = TrapProfile::compute( 0.0, 1.0, 0.0, 2.0 );
+  EXPECT_NEAR( p.total_time, 0.0, 1e-12 );
+
+  auto [pos, vel] = p.evaluate( 0.0 );
+  EXPECT_NEAR( pos, 0.0, 1e-12 );
+  EXPECT_NEAR( vel, 0.0, 1e-12 );
+}
+
+// Verify compute_braking from positive velocity stops at start + braking_distance
+TEST( TrapezoidalProfileTest, BrakingProfilePositiveVelocity )
+{
+  // start=0.5, vel=0.8, decel=4.0
+  // braking_distance = 0.8^2 / (2*4) = 0.08, target = 0.58, total_time = 0.2
+  auto p = TrapProfile::compute_braking( 0.5, 0.8, 4.0 );
+  EXPECT_NEAR( p.total_time, 0.2, 1e-9 );
+  EXPECT_NEAR( p.target_position, 0.58, 1e-9 );
+  EXPECT_EQ( p.direction, 1 );
+
+  auto [posEnd, velEnd] = p.evaluate( p.total_time );
+  EXPECT_NEAR( posEnd, 0.58, 1e-9 );
+  EXPECT_NEAR( velEnd, 0.0, 1e-9 );
+}
+
+// Verify compute_braking from negative velocity stops at start - braking_distance
+TEST( TrapezoidalProfileTest, BrakingProfileNegativeVelocity )
+{
+  auto p = TrapProfile::compute_braking( 1.0, -0.8, 4.0 );
+  EXPECT_NEAR( p.total_time, 0.2, 1e-9 );
+  EXPECT_NEAR( p.target_position, 0.92, 1e-9 ); // 1.0 - 0.08
+  EXPECT_EQ( p.direction, -1 );
+}
+
+// Verify compute_braking with zero initial velocity returns zero-time profile
+TEST( TrapezoidalProfileTest, BrakingProfileZeroVelocity )
+{
+  auto p = TrapProfile::compute_braking( 0.5, 0.0, 4.0 );
+  EXPECT_NEAR( p.total_time, 0.0, 1e-12 );
+  EXPECT_NEAR( p.target_position, 0.5, 1e-12 );
+}
+
+// Verify compute_braking with zero deceleration returns zero-time profile
+TEST( TrapezoidalProfileTest, BrakingProfileZeroDeceleration )
+{
+  auto p = TrapProfile::compute_braking( 0.5, 1.0, 0.0 );
+  EXPECT_NEAR( p.total_time, 0.0, 1e-12 );
+}
+
+// ============================================================================
+// Group Action Profile-Following / Completion / URDF Clamping
+// ============================================================================
+
+// Verify hw_cmd_values_ tracks the trapezoidal profile mid-execution
+TEST_F( VelocityToPositionCommandControllerTest, GroupActionFollowsProfile )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  size_t group_idx = controller_->group_index_map_["group1"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 1.0;
+  // Both joints in group1 use the same profile: 0 -> 1.0, max_vel=1.0, max_accel=2.0
+  // dist_for_full = 1/2 = 0.5; abs_distance = 1.0 >= 0.5 -> full trapezoid
+  // t_accel = 0.5, t_cruise = 0.5, t_decel = 0.5, total = 1.5
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 1.0, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  // Tick a few cycles into the acceleration phase, joint should be following the profile.
+  // callUpdate uses update_count_ BEFORE incrementing, so the N-th call uses time=(N-1)*10ms.
+  // After 25 calls, the last evaluated elapsed is 24*10ms = 0.24s -> still in accel phase.
+  for ( int i = 0; i < 25; i++ ) { callUpdate(); }
+  auto [expected_pos, expected_vel] = prof.evaluate( 0.24 );
+  EXPECT_NEAR( hw_cmd_values_[0], expected_pos, 1e-6 );
+  EXPECT_NEAR( hw_cmd_values_[1], expected_pos, 1e-6 );
+
+  // Action should still be executing
+  EXPECT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::EXECUTING );
+  EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
+  EXPECT_EQ( controller_->move_states_[1], MoveState::MOVING );
+}
+
+// Verify the action transitions to COMPLETED and joints settle on target after total_time
+TEST_F( VelocityToPositionCommandControllerTest, GroupActionCompletes )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  size_t group_idx = controller_->group_index_map_["group1"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 0.5;
+  // Short profile: 0 -> 0.5, max_vel=1.0, max_accel=2.0
+  // dist_for_full = 0.5, abs_distance = 0.5 -> full trapezoid (no cruise)
+  // total_time = 0.5/1.0 + 0.0 + 0.5 = 1.0s = 100 cycles? No: t_accel = 0.5, cruise=0, t_decel=0.5 -> 1.0s
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 0.5, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  // Run well past total_time (100+ cycles for 1.0s profile + margin)
+  for ( int i = 0; i < 110; i++ ) { callUpdate(); }
+
+  EXPECT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
+  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPED );
+  EXPECT_EQ( controller_->move_states_[1], MoveState::STOPPED );
+  EXPECT_NEAR( hw_cmd_values_[0], 0.5, 1e-9 );
+  EXPECT_NEAR( hw_cmd_values_[1], 0.5, 1e-9 );
+  EXPECT_NEAR( controller_->hold_positions_[0], 0.5, 1e-9 );
+}
+
+// Verify the profile target is clamped to URDF joint limits during execution
+TEST_F( VelocityToPositionCommandControllerTest, GroupActionClampsToUrdfLimits )
+{
+  // Use joint2 in its own group; URDF limits are [-1.5, 1.5]
+  std::vector<std::string> sync_groups = { "group_a", "group_b", "group_c" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  size_t group_idx = controller_->group_index_map_["group_b"];
+
+  // Attempt to drive joint2 to 5.0 (well past upper limit 1.5)
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 5.0;
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 5.0, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  // Run far enough that the unclamped profile would exceed the limit
+  for ( int i = 0; i < 200; i++ ) { callUpdate(); }
+
+  // hw_cmd_values_[1] (joint2) must never exceed the URDF upper limit
+  EXPECT_LE( hw_cmd_values_[1], 1.5 + 1e-9 );
+}
+
+// ============================================================================
+// Velocity Timeout -> Braking Transition
+// ============================================================================
+
+// Verify a stale-command timeout actually drives MOVING -> STOPPING (not just zeroes references)
+TEST_F( VelocityToPositionCommandControllerTest, VelocityTimeoutTriggersBraking )
+{
+  initController();
+  // Use a short timeout so we don't have to tick many cycles
+  controller_->get_node()->set_parameter( rclcpp::Parameter( "velocity_command_timeout", 0.05 ) );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // Drive joint0 with non-zero velocity for several cycles to reach MOVING state
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int i = 0; i < 3; i++ ) {
+    setVelocity( 0, 1.0 );
+    setPosition( 0, ( i + 1 ) * 0.01 );
+    callUpdate();
+  }
+  EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
+
+  // Stop sending non-zero refs but keep them at the cached value (simulating "stale" upstream).
+  // Since the controller code only looks at !=0.0 refs to refresh last_command_time_,
+  // continued non-zero refs would refresh; instead model "stale" by setting to 0.
+  // After timeout, the timeout branch zeros refs (already zero) and update_move_states
+  // sees vel_command==0.0 -> transitions MOVING -> STOPPING.
+  controller_->reference_interfaces_[0] = 0.0;
+  setVelocity( 0, 1.0 ); // joint still has measured velocity
+  for ( int i = 0; i < 7; i++ ) { callUpdate(); }
+  EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
+  // A braking profile must have been computed
+  EXPECT_GT( controller_->braking_profiles_[0].total_time, 0.0 );
+}
+
+// ============================================================================
+// Negative max_velocity Safety
+// ============================================================================
+
+// Verify the velocity clamp uses |max_velocity_| so a negative parameter cannot
+// violate std::clamp's lo<=hi precondition.
+TEST_F( VelocityToPositionCommandControllerTest, NegativeMaxVelocityClampedSafely )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  // Bypass parameter callback (which rejects negatives) and force the unsafe state directly.
+  controller_->max_velocity_ = -2.0;
+
+  controller_->reference_interfaces_[0] = 5.0; // would exceed +2.0
+  controller_->reference_interfaces_[1] = -5.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  auto ret = callUpdate();
+  EXPECT_EQ( ret, controller_interface::return_type::OK );
+
+  // |max_velocity_| = 2.0 -> clamp to [-2.0, 2.0]
+  // desired_pos[0] = 0 + 2.0 * 0.01 = 0.02
+  EXPECT_NEAR( controller_->desired_positions_[0], 0.02, 1e-9 );
+  EXPECT_NEAR( controller_->desired_positions_[1], -0.02, 1e-9 );
+}
+
+// ============================================================================
 // main
 // ============================================================================
 

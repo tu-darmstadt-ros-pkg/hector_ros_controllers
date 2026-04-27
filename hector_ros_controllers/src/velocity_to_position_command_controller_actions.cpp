@@ -31,6 +31,10 @@ std::string VelocityToPositionCommandController::start_group_action(
     return "Target positions size mismatch for group '" + group_name + "'";
   }
 
+  // Read the joint positions through the RT-safe snapshot — joint_position_states_
+  // is concurrently written by the RT update loop.
+  const auto positions = rt_joint_position_snapshot_.get();
+
   GroupActionCommand cmd;
   cmd.active = true;
   cmd.start_time = get_node()->now();
@@ -38,7 +42,10 @@ std::string VelocityToPositionCommandController::start_group_action(
 
   for ( size_t i = 0; i < group_joint_indices.size(); i++ ) {
     const size_t idx = group_joint_indices[i];
-    const double start = joint_position_states_[idx];
+    if ( idx >= positions.size() ) {
+      return "Joint index " + std::to_string( idx ) + " out of range in position snapshot";
+    }
+    const double start = positions[idx];
     if ( std::isnan( start ) ) {
       return "Joint " + joints_[idx] + " has invalid position state";
     }
@@ -257,19 +264,32 @@ void VelocityToPositionCommandController::handle_sync_accepted(
   const std::vector<std::string> target_groups =
       goal->group_names.empty() ? group_names_ : goal->group_names;
 
+  // Read the joint positions through the RT-safe snapshot — joint_position_states_
+  // is concurrently written by the RT update loop.
+  const auto positions = rt_joint_position_snapshot_.get();
+
   std::vector<size_t> target_group_indices;
   std::vector<double> group_avg_positions;
 
   for ( const auto &group_name : target_groups ) {
-    const auto &group_joint_indices = groups_[group_name];
-    target_group_indices.push_back( group_index_map_[group_name] );
+    const auto group_index_it = group_index_map_.find( group_name );
+    const auto group_it = groups_.find( group_name );
+    if ( group_index_it == group_index_map_.end() || group_it == groups_.end() ) {
+      auto result = std::make_shared<SyncFlipperGroupAction::Result>();
+      result->success = false;
+      result->message = "Unknown group '" + group_name + "'";
+      goal_handle->abort( result );
+      return;
+    }
+    const auto &group_joint_indices = group_it->second;
+    target_group_indices.push_back( group_index_it->second );
 
     // Compute average position
     double sum = 0.0;
     size_t valid_count = 0;
     for ( size_t idx : group_joint_indices ) {
-      if ( !std::isnan( joint_position_states_[idx] ) ) {
-        sum += joint_position_states_[idx];
+      if ( idx < positions.size() && !std::isnan( positions[idx] ) ) {
+        sum += positions[idx];
         valid_count++;
       }
     }
@@ -302,49 +322,49 @@ void VelocityToPositionCommandController::handle_sync_accepted(
 
   reap_finished_monitor_threads();
   auto done_flag = std::make_shared<std::atomic<bool>>( false );
-  std::thread t(
-      [this, goal_handle, target_groups, target_group_indices, group_avg_positions, done_flag]() {
-        monitor_group_actions(
-            target_group_indices, [&]() { return goal_handle->is_canceling(); },
-            /*on_complete*/
-            [&]() {
-              auto result = std::make_shared<SyncFlipperGroupAction::Result>();
-              result->success = true;
-              result->message = "All groups synced";
-              result->synced_positions = group_avg_positions;
-              goal_handle->succeed( result );
-            },
-            /*on_abort*/
-            [&]( const std::string &reason ) {
-              auto result = std::make_shared<SyncFlipperGroupAction::Result>();
-              result->success = false;
-              result->message = reason;
-              if ( reason.find( "client" ) != std::string::npos ) {
-                goal_handle->canceled( result );
-              } else {
-                goal_handle->abort( result );
+  std::thread t( [this, goal_handle, target_groups, target_group_indices, group_avg_positions,
+                  done_flag]() {
+    monitor_group_actions(
+        target_group_indices, [&]() { return goal_handle->is_canceling(); },
+        /*on_complete*/
+        [&]() {
+          auto result = std::make_shared<SyncFlipperGroupAction::Result>();
+          result->success = true;
+          result->message = "All groups synced";
+          result->synced_positions = group_avg_positions;
+          goal_handle->succeed( result );
+        },
+        /*on_abort*/
+        [&]( const std::string &reason ) {
+          auto result = std::make_shared<SyncFlipperGroupAction::Result>();
+          result->success = false;
+          result->message = reason;
+          if ( reason.find( "client" ) != std::string::npos ) {
+            goal_handle->canceled( result );
+          } else {
+            goal_handle->abort( result );
+          }
+        },
+        /*on_feedback*/
+        [&]( double progress ) {
+          auto feedback = std::make_shared<SyncFlipperGroupAction::Feedback>();
+          feedback->progress = progress;
+          // Compute max position error across all groups using an RT snapshot.
+          const auto fb_positions = rt_joint_position_snapshot_.get();
+          double max_error = 0.0;
+          for ( size_t g = 0; g < target_groups.size(); g++ ) {
+            for ( size_t idx : groups_[target_groups[g]] ) {
+              if ( idx < fb_positions.size() && !std::isnan( fb_positions[idx] ) ) {
+                max_error =
+                    std::max( max_error, std::abs( fb_positions[idx] - group_avg_positions[g] ) );
               }
-            },
-            /*on_feedback*/
-            [&]( double progress ) {
-              auto feedback = std::make_shared<SyncFlipperGroupAction::Feedback>();
-              feedback->progress = progress;
-              // Compute max position error across all groups using an RT snapshot.
-              const auto positions = rt_joint_position_snapshot_.get();
-              double max_error = 0.0;
-              for ( size_t g = 0; g < target_groups.size(); g++ ) {
-                for ( size_t idx : groups_[target_groups[g]] ) {
-                  if ( idx < positions.size() && !std::isnan( positions[idx] ) ) {
-                    max_error =
-                        std::max( max_error, std::abs( positions[idx] - group_avg_positions[g] ) );
-                  }
-                }
-              }
-              feedback->max_position_error = max_error;
-              goal_handle->publish_feedback( feedback );
-            } );
-        done_flag->store( true );
-      } );
+            }
+          }
+          feedback->max_position_error = max_error;
+          goal_handle->publish_feedback( feedback );
+        } );
+    done_flag->store( true );
+  } );
   {
     std::lock_guard<std::mutex> lock( action_monitor_threads_mutex_ );
     action_monitor_threads_.push_back( { std::move( t ), done_flag } );
@@ -359,6 +379,11 @@ bool VelocityToPositionCommandController::process_group_actions( const rclcpp::T
 {
   bool all_successful = true;
   for ( size_t g = 0; g < group_names_.size(); g++ ) {
+    // Gate on the atomic state — RT must NOT call writeFromNonRT on the buffer.
+    // The buffer's `active` flag stays as-is and is overwritten on the next goal start.
+    if ( group_action_states_[g].load() != GroupActionState::EXECUTING ) {
+      continue;
+    }
     const auto *cmd_ptr = rt_group_action_cmds_[g].readFromRT();
     if ( !cmd_ptr || !cmd_ptr->active ) {
       continue;
@@ -376,10 +401,6 @@ bool VelocityToPositionCommandController::process_group_actions( const rclcpp::T
     }
 
     if ( velocity_override ) {
-      // Deactivate the action command via a new write
-      GroupActionCommand cancel_cmd;
-      cancel_cmd.active = false;
-      rt_group_action_cmds_[g].writeFromNonRT( cancel_cmd );
       group_action_states_[g].store( GroupActionState::CANCELLED );
       RCLCPP_INFO( get_node()->get_logger(), "Group action for '%s' cancelled by velocity command",
                    group_names_[g].c_str() );
@@ -408,10 +429,6 @@ bool VelocityToPositionCommandController::process_group_actions( const rclcpp::T
         all_successful &= command_interfaces_[idx].set_value( target );
       }
 
-      // Deactivate and mark completed
-      GroupActionCommand done_cmd;
-      done_cmd.active = false;
-      rt_group_action_cmds_[g].writeFromNonRT( done_cmd );
       group_action_states_[g].store( GroupActionState::COMPLETED );
       RCLCPP_INFO( get_node()->get_logger(), "Group action for '%s' completed",
                    group_names_[g].c_str() );

@@ -724,6 +724,13 @@ void VelocityToPositionCommandController::update_debug_publishers( bool enable )
           std::make_shared<realtime_tools::RealtimePublisher<hector_ros_controllers_msgs::msg::SyncStatus>>(
               get_node()->create_publisher<hector_ros_controllers_msgs::msg::SyncStatus>(
                   "~/sync_status", 10 ) );
+      // Pre-allocate message fields once
+      auto &msg = rt_sync_status_pub_->msg_;
+      msg.joint_names = joints_;
+      msg.vel_command_in.resize( joints_.size(), 0.0 );
+      msg.vel_command_out.resize( joints_.size(), 0.0 );
+      msg.desired_sync_offset.resize( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
+      msg.current_sync_offset.resize( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
     }
     // Set flag last -- publishers are fully initialized before RT loop sees them
     debug_pubs_enabled_.store( true, std::memory_order_release );
@@ -768,19 +775,17 @@ void VelocityToPositionCommandController::publish_debug_joint_state_out(
 
 void VelocityToPositionCommandController::publish_sync_status( const std::vector<double> &vel_commands_out )
 {
-  if ( !rt_sync_status_pub_ || !rt_sync_status_pub_->trylock() )
+  if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
+    return;
+  if ( !rt_sync_status_pub_->trylock() )
     return;
 
   auto &msg = rt_sync_status_pub_->msg_;
   msg.header.stamp = get_node()->now();
-  msg.joint_names = joints_;
-  msg.vel_command_in.resize( joints_.size() );
-  msg.vel_command_out = vel_commands_out;
-  msg.desired_sync_offset.resize( joints_.size() );
-  msg.current_sync_offset.resize( joints_.size() );
 
   for ( size_t i = 0; i < joints_.size(); ++i ) {
     msg.vel_command_in[i] = reference_interfaces_[i];
+    msg.vel_command_out[i] = vel_commands_out[i];
 
     if ( sync_pairs_.has_partner( i ) ) {
       const size_t p = sync_pairs_.partner( i );
@@ -831,19 +836,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
   }
 
   bool successful = true;
-  // TODO: e-stop
-  // if ( *( e_stop_active_.readFromRT() ) ) {
-  //   for ( size_t index = 0; index < command_interfaces_.size(); index++ ) {
-  //     if ( !std::isnan( joint_position_states_[index] ) ) {
-  //       hold_positions_[index] = joint_position_states_[index];
-  //       desired_positions_[index] = joint_position_states_[index];
-  //     }
-  //     move_states_[index] = STOPPED;
-  //   }
-  //   RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
-  //                         "E-Stop active, holding current joint positions" );
-  //   return controller_interface::return_type::OK;
-  // }
 
   // Process active group actions (drive/sync). This may write position commands directly
   // and set reference_interfaces_ to NaN for controlled joints to skip normal control.
