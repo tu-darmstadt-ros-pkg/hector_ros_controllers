@@ -19,8 +19,13 @@ std::string VelocityToPositionCommandController::start_group_action(
     const std::string &group_name, const std::vector<double> &target_positions_per_joint,
     double max_vel, double max_accel )
 {
-  const size_t group_idx = group_index_map_[group_name];
-  const auto &group_joint_indices = groups_[group_name];
+  const auto group_index_it = group_index_map_.find( group_name );
+  const auto group_it = groups_.find( group_name );
+  if ( group_index_it == group_index_map_.end() || group_it == groups_.end() ) {
+    return "Unknown group '" + group_name + "'";
+  }
+  const size_t group_idx = group_index_it->second;
+  const auto &group_joint_indices = group_it->second;
 
   if ( target_positions_per_joint.size() != group_joint_indices.size() ) {
     return "Target positions size mismatch for group '" + group_name + "'";
@@ -114,6 +119,11 @@ void VelocityToPositionCommandController::monitor_group_actions(
     on_feedback( min_progress );
     rate.sleep();
   }
+
+  // rclcpp::ok() became false (shutdown). Make sure we don't leave the RT
+  // command active and the goal hanging on the client side.
+  cancel_group_actions( group_indices );
+  on_abort( "Aborted due to shutdown" );
 }
 
 // ---------------------------------------------------------------------------

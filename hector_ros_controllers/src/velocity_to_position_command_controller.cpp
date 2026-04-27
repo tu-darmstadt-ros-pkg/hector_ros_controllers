@@ -118,13 +118,16 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
   max_deceleration_ = params_.max_deceleration;
   velocity_command_timeout_ = params_.velocity_command_timeout;
 
-  // Build group index map and RT buffers for group actions
+  // Build group index map and RT buffers for group actions.
+  // Sort group names so indices are deterministic across runs/platforms —
+  // groups_ is an unordered_map and iteration order would otherwise leak
+  // into action result vectors when group_names is empty.
   group_index_map_.clear();
   group_names_.clear();
-  for ( const auto &group : groups_ ) {
-    group_index_map_[group.first] = group_names_.size();
-    group_names_.push_back( group.first );
-  }
+  group_names_.reserve( groups_.size() );
+  for ( const auto &group : groups_ ) { group_names_.push_back( group.first ); }
+  std::sort( group_names_.begin(), group_names_.end() );
+  for ( size_t i = 0; i < group_names_.size(); ++i ) { group_index_map_[group_names_[i]] = i; }
   rt_group_action_cmds_.resize( group_names_.size() );
   group_action_states_ = std::vector<std::atomic<GroupActionState>>( group_names_.size() );
   for ( auto &state : group_action_states_ ) { state.store( GroupActionState::IDLE ); }
