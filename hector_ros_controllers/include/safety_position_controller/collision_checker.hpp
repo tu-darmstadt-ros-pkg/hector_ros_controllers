@@ -22,6 +22,7 @@
 #include <limits>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 // #define SAFETY_CC_ENABLE_TIMING // TODO: remove when no longer needed for optimization
 
@@ -29,6 +30,8 @@
 struct CollisionResult {
   bool in_collision{ false }; ///< true if any pair distance <= padding
   double min_distance{ std::numeric_limits<double>::max() }; ///< global minimum pairwise distance [m]
+  std::size_t min_distance_pair_index{
+      std::numeric_limits<std::size_t>::max() }; ///< index of the pair attaining min_distance; SIZE_MAX if none
 
   /// Per-pair info for pairs within the safety zone (only populated when gradient computation requested).
   struct PairInfo {

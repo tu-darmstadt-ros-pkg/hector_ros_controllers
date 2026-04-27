@@ -233,7 +233,10 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
 
   if ( model_.nq == 0 ) {
     RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
-    return CollisionResult{ true, 0.0, {} };
+    CollisionResult r;
+    r.in_collision = true;
+    r.min_distance = 0.0;
+    return r;
   }
   // return collision if any position is Nan or Inf
   for ( const auto &[name, position] : joint_positions ) {
@@ -242,7 +245,10 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
           node_->get_logger(),
           "Joint position for joint '%s' is NaN or Inf (%.3f). Assuming the robot is in collision.",
           name.c_str(), position );
-      return CollisionResult{ true, 0.0, {} };
+      CollisionResult r;
+      r.in_collision = true;
+      r.min_distance = 0.0;
+      return r;
     }
   }
   // transforms the joint positions into the pinocchio format
@@ -287,7 +293,10 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 
   if ( q.size() != model_.nq ) {
     RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
-    return CollisionResult{ true, 0.0, {} };
+    CollisionResult r;
+    r.in_collision = true;
+    r.min_distance = 0.0;
+    return r;
   }
 
   // check if robot moved since the last check
@@ -389,6 +398,9 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   CollisionResult result;
   result.in_collision = ( global_min_distance <= collision_padding_ );
   result.min_distance = global_min_distance;
+  if ( global_min_distance != std::numeric_limits<double>::max() ) {
+    result.min_distance_pair_index = min_distance_pair;
+  }
 
   // Compute per-pair distance gradients (lazy: only if pairs actually exist in safety zone)
   if ( has_safety_zone_pairs ) {
@@ -557,6 +569,26 @@ void CollisionChecker::publishMinimalMarkers()
   bright_red.b = 0.0f;
   bright_red.a = 1.0f;
   lines_coll.color = bright_red;
+
+  // Fallback: when the controller did not request gradient computation (threshold=0),
+  // safety_zone_pairs is empty even on collision. Draw the colliding pair from the
+  // global-min index so RViz still shows the collision line.
+  if ( result.safety_zone_pairs.empty() && result.in_collision &&
+       result.min_distance_pair_index < geom_data_.distanceResults.size() ) {
+    const auto &dres = geom_data_.distanceResults[result.min_distance_pair_index];
+    if ( !dres.nearest_points[0].hasNaN() && !dres.nearest_points[1].hasNaN() &&
+         dres.nearest_points[0].allFinite() && dres.nearest_points[1].allFinite() ) {
+      geometry_msgs::msg::Point pA, pB;
+      pA.x = dres.nearest_points[0][0];
+      pA.y = dres.nearest_points[0][1];
+      pA.z = dres.nearest_points[0][2];
+      pB.x = dres.nearest_points[1][0];
+      pB.y = dres.nearest_points[1][1];
+      pB.z = dres.nearest_points[1][2];
+      lines_coll.points.push_back( pA );
+      lines_coll.points.push_back( pB );
+    }
+  }
 
   for ( const auto &pair : result.safety_zone_pairs ) {
     const auto &dres = geom_data_.distanceResults[pair.pair_index];

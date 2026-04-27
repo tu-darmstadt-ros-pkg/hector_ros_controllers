@@ -1,6 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
+#include <limits>
+
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
 #include <safety_position_controller/collision_checker.hpp>
@@ -200,6 +203,21 @@ private:
   void update_debug_publishers( bool enable );
   void publish_status();
 
+  /// Trivially-copyable view of the status fields written from the controller update thread.
+  /// Holding it in a RealtimeBuffer lets publish_status() read a consistent snapshot from
+  /// any thread (wall_timer or update path) without a mutex.
+  struct StatusSnapshot {
+    double min_distance{ std::numeric_limits<double>::max() };
+    double distance_scale{ 1.0 };
+    double effective_scale{ 1.0 };
+    double worst_directional_derivative{ std::numeric_limits<double>::max() };
+    double manipulability{ 0.0 };
+    uint32_t num_pairs_in_safety_zone{ 0 };
+  };
+  /// Refresh rt_status_buffer_ from the current last_*_ fields. Must be called only from
+  /// the controller update thread (the same thread that writes those fields).
+  void update_status_snapshot();
+
   // ---- Configuration / mode ----
   bool is_chained_ = true;                       ///< chained-only controller (hold if false)
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
@@ -275,6 +293,7 @@ private:
   // Status publisher (latched) + periodic timer
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>::SharedPtr status_pub_;
   rclcpp::TimerBase::SharedPtr status_timer_;
+  realtime_tools::RealtimeBuffer<StatusSnapshot> rt_status_buffer_;
 
   static constexpr int throttle_logging_msg = 2000; ///< ms; throttle for WARN/ERROR logs
 };

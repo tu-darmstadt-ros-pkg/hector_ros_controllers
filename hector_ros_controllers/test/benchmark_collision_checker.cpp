@@ -14,9 +14,15 @@
 #include <pinocchio/multibody/model.hpp>
 #include <pinocchio/parsers/urdf.hpp>
 
+#include <unistd.h>
+
 #include <cmath>
 #include <fstream>
 #include <random>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 // CollisionChecker is in the global namespace
 

@@ -11,6 +11,8 @@
 // not the exact penetration depth. For non-penetrating configurations, broadphase
 // and brute-force should agree exactly.
 //
+#include <unistd.h>
+
 #include <algorithm>
 #include <gtest/gtest.h>
 

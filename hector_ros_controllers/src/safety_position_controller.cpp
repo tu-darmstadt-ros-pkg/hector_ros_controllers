@@ -524,6 +524,10 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
         collision_checker_->computeManipulability( params_.manipulability_ee_frame );
   }
 
+  // Publish a snapshot of last_*_ to rt_status_buffer_ so publish_status() (called from
+  // the wall timer or from any other thread) reads a consistent view without locking.
+  update_status_snapshot();
+
   return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
 }
 
@@ -864,11 +868,24 @@ void SafetyPositionController::publish_debug_joint_state_out( const std::vector<
   debug_out_js_pub_->publish( msg );
 }
 
+void SafetyPositionController::update_status_snapshot()
+{
+  StatusSnapshot snap;
+  snap.min_distance = last_min_distance_;
+  snap.distance_scale = last_distance_scale_;
+  snap.effective_scale = last_effective_scale_;
+  snap.worst_directional_derivative = last_worst_directional_derivative_;
+  snap.manipulability = last_manipulability_;
+  snap.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
+  rt_status_buffer_.writeFromNonRT( snap );
+}
+
 void SafetyPositionController::publish_status()
 {
   if ( !status_pub_ ) {
     return;
   }
+  const StatusSnapshot snap = *rt_status_buffer_.readFromNonRT();
   hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus msg;
   msg.header.stamp = get_node()->now();
   msg.safety_bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
@@ -877,12 +894,12 @@ void SafetyPositionController::publish_status()
   msg.collision_check_enabled = params_.check_self_collisions;
   msg.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
   msg.position_limits_enforced = params_.enforce_position_limits;
-  msg.min_collision_distance = last_min_distance_;
-  msg.distance_scale = last_distance_scale_;
-  msg.effective_scale = last_effective_scale_;
-  msg.worst_directional_derivative = last_worst_directional_derivative_;
-  msg.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
-  msg.manipulability = last_manipulability_;
+  msg.min_collision_distance = snap.min_distance;
+  msg.distance_scale = snap.distance_scale;
+  msg.effective_scale = snap.effective_scale;
+  msg.worst_directional_derivative = snap.worst_directional_derivative;
+  msg.num_pairs_in_safety_zone = snap.num_pairs_in_safety_zone;
+  msg.manipulability = snap.manipulability;
 
   // Populate active current limits per joint (only meaningful when current_limits_enabled)
   if ( params_.set_current_limits ) {
