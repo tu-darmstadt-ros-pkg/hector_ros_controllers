@@ -858,11 +858,14 @@ SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::
 
   for ( size_t joint_idx = 0; joint_idx < command_interfaces_.size(); joint_idx++ ) {
 
-    // Skip if no command received from high level controller
+    // Skip joints without a velocity reference. Reference is NaN at startup
+    // before the upstream chain produces commands, and is intentionally
+    // nulled by process_group_actions() while a group action is driving the
+    // joint -- both are normal, so this is debug-level only.
     if ( std::isnan( reference_interfaces_[joint_idx] ) ) {
-      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
-                            "No velocity command received for joint '%s'",
-                            joints_[joint_idx].c_str() );
+      RCLCPP_DEBUG_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
+                             "No velocity reference for joint '%s' (idle or group-action driven)",
+                             joints_[joint_idx].c_str() );
       continue;
     }
     // Skip joints with invalid state interfaces
