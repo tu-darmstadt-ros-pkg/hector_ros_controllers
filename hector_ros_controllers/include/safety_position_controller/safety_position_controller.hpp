@@ -1,5 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
+#include <limits>
+
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
 #include <safety_position_controller/collision_checker.hpp>
@@ -127,10 +131,11 @@ private:
   void enforce_limits();
 
   /**
-   * @brief Limit per-cycle motion by vel_limit/update_rate (scaled).
-   * Reduces command toward current position if excessive.
+   * @brief Limit per-cycle motion by vel_limit/update_rate, scaled by
+   * block_velocity_scaling and the distance-based scaling factor.
+   * @param distance_scale [0,1] factor from distance-based scaling (1.0 = full speed, 0.0 = hold)
    */
-  void block_if_too_far();
+  void apply_velocity_limits( double distance_scale );
 
   /**
    * @brief Write current-limit commands (stiff/compliant) if enabled.
@@ -185,14 +190,37 @@ private:
    */
   bool wait_for_srdf();
 
+  /**
+   * @brief Compute the directional derivative of collision distance along the
+   * commanded motion direction for a given gradient vector.
+   * @param gradient dd/dv vector (size model_.nv) from CollisionChecker
+   * @return dot product (positive = moving away from collision)
+   */
+  double compute_directional_derivative( const Eigen::VectorXd &gradient ) const;
+
   void publish_debug_joint_state_in();
   void publish_debug_joint_state_out( const std::vector<double> &positions );
   void update_debug_publishers( bool enable );
   void publish_status();
 
+  /// Trivially-copyable view of the status fields written from the controller update thread.
+  /// Holding it in a RealtimeBuffer lets publish_status() read a consistent snapshot from
+  /// any thread (wall_timer or update path) without a mutex.
+  struct StatusSnapshot {
+    double min_distance{ std::numeric_limits<double>::max() };
+    double distance_scale{ 1.0 };
+    double effective_scale{ 1.0 };
+    double worst_directional_derivative{ std::numeric_limits<double>::quiet_NaN() };
+    double manipulability{ 0.0 };
+    uint32_t num_pairs_in_safety_zone{ 0 };
+  };
+  /// Refresh rt_status_buffer_ from the current last_*_ fields. Must be called only from
+  /// the controller update thread (the same thread that writes those fields).
+  void update_status_snapshot();
+
   // ---- Configuration / mode ----
-  bool is_chained_ = true;         ///< chained-only controller (hold if false)
-  bool in_compliant_mode_ = false; ///< selects compliant vs. stiff current limits
+  bool is_chained_ = true;                       ///< chained-only controller (hold if false)
+  std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
 
   // ---- E-stop ----
   std::atomic<bool> estop_active_{ false };  ///< last requested E-stop state
@@ -221,13 +249,23 @@ private:
   std::unordered_map<std::string, double> cc_positions_; ///< name→position map for CC
   std::unique_ptr<CollisionChecker> collision_checker_;  ///< optional self-collision checker
   std::string srdf_;                                     ///< SRDF XML (semantic)
-  bool srdf_received_ = false;                           ///< latched SRDF received
+  std::atomic<bool> srdf_received_{ false };             ///< latched SRDF received
+  double last_min_distance_{
+      std::numeric_limits<double>::max() }; ///< previous cycle's min collision distance
+  double last_manipulability_{ 0.0 };       ///< latest Yoshikawa manipulability index
+
+  // ---- Directional collision scaling ----
+  std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
+  std::vector<CollisionResult::PairInfo>
+      last_safety_zone_pairs_; ///< safety-zone pairs from previous collision check
+  double last_distance_scale_{ 1.0 };
+  double last_effective_scale_{ 1.0 };
+  double last_worst_directional_derivative_{ std::numeric_limits<double>::quiet_NaN() };
 
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> cmd_positions_;     ///< post-enforcement commands
   std::vector<double> current_positions_; ///< latest measured positions
-  bool on_hold_{ false };                 ///< non-chained fallback
-  std::vector<double> hold_positions_;    ///< positions to hold when not chained
+  std::vector<double> hold_positions_;    ///< positions to hold during E-stop
 
   // ---- Parameters ----
   std::shared_ptr<ParamListener> param_listener_;
@@ -252,10 +290,12 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
 
-  // Status publisher (latched)
+  // Status publisher (latched) + periodic timer
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>::SharedPtr status_pub_;
+  rclcpp::TimerBase::SharedPtr status_timer_;
+  realtime_tools::RealtimeBuffer<StatusSnapshot> rt_status_buffer_;
 
-  static constexpr int throttle_logging_msg = 2000; ///< ms; throttle for WARN/ERROR logs
+  static constexpr int throttle_logging_msg = 10000; ///< ms; throttle for WARN/ERROR logs
 };
 
 } // namespace safety_position_controller

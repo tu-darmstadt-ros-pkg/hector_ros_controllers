@@ -1,5 +1,6 @@
 #include "safety_position_controller/safety_position_controller.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -65,6 +66,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
 
   if ( params_.check_self_collisions ) {
     collision_checker_ = std::make_unique<CollisionChecker>( node, params_.collision_padding,
+                                                             params_.collision_cache_epsilon,
                                                              params_.debug_visualize_collisions );
   }
 
@@ -161,7 +163,22 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   }
 
   if ( collision_checker_ ) {
-    collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints, false );
+    collision_checker_->setBroadphase( params_.use_broadphase );
+    if ( !collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints,
+                                           false ) ) {
+      RCLCPP_ERROR( node->get_logger(), "Failed to initialize collision checker from URDF/SRDF." );
+      return controller_interface::CallbackReturn::ERROR;
+    }
+
+    // Build velocity-space index mapping for directional collision scaling
+    joint_v_index_.resize( params_.joints.size(), -1 );
+    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+      joint_v_index_[i] = collision_checker_->getJointVelocityIndex( params_.joints[i] );
+      if ( joint_v_index_[i] < 0 ) {
+        RCLCPP_WARN( node->get_logger(), "Joint '%s' not found in collision model velocity space",
+                     params_.joints[i].c_str() );
+      }
+    }
   }
 
   const size_t n = params_.joints.size();
@@ -183,19 +200,45 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
-  on_hold_ = false;
-
   // reset reference interfaces
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
-  params_.block_if_too_far = params_.check_self_collisions ? true : params_.block_if_too_far;
+  if ( params_.check_self_collisions && params_.collision_safety_zone <= params_.collision_padding ) {
+    RCLCPP_ERROR( get_node()->get_logger(),
+                  "collision_safety_zone (%.4f) must be > collision_padding (%.4f)",
+                  params_.collision_safety_zone, params_.collision_padding );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+  last_min_distance_ = std::numeric_limits<double>::max();
+  last_safety_zone_pairs_.clear();
+  last_distance_scale_ = 1.0;
+  last_effective_scale_ = 1.0;
+  last_worst_directional_derivative_ = std::numeric_limits<double>::quiet_NaN();
+
+  status_timer_.reset();
+  if ( params_.status_publish_rate > 0.0 ) {
+    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
+    status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
+  }
   if ( collision_checker_ ) {
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
     collision_checker_->updateDoDebugVisualization( params_.debug_visualize_collisions );
+    collision_checker_->updatePublishCollisionDistances( params_.publish_collision_distances );
   }
+
+  RCLCPP_INFO( get_node()->get_logger(),
+               "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
+               "padding=%.4f, safety_zone=%.4f, cache_eps=%.1e, directional=%s, debug_viz=%s, "
+               "publish_distances=%s",
+               params_.joints.size(), params_.check_self_collisions ? "ON" : "OFF",
+               params_.use_broadphase ? "ON" : "OFF", params_.collision_padding,
+               params_.collision_safety_zone, params_.collision_cache_epsilon,
+               params_.directional_collision_scaling ? "ON" : "OFF",
+               params_.debug_visualize_collisions ? "ON" : "OFF",
+               params_.publish_collision_distances ? "ON" : "OFF" );
 
   // compute max allowed distance per cycle
   for ( size_t n = 0; n < params_.joints.size(); ++n ) {
@@ -229,8 +272,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
         }
       } );
 
-  if ( is_chained_ ) {
-    // Non-chained command subscriber (RT buffer)
+  if ( !is_chained_ ) {
+    // Non-chained mode: re-create command subscriber (destroyed in on_deactivate)
     joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
         "~/commands", rclcpp::SystemDefaultsQoS(),
         [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
@@ -251,6 +294,7 @@ SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   estop_subscriber_.reset();
   joints_command_subscriber_.reset();
+  status_timer_.reset();
 
   estop_active_.store( false, std::memory_order_relaxed );
   estop_engaged_.store( false, std::memory_order_relaxed );
@@ -379,20 +423,56 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 
   // resolve continuous joints & enforce limits
   enforce_limits();
-  // make sure movement is not too large
-  if ( params_.block_if_too_far ) {
-    block_if_too_far();
+
+  // ---- Distance-based velocity scaling ----
+  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+  const bool collision_checks_active =
+      !bypass_active && params_.check_self_collisions && collision_checker_;
+
+  // Compute velocity scale factor from previous cycle's min distance
+  double distance_scale = 1.0;
+  if ( collision_checks_active ) {
+    const auto &d = last_min_distance_;
+    const auto &d_pad = params_.collision_padding;
+    const auto &d_zone = params_.collision_safety_zone;
+
+    if ( d <= d_pad ) {
+      distance_scale = 0.0;
+    } else if ( d < d_zone ) {
+      distance_scale = ( d - d_pad ) / ( d_zone - d_pad );
+    }
+    // else: distance_scale remains 1.0 (full speed)
   }
+
+  // Always apply velocity-limited stepping when collision checks are active
+  double effective_scale = distance_scale;
+  double worst_directional_derivative = std::numeric_limits<double>::quiet_NaN();
+  if ( collision_checks_active ) {
+    // Directional scaling: only slow down if moving toward any collision in safety zone
+    if ( distance_scale < 1.0 && params_.directional_collision_scaling &&
+         !last_safety_zone_pairs_.empty() ) {
+      double worst = std::numeric_limits<double>::infinity();
+      for ( const auto &pair_info : last_safety_zone_pairs_ ) {
+        worst = std::min( worst, compute_directional_derivative( pair_info.gradient ) );
+      }
+      worst_directional_derivative = worst;
+      if ( worst >= 0.0 ) {
+        // ALL safety-zone pairs say motion moves away or is tangent → allow full speed
+        effective_scale = 1.0;
+      }
+    }
+    apply_velocity_limits( effective_scale );
+  }
+  last_distance_scale_ = distance_scale;
+  last_effective_scale_ = effective_scale;
+  last_worst_directional_derivative_ = worst_directional_derivative;
+
   if ( params_.set_current_limits ) {
     success &= write_current_limits();
   }
 
-  // check collisions with the new commands (skip if bypass is active)
-  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
-  const bool skip_collision_check =
-      bypass_active || !params_.check_self_collisions || !collision_checker_;
-
-  if ( skip_collision_check ) {
+  // ---- Collision check ----
+  if ( !collision_checks_active ) {
     if ( bypass_active && params_.check_self_collisions && collision_checker_ ) {
       RCLCPP_DEBUG_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                              throttle_logging_msg, "Safety bypass active: skipping collision check" );
@@ -410,22 +490,55 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       }
     }
     for ( size_t i = 0; i < n; ++i ) { cc_positions_[params_.joints[i]] = cmd_positions_[i]; }
-    if ( success_cc_setup && !collision_checker_->checkCollision( cc_positions_ ) ) {
-      // write commands if no collision detected
-      write_position_commands( cmd_positions_ );
-    } else {
-      if ( !success_cc_setup ) {
-        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                              throttle_logging_msg, "Failed to setup collision checking." );
+
+    if ( success_cc_setup ) {
+      // Request gradient computation when inside safety zone (or when directional scaling is on)
+      const double gradient_threshold = ( params_.directional_collision_scaling &&
+                                          last_min_distance_ < params_.collision_safety_zone )
+                                            ? params_.collision_safety_zone
+                                            : 0.0;
+      collision_checker_->setSafetyZoneThreshold( gradient_threshold );
+      const auto cc_result = collision_checker_->checkCollision( cc_positions_ );
+      last_min_distance_ = cc_result.min_distance;
+      last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
+
+      // Provide directional derivative info to collision checker for visualization
+      if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
+        const std::size_t num_pairs = collision_checker_->getNumCollisionPairs();
+        std::vector<double> per_pair_dir_derivs( num_pairs, std::numeric_limits<double>::quiet_NaN() );
+        for ( const auto &pi : last_safety_zone_pairs_ ) {
+          if ( pi.pair_index < num_pairs ) {
+            per_pair_dir_derivs[pi.pair_index] = compute_directional_derivative( pi.gradient );
+          }
+        }
+        collision_checker_->setDirectionalInfo( per_pair_dir_derivs, params_.collision_safety_zone );
+      }
+
+      if ( !cc_result.in_collision ) {
+        write_position_commands( cmd_positions_ );
       } else {
         RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                               throttle_logging_msg,
-                              "Collision detected! Holding current positions." );
+                              "Collision detected (min_dist=%.4f)! Holding current positions.",
+                              cc_result.min_distance );
+        write_position_commands( current_positions_ );
       }
+    } else {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                            throttle_logging_msg, "Failed to setup collision checking." );
       write_position_commands( current_positions_ );
-      // success = false; // make parent controllers unload if desired
     }
   }
+
+  // Compute manipulability index if collision checker is available (FK already done)
+  if ( collision_checker_ && !params_.manipulability_ee_frame.empty() ) {
+    last_manipulability_ =
+        collision_checker_->computeManipulability( params_.manipulability_ee_frame );
+  }
+
+  // Publish a snapshot of last_*_ to rt_status_buffer_ so publish_status() (called from
+  // the wall timer or from any other thread) reads a consistent view without locking.
+  update_status_snapshot();
 
   return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
 }
@@ -492,28 +605,58 @@ void SafetyPositionController::enforce_limits()
   }
 }
 
-void SafetyPositionController::block_if_too_far()
+void SafetyPositionController::apply_velocity_limits( const double distance_scale )
 {
-  // check if any joint command is too far from the current position
+  // distance_scale: 1.0 → full speed, 0.0 → stop; can be used to smoothly reduce speed when close to collisions
+  const double clamped_scale = std::clamp( distance_scale, 0.0, 1.0 );
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( !std::isnan( velocity_limits_[i] ) ) {
       // shortest signed distance from current -> command
-      const double diff = get_signed_distance( current_positions_[i], cmd_positions_[i] );
-      const double max_step = max_allowed_distance_per_cycle_[i];
+      const double diff = ( kinds_[i] == JointType::CONTINUOUS )
+                              ? get_signed_distance( current_positions_[i], cmd_positions_[i] )
+                              : ( cmd_positions_[i] - current_positions_[i] );
+      const double max_step = max_allowed_distance_per_cycle_[i] * clamped_scale;
+
+      // RCLCPP_INFO( get_node()->get_logger(),
+      //             "Joint '%s': distance=%.4f, max_step=%.4f, scale=%.3f",
+      //             params_.joints[i].c_str(), diff, max_step, clamped_scale );
 
       if ( std::abs( diff ) > max_step ) {
         RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                               throttle_logging_msg,
-                              "Joint '%s' command is too far (|diff|=%.3f > allowed=%.3f). "
-                              "Limiting step. [current=%.3f, cmd=%.3f]",
-                              params_.joints[i].c_str(), std::abs( diff ), max_step,
+                              "Joint '%s' step limited (|diff|=%.4f > allowed=%.4f, "
+                              "dist_scale=%.3f). [current=%.3f, cmd=%.3f]",
+                              params_.joints[i].c_str(), std::abs( diff ), max_step, clamped_scale,
                               current_positions_[i], cmd_positions_[i] );
 
-        // Limit the commanded position to a max step in the direction of diff
-        cmd_positions_[i] = current_positions_[i] + std::copysign( max_step, diff );
+        if ( max_step <= 0.0 ) {
+          cmd_positions_[i] = current_positions_[i]; // zero speed = hold
+        } else {
+          cmd_positions_[i] = current_positions_[i] + std::copysign( max_step, diff );
+        }
       }
     }
   }
+}
+
+double SafetyPositionController::compute_directional_derivative( const Eigen::VectorXd &gradient ) const
+{
+  double dot_product = 0.0;
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    if ( joint_v_index_[i] < 0 || joint_v_index_[i] >= gradient.size() )
+      continue;
+
+    // For continuous joints, use shortest-path angular distance
+    double delta_q_i;
+    if ( kinds_[i] == JointType::CONTINUOUS ) {
+      delta_q_i = get_signed_distance( current_positions_[i], cmd_positions_[i] );
+    } else {
+      delta_q_i = cmd_positions_[i] - current_positions_[i];
+    }
+
+    dot_product += gradient[joint_v_index_[i]] * delta_q_i;
+  }
+  return dot_product;
 }
 
 bool SafetyPositionController::write_current_limits()
@@ -737,11 +880,24 @@ void SafetyPositionController::publish_debug_joint_state_out( const std::vector<
   debug_out_js_pub_->publish( msg );
 }
 
+void SafetyPositionController::update_status_snapshot()
+{
+  StatusSnapshot snap;
+  snap.min_distance = last_min_distance_;
+  snap.distance_scale = last_distance_scale_;
+  snap.effective_scale = last_effective_scale_;
+  snap.worst_directional_derivative = last_worst_directional_derivative_;
+  snap.manipulability = last_manipulability_;
+  snap.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
+  rt_status_buffer_.writeFromNonRT( snap );
+}
+
 void SafetyPositionController::publish_status()
 {
   if ( !status_pub_ ) {
     return;
   }
+  const StatusSnapshot snap = *rt_status_buffer_.readFromNonRT();
   hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus msg;
   msg.header.stamp = get_node()->now();
   msg.safety_bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
@@ -750,6 +906,25 @@ void SafetyPositionController::publish_status()
   msg.collision_check_enabled = params_.check_self_collisions;
   msg.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
   msg.position_limits_enforced = params_.enforce_position_limits;
+  msg.min_collision_distance = snap.min_distance;
+  msg.distance_scale = snap.distance_scale;
+  msg.effective_scale = snap.effective_scale;
+  msg.worst_directional_derivative = snap.worst_directional_derivative;
+  msg.num_pairs_in_safety_zone = snap.num_pairs_in_safety_zone;
+  msg.manipulability = snap.manipulability;
+
+  // Populate active current limits per joint (only meaningful when current_limits_enabled)
+  if ( params_.set_current_limits ) {
+    msg.joint_names = params_.joints;
+    msg.current_limits.reserve( params_.joints.size() );
+    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+      const auto &limit = in_compliant_mode_
+                              ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
+                              : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
+      msg.current_limits.push_back( limit );
+    }
+  }
+
   status_pub_->publish( msg );
 }
 
