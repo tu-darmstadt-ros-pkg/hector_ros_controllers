@@ -18,6 +18,7 @@ endif()
 set(THIS_PACKAGE_INCLUDE_DEPENDS
     ament_cmake
     backward_ros
+    control_msgs
     controller_interface
     srdfdom
     visualization_msgs
@@ -28,6 +29,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     hpp-fcl
     pinocchio
     rclcpp
+    rclcpp_action
     rclcpp_lifecycle
     realtime_tools
     sensor_msgs
@@ -57,6 +59,10 @@ generate_parameter_library(safety_forward_controller_parameters
 
 generate_parameter_library(safety_position_controller_parameters
                            params/safety_position_controller_parameters.yaml)
+
+generate_parameter_library(
+  max_effort_gripper_action_controller_parameters
+  params/max_effort_gripper_action_controller_parameters.yaml)
 # Add controllers here Define Controllers as Shared Libraries
 
 add_library(
@@ -65,6 +71,7 @@ add_library(
   src/velocity_to_position_command_controller.cpp
   src/self_collision_avoidance_controller.cpp
   src/safety_position_controller.cpp
+  src/max_effort_gripper_action_controller.cpp
   src/collision_checker.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
@@ -81,7 +88,8 @@ target_link_libraries(
          velocity_to_position_command_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
-         safety_position_controller_parameters)
+         safety_position_controller_parameters
+         max_effort_gripper_action_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -98,6 +106,7 @@ install(
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters
           safety_position_controller_parameters
+          max_effort_gripper_action_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
@@ -124,7 +133,9 @@ if(BUILD_TESTING)
     ${sensor_msgs_TARGETS}
     ${hector_ros_controllers_msgs_TARGETS}
     ${visualization_msgs_TARGETS}
+    ${control_msgs_TARGETS}
     rclcpp::rclcpp
+    rclcpp_action::rclcpp_action
     rclcpp_lifecycle::rclcpp_lifecycle
     controller_interface::controller_interface
     hardware_interface::hardware_interface
@@ -138,7 +149,8 @@ if(BUILD_TESTING)
     velocity_to_position_command_controller_parameters
     self_collision_avoidance_controller_parameters
     safety_forward_controller_parameters
-    safety_position_controller_parameters)
+    safety_position_controller_parameters
+    max_effort_gripper_action_controller_parameters)
 
   ament_add_gmock(test_safety_forward_controller
                   test/test_safety_forward_controller.cpp)
@@ -169,6 +181,17 @@ if(BUILD_TESTING)
     test_velocity_to_position_command_controller
     ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_velocity_to_position_command_controller
+                             PRIVATE ${DEFS})
+
+  ament_add_gmock(test_max_effort_gripper_action_controller
+                  test/test_max_effort_gripper_action_controller.cpp)
+  target_include_directories(
+    test_max_effort_gripper_action_controller
+    PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_max_effort_gripper_action_controller
+    ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_max_effort_gripper_action_controller
                              PRIVATE ${DEFS})
 endif()
 

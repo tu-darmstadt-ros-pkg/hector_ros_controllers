@@ -1,0 +1,12 @@
+max_effort_gripper_action_controller:
+  joint: {type: string, default_value: '', description: Joint to control. Must expose 'position' and 'effort' command interfaces and 'position' and 'velocity' state interfaces.}
+  action_monitor_rate: {type: double, default_value: 20.0, description: Rate (Hz) at which the action goal status is monitored and the is_grasped topic is published., validation: {gt_eq: [0.1]}}
+  goal_tolerance: {type: double, default_value: 0.01, description: Position error below which an action goal is considered reached., validation: {gt_eq: [0.0]}}
+  default_max_effort: {type: double, default_value: 0.0, description: Effort written to the joint's effort command interface for topic-driven goals and for action goals where max_effort == 0. Used by Dynamixel actuators as a current/torque limit in current-based position mode., validation: {gt_eq: [0.0]}}
+  allow_stalling: {type: bool, default_value: false, description: 'If true, an action goal that stalls before reaching the goal returns SUCCEEDED with stalled=true. If false, it is ABORTED.'}
+  stall_velocity_threshold: {type: double, default_value: 0.001, description: Velocity below which the joint is considered to be potentially stalled (action mode)., validation: {gt_eq: [0.0]}}
+  stall_timeout: {type: double, default_value: 1.0, description: Time (seconds) the joint must remain below stall_velocity_threshold without reaching the goal before stall is declared., validation: {gt_eq: [0.0]}}
+  velocity_command_timeout: {type: double, default_value: 0.2, description: Time (seconds) without a velocity command message after which the integrated velocity is treated as zero (target position held)., validation: {gt_eq: [0.0]}}
+  is_grasped_velocity_threshold: {type: double, default_value: 0.005, description: Velocity must remain below this value for is_grasped to become true., validation: {gt_eq: [0.0]}}
+  is_grasped_effort_threshold: {type: double, default_value: 0.5, description: Effort must remain above this value (absolute) for is_grasped to become true., validation: {gt_eq: [0.0]}}
+  is_grasped_dwell_cycles: {type: int, default_value: 5, description: Number of consecutive update cycles for which the velocity and effort conditions must hold before is_grasped latches true., validation: {gt_eq: [1]}}
