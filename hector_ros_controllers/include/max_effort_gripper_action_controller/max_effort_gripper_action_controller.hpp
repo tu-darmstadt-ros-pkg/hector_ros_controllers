@@ -45,13 +45,6 @@ public:
   using RealtimeGoalHandle = realtime_tools::RealtimeServerGoalHandle<GripperCommandAction>;
   using RealtimeGoalHandlePtr = std::shared_ptr<RealtimeGoalHandle>;
 
-  enum class GoalSource {
-    NONE,
-    ACTION,
-    POSITION_TOPIC,
-    VELOCITY_TOPIC,
-  };
-
   struct Command {
     double position;
     double max_effort;
@@ -75,6 +68,9 @@ public:
                                             const rclcpp::Duration &period ) override;
 
 private:
+  // Which input source won arbitration for the current update() cycle.
+  enum class InputSource { None, Action, PositionTopic, VelocityTopic };
+
   // Lifecycle helpers
   void parse_joint_limits_from_urdf();
 

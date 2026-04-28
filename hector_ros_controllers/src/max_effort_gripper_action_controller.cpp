@@ -18,10 +18,6 @@ namespace max_effort_gripper_action_controller
 
 namespace
 {
-constexpr const char *kPositionInterface = hardware_interface::HW_IF_POSITION;
-constexpr const char *kEffortInterface = hardware_interface::HW_IF_EFFORT;
-constexpr const char *kVelocityInterface = hardware_interface::HW_IF_VELOCITY;
-
 double clamp_to_limits( double value, double lower, double upper )
 {
   if ( !std::isnan( lower ) && value < lower )
@@ -129,31 +125,35 @@ controller_interface::InterfaceConfiguration
 MaxEffortGripperActionController::command_interface_configuration() const
 {
   return { controller_interface::interface_configuration_type::INDIVIDUAL,
-           { params_.joint + "/" + kPositionInterface, params_.joint + "/" + kEffortInterface } };
+           { params_.joint + "/" + hardware_interface::HW_IF_POSITION,
+             params_.joint + "/" + hardware_interface::HW_IF_EFFORT } };
 }
 
 controller_interface::InterfaceConfiguration
 MaxEffortGripperActionController::state_interface_configuration() const
 {
   return { controller_interface::interface_configuration_type::INDIVIDUAL,
-           { params_.joint + "/" + kPositionInterface, params_.joint + "/" + kVelocityInterface,
-             params_.joint + "/" + kEffortInterface } };
+           { params_.joint + "/" + hardware_interface::HW_IF_POSITION,
+             params_.joint + "/" + hardware_interface::HW_IF_VELOCITY,
+             params_.joint + "/" + hardware_interface::HW_IF_EFFORT } };
 }
 
 controller_interface::CallbackReturn
 MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
 {
   // Locate command interfaces
-  auto pos_cmd_it = std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
-                                  [this]( const hardware_interface::LoanedCommandInterface &ci ) {
-                                    return ci.get_prefix_name() == params_.joint &&
-                                           ci.get_interface_name() == kPositionInterface;
-                                  } );
-  auto eff_cmd_it = std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
-                                  [this]( const hardware_interface::LoanedCommandInterface &ci ) {
-                                    return ci.get_prefix_name() == params_.joint &&
-                                           ci.get_interface_name() == kEffortInterface;
-                                  } );
+  auto pos_cmd_it =
+      std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
+                    [this]( const hardware_interface::LoanedCommandInterface &ci ) {
+                      return ci.get_prefix_name() == params_.joint &&
+                             ci.get_interface_name() == hardware_interface::HW_IF_POSITION;
+                    } );
+  auto eff_cmd_it =
+      std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
+                    [this]( const hardware_interface::LoanedCommandInterface &ci ) {
+                      return ci.get_prefix_name() == params_.joint &&
+                             ci.get_interface_name() == hardware_interface::HW_IF_EFFORT;
+                    } );
   if ( pos_cmd_it == command_interfaces_.end() || eff_cmd_it == command_interfaces_.end() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
                   "Expected position and effort command interfaces for joint '%s'",
@@ -161,21 +161,24 @@ MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  auto pos_state_it = std::find_if( state_interfaces_.begin(), state_interfaces_.end(),
-                                    [this]( const hardware_interface::LoanedStateInterface &si ) {
-                                      return si.get_prefix_name() == params_.joint &&
-                                             si.get_interface_name() == kPositionInterface;
-                                    } );
-  auto vel_state_it = std::find_if( state_interfaces_.begin(), state_interfaces_.end(),
-                                    [this]( const hardware_interface::LoanedStateInterface &si ) {
-                                      return si.get_prefix_name() == params_.joint &&
-                                             si.get_interface_name() == kVelocityInterface;
-                                    } );
-  auto eff_state_it = std::find_if( state_interfaces_.begin(), state_interfaces_.end(),
-                                    [this]( const hardware_interface::LoanedStateInterface &si ) {
-                                      return si.get_prefix_name() == params_.joint &&
-                                             si.get_interface_name() == kEffortInterface;
-                                    } );
+  auto pos_state_it =
+      std::find_if( state_interfaces_.begin(), state_interfaces_.end(),
+                    [this]( const hardware_interface::LoanedStateInterface &si ) {
+                      return si.get_prefix_name() == params_.joint &&
+                             si.get_interface_name() == hardware_interface::HW_IF_POSITION;
+                    } );
+  auto vel_state_it =
+      std::find_if( state_interfaces_.begin(), state_interfaces_.end(),
+                    [this]( const hardware_interface::LoanedStateInterface &si ) {
+                      return si.get_prefix_name() == params_.joint &&
+                             si.get_interface_name() == hardware_interface::HW_IF_VELOCITY;
+                    } );
+  auto eff_state_it =
+      std::find_if( state_interfaces_.begin(), state_interfaces_.end(),
+                    [this]( const hardware_interface::LoanedStateInterface &si ) {
+                      return si.get_prefix_name() == params_.joint &&
+                             si.get_interface_name() == hardware_interface::HW_IF_EFFORT;
+                    } );
   if ( pos_state_it == state_interfaces_.end() || vel_state_it == state_interfaces_.end() ||
        eff_state_it == state_interfaces_.end() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
@@ -436,18 +439,18 @@ MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp
     vel_valid = pending_vel && std::isfinite( pending_vel->data );
   }
 
-  enum class Winner { NONE, ACTION, POS, VEL } winner = Winner::NONE;
+  InputSource winner = InputSource::None;
   uint64_t winning_seq = 0;
   if ( action_valid && action_seq > winning_seq ) {
-    winner = Winner::ACTION;
+    winner = InputSource::Action;
     winning_seq = action_seq;
   }
   if ( pos_valid && pos_seq > winning_seq ) {
-    winner = Winner::POS;
+    winner = InputSource::PositionTopic;
     winning_seq = pos_seq;
   }
   if ( vel_valid && vel_seq > winning_seq ) {
-    winner = Winner::VEL;
+    winner = InputSource::VelocityTopic;
     winning_seq = vel_seq;
   }
 
@@ -469,22 +472,22 @@ MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp
   }
 
   switch ( winner ) {
-  case Winner::ACTION:
+  case InputSource::Action:
     target_.position =
         clamp_to_limits( pending_action.position, joint_lower_limit_, joint_upper_limit_ );
     target_.max_effort = pending_action.max_effort;
     last_movement_time_ = time;
-    // Non-velocity source won — invalidate the cached velocity so NONE cycles don't
+    // Non-velocity source won — invalidate the cached velocity so None cycles don't
     // resume integrating it. Flag-only; calling writeFromNonRT here would be RT-unsafe.
     velocity_cached_valid_ = false;
     break;
-  case Winner::POS:
+  case InputSource::PositionTopic:
     preempt_active_goal( "preempted by position_command topic" );
     target_.position = clamp_to_limits( pending_pos->data, joint_lower_limit_, joint_upper_limit_ );
     target_.max_effort = params_.default_max_effort;
     velocity_cached_valid_ = false;
     break;
-  case Winner::VEL:
+  case InputSource::VelocityTopic:
     preempt_active_goal( "preempted by velocity_command topic" );
     last_velocity_msg_time_ = time;
     velocity_cached_valid_ = true;
@@ -492,7 +495,7 @@ MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp
                                         joint_lower_limit_, joint_upper_limit_ );
     target_.max_effort = params_.default_max_effort;
     break;
-  case Winner::NONE:
+  case InputSource::None:
     // No fresh winner — keep integrating any cached velocity within the watchdog window.
     continue_velocity_integration_if_within_watchdog( time, period );
     break;
