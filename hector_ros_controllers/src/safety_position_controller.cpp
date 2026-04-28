@@ -132,12 +132,6 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       node->create_publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>(
           "~/status", qos_latched );
 
-  // Periodic status publishing
-  if ( params_.status_publish_rate > 0.0 ) {
-    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
-    status_timer_ = node->create_wall_timer( period, [this]() { publish_status(); } );
-  }
-
   // Debug joint state publishers (dynamically reconfigurable)
   param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( node );
   update_debug_publishers( params_.publish_debug_joint_states );
@@ -221,7 +215,13 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   last_safety_zone_pairs_.clear();
   last_distance_scale_ = 1.0;
   last_effective_scale_ = 1.0;
-  last_worst_directional_derivative_ = std::numeric_limits<double>::max();
+  last_worst_directional_derivative_ = std::numeric_limits<double>::quiet_NaN();
+
+  status_timer_.reset();
+  if ( params_.status_publish_rate > 0.0 ) {
+    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
+    status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
+  }
   if ( collision_checker_ ) {
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
@@ -294,6 +294,7 @@ SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   estop_subscriber_.reset();
   joints_command_subscriber_.reset();
+  status_timer_.reset();
 
   estop_active_.store( false, std::memory_order_relaxed );
   estop_engaged_.store( false, std::memory_order_relaxed );
@@ -445,20 +446,20 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 
   // Always apply velocity-limited stepping when collision checks are active
   double effective_scale = distance_scale;
-  double worst_directional_derivative = std::numeric_limits<double>::max();
+  double worst_directional_derivative = std::numeric_limits<double>::quiet_NaN();
   if ( collision_checks_active ) {
     // Directional scaling: only slow down if moving toward any collision in safety zone
     if ( distance_scale < 1.0 && params_.directional_collision_scaling &&
          !last_safety_zone_pairs_.empty() ) {
+      double worst = std::numeric_limits<double>::infinity();
       for ( const auto &pair_info : last_safety_zone_pairs_ ) {
-        const double dir_deriv = compute_directional_derivative( pair_info.gradient );
-        worst_directional_derivative = std::min( worst_directional_derivative, dir_deriv );
+        worst = std::min( worst, compute_directional_derivative( pair_info.gradient ) );
       }
-      if ( worst_directional_derivative >= 0.0 ) {
+      worst_directional_derivative = worst;
+      if ( worst >= 0.0 ) {
         // ALL safety-zone pairs say motion moves away or is tangent → allow full speed
         effective_scale = 1.0;
       }
-      // else: at least one pair worsens → keep distance_scale
     }
     apply_velocity_limits( effective_scale );
   }

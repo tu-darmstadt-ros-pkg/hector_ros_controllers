@@ -210,7 +210,7 @@ private:
     double min_distance{ std::numeric_limits<double>::max() };
     double distance_scale{ 1.0 };
     double effective_scale{ 1.0 };
-    double worst_directional_derivative{ std::numeric_limits<double>::max() };
+    double worst_directional_derivative{ std::numeric_limits<double>::quiet_NaN() };
     double manipulability{ 0.0 };
     uint32_t num_pairs_in_safety_zone{ 0 };
   };
@@ -260,7 +260,7 @@ private:
       last_safety_zone_pairs_; ///< safety-zone pairs from previous collision check
   double last_distance_scale_{ 1.0 };
   double last_effective_scale_{ 1.0 };
-  double last_worst_directional_derivative_{ std::numeric_limits<double>::max() };
+  double last_worst_directional_derivative_{ std::numeric_limits<double>::quiet_NaN() };
 
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> cmd_positions_;     ///< post-enforcement commands
