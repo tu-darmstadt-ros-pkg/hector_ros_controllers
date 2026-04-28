@@ -251,7 +251,7 @@ other tooling, and additionally accepts goals via two topics for teleop / script
       URDF joint limits. A watchdog (`velocity_command_timeout`) stops the integration when no message has been
       received recently.
 * **Last-writer-wins arbitration**: any topic command arriving while an action goal is active **preempts and aborts**
-  the goal with a clear reason in the result.
+  the goal; the reason is logged.
 * **`is_grasped` realtime publisher** on `~/is_grasped` (`std_msgs/Bool`):
     * Latches `true` when measured joint velocity stays below `is_grasped_velocity_threshold` and measured joint
       effort stays above `is_grasped_effort_threshold` for `is_grasped_dwell_cycles` consecutive update cycles.

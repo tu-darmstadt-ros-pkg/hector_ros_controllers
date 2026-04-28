@@ -93,20 +93,15 @@ private:
   void check_for_success( const rclcpp::Time &time, double error_position, double current_position,
                           double current_velocity, double current_effort );
 
-  // Thread-safe accessors for the goal-handle slots (rt_active_goal_ and
-  // previous_rt_goal_). Both slots are touched from RT (update() arbitration,
-  // check_for_success) AND non-RT (action callbacks, on_deactivate), so plain shared_ptr
-  // assignment would race. std::atomic_store/load/exchange on a shared_ptr are correct in
-  // C++17 (deprecated but functional in C++20) and avoid any locks — RT-safe.
+  // Lock-free accessors for goal-handle slots (touched from both RT and non-RT).
+  // std::atomic_store/load/exchange on shared_ptr (correct in C++17, deprecated in C++20).
   static void store_goal_slot( RealtimeGoalHandlePtr &slot, RealtimeGoalHandlePtr handle );
   static RealtimeGoalHandlePtr load_goal_slot( const RealtimeGoalHandlePtr &slot );
   static RealtimeGoalHandlePtr exchange_goal_slot( RealtimeGoalHandlePtr &slot,
                                                    RealtimeGoalHandlePtr handle );
 
-  // Velocity-topic continuation helper used by the NONE branch of the arbitration when a
-  // cached velocity message is still within its watchdog window. New-message handling
-  // (NaN-validation, last_velocity_msg_time_ update, preemption) lives inline in update().
-  // Returns true if the cached velocity was integrated this cycle.
+  // Continues integrating the cached velocity message if it's still within the watchdog
+  // window. Used by the NONE arbitration branch.
   bool continue_velocity_integration_if_within_watchdog( const rclcpp::Time &time,
                                                          const rclcpp::Duration &period );
 
@@ -130,27 +125,20 @@ private:
 
   // Action server
   rclcpp_action::Server<GripperCommandAction>::SharedPtr action_server_;
-  // Currently-active goal wrapper. Touched from both RT (update arbitration,
-  // check_for_success) and non-RT (cancel/accepted/deactivate). ACCESS ONLY via the
-  // store_goal_slot / load_goal_slot / exchange_goal_slot helpers below.
+  // Currently-active goal. Access ONLY via {store,load,exchange}_goal_slot.
   RealtimeGoalHandlePtr rt_active_goal_;
-  // Holds the most-recently-active goal wrapper after rt_active_goal_ has been cleared
-  // (either from RT check_for_success or from a topic-driven preempt). The wall timer keeps
-  // firing on this until the next accepted_callback flushes it synchronously and replaces
-  // both the goal and the timer. This guarantees that the deferred terminal-state flush
-  // (succeed/abort/canceled set in RT) actually reaches the action client.
-  // ACCESS ONLY via store_goal_slot / exchange_goal_slot.
+  // Most-recently-cleared goal, kept alive so the wall_timer can flush its deferred
+  // terminal flag (succeed/abort/canceled set in RT) before the next accept replaces
+  // the timer. Access ONLY via {store,load,exchange}_goal_slot.
   RealtimeGoalHandlePtr previous_rt_goal_;
   GripperCommandAction::Result::SharedPtr pre_alloc_result_;
   rclcpp::TimerBase::SharedPtr goal_handle_timer_;
   rclcpp::Duration action_monitor_period_;
   rclcpp::Time last_movement_time_;
 
-  // Per-source pending input. Every non-RT writer (action accepted_callback, topic subscribers)
-  // bumps the same per-instance counter `input_seq_counter_` and stores the assigned sequence
-  // number in its source-specific atomic. update() picks the source whose latest sequence is
-  // newest among those not yet consumed. This gives true last-writer-wins arbitration regardless
-  // of update()'s internal processing order.
+  // Per-source pending input. Every writer bumps input_seq_counter_ and stores the
+  // returned sequence in its source-specific atomic. update() picks the highest
+  // unconsumed seq, giving last-writer-wins arbitration regardless of dispatch order.
   std::atomic<uint64_t> input_seq_counter_;
 
   realtime_tools::RealtimeBuffer<Command> rt_action_command_;
@@ -166,10 +154,8 @@ private:
   uint64_t last_consumed_position_seq_;
   uint64_t last_consumed_velocity_seq_;
   rclcpp::Time last_velocity_msg_time_;
-  // True iff the cached velocity message is still considered fresh enough to integrate.
-  // Set when a new velocity message wins arbitration; cleared by the watchdog OR by a
-  // non-velocity source winning (so subsequent NONE cycles don't keep replaying it).
-  // RT-only access (read & written from update()), so no atomicity needed.
+  // RT-only flag gating cached-velocity integration. Cleared by watchdog OR when a
+  // non-velocity source wins.
   bool velocity_cached_valid_;
 
   // Effort hold-mode reference for is_grasped publisher (heartbeat throttling)
