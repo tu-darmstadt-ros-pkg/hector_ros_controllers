@@ -93,13 +93,15 @@ private:
   void check_for_success( const rclcpp::Time &time, double error_position, double current_position,
                           double current_velocity, double current_effort );
 
-  // Thread-safe accessors for previous_rt_goal_. Both RT (clear_active_goal called from
-  // check_for_success) and non-RT (cancel_callback, accepted_callback, on_deactivate)
-  // touch this slot, so plain shared_ptr assignment would race. std::atomic_store /
-  // std::atomic_load on a shared_ptr are correct in C++17 (deprecated but functional in
-  // C++20) and avoid any locks.
-  void store_previous_rt_goal( RealtimeGoalHandlePtr handle );
-  RealtimeGoalHandlePtr exchange_previous_rt_goal( RealtimeGoalHandlePtr handle );
+  // Thread-safe accessors for the goal-handle slots (rt_active_goal_ and
+  // previous_rt_goal_). Both slots are touched from RT (update() arbitration,
+  // check_for_success) AND non-RT (action callbacks, on_deactivate), so plain shared_ptr
+  // assignment would race. std::atomic_store/load/exchange on a shared_ptr are correct in
+  // C++17 (deprecated but functional in C++20) and avoid any locks — RT-safe.
+  static void store_goal_slot( RealtimeGoalHandlePtr &slot, RealtimeGoalHandlePtr handle );
+  static RealtimeGoalHandlePtr load_goal_slot( const RealtimeGoalHandlePtr &slot );
+  static RealtimeGoalHandlePtr exchange_goal_slot( RealtimeGoalHandlePtr &slot,
+                                                   RealtimeGoalHandlePtr handle );
 
   // Velocity-topic continuation helper used by the NONE branch of the arbitration when a
   // cached velocity message is still within its watchdog window. New-message handling
@@ -128,14 +130,16 @@ private:
 
   // Action server
   rclcpp_action::Server<GripperCommandAction>::SharedPtr action_server_;
-  realtime_tools::RealtimeBuffer<RealtimeGoalHandlePtr> rt_active_goal_;
+  // Currently-active goal wrapper. Touched from both RT (update arbitration,
+  // check_for_success) and non-RT (cancel/accepted/deactivate). ACCESS ONLY via the
+  // store_goal_slot / load_goal_slot / exchange_goal_slot helpers below.
+  RealtimeGoalHandlePtr rt_active_goal_;
   // Holds the most-recently-active goal wrapper after rt_active_goal_ has been cleared
   // (either from RT check_for_success or from a topic-driven preempt). The wall timer keeps
   // firing on this until the next accepted_callback flushes it synchronously and replaces
   // both the goal and the timer. This guarantees that the deferred terminal-state flush
   // (succeed/abort/canceled set in RT) actually reaches the action client.
-  // ACCESS ONLY via store_previous_rt_goal / exchange_previous_rt_goal — those use
-  // std::atomic_store/load to avoid a data race between RT and non-RT writers.
+  // ACCESS ONLY via store_goal_slot / exchange_goal_slot.
   RealtimeGoalHandlePtr previous_rt_goal_;
   GripperCommandAction::Result::SharedPtr pre_alloc_result_;
   rclcpp::TimerBase::SharedPtr goal_handle_timer_;

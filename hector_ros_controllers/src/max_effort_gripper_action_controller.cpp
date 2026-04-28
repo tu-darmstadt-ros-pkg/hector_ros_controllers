@@ -188,8 +188,8 @@ MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
   target_.max_effort = params_.default_max_effort;
 
   // Reset action / topic state
-  rt_active_goal_.writeFromNonRT( RealtimeGoalHandlePtr() );
-  store_previous_rt_goal( nullptr );
+  store_goal_slot( rt_active_goal_, nullptr );
+  store_goal_slot( previous_rt_goal_, nullptr );
   rt_position_cmd_.writeFromNonRT( nullptr );
   rt_velocity_cmd_.writeFromNonRT( nullptr );
   input_seq_counter_.store( 0 );
@@ -205,11 +205,9 @@ MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
   is_grasped_dwell_counter_ = 0;
   last_is_grasped_publish_time_ = rclcpp::Time( 0, 0, RCL_ROS_TIME );
 
+  // pre_alloc_result_ position/effort are overwritten by check_for_success before each
+  // setSucceeded/setAborted call, so no need to seed reached_goal/stalled here.
   pre_alloc_result_ = std::make_shared<GripperCommandAction::Result>();
-  pre_alloc_result_->position = current_position;
-  pre_alloc_result_->effort = 0.0;
-  pre_alloc_result_->reached_goal = false;
-  pre_alloc_result_->stalled = false;
 
   // Action server
   action_server_ = rclcpp_action::create_server<GripperCommandAction>(
@@ -260,10 +258,15 @@ MaxEffortGripperActionController::on_deactivate( const rclcpp_lifecycle::State &
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-rclcpp_action::GoalResponse
-MaxEffortGripperActionController::goal_callback( const rclcpp_action::GoalUUID &,
-                                                 std::shared_ptr<const GripperCommandAction::Goal> )
+rclcpp_action::GoalResponse MaxEffortGripperActionController::goal_callback(
+    const rclcpp_action::GoalUUID &, std::shared_ptr<const GripperCommandAction::Goal> goal )
 {
+  if ( !std::isfinite( goal->command.position ) || !std::isfinite( goal->command.max_effort ) ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "Rejecting GripperCommand goal with non-finite position (%f) or max_effort (%f)",
+                 goal->command.position, goal->command.max_effort );
+    return rclcpp_action::GoalResponse::REJECT;
+  }
   RCLCPP_INFO( get_node()->get_logger(), "Received & accepted new GripperCommand goal" );
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
@@ -271,7 +274,7 @@ MaxEffortGripperActionController::goal_callback( const rclcpp_action::GoalUUID &
 rclcpp_action::CancelResponse
 MaxEffortGripperActionController::cancel_callback( std::shared_ptr<GoalHandle> goal_handle )
 {
-  const auto active_goal = *rt_active_goal_.readFromNonRT();
+  const auto active_goal = load_goal_slot( rt_active_goal_ );
   if ( active_goal && active_goal->gh_ == goal_handle ) {
     RCLCPP_INFO( get_node()->get_logger(), "Cancelling active GripperCommand goal" );
     set_hold_position();
@@ -292,21 +295,11 @@ MaxEffortGripperActionController::cancel_callback( std::shared_ptr<GoalHandle> g
 
 void MaxEffortGripperActionController::accepted_callback( std::shared_ptr<GoalHandle> goal_handle )
 {
+  // goal_callback already validated that position and max_effort are finite — no NaN
+  // branch needed here.
   preempt_active_goal( "superseded by new action goal" );
 
   const auto goal = goal_handle->get_goal();
-  if ( !std::isfinite( goal->command.position ) || !std::isfinite( goal->command.max_effort ) ) {
-    RCLCPP_WARN( get_node()->get_logger(),
-                 "Rejecting action goal with non-finite position (%f) or max_effort (%f)",
-                 goal->command.position, goal->command.max_effort );
-    auto rt_goal = std::make_shared<RealtimeGoalHandle>( goal_handle );
-    rt_goal->execute();
-    auto res = std::make_shared<GripperCommandAction::Result>();
-    rt_goal->setAborted( res );
-    rt_goal->runNonRealtime();
-    return;
-  }
-
   Command cmd;
   cmd.position = goal->command.position;
   cmd.max_effort =
@@ -322,15 +315,14 @@ void MaxEffortGripperActionController::accepted_callback( std::shared_ptr<GoalHa
   rt_action_command_.writeFromNonRT( cmd );
   action_cmd_seq_.store( input_seq_counter_.fetch_add( 1 ) + 1 );
 
-  pre_alloc_result_->reached_goal = false;
-  pre_alloc_result_->stalled = false;
-  // last_movement_time_ is written exclusively from the RT update thread (Winner::ACTION
-  // and check_for_success). The next update() cycle will set it when it consumes this
-  // command. Writing here from non-RT would be a data race on rclcpp::Time.
+  // pre_alloc_result_ flags are rewritten by check_for_success before each terminal call,
+  // and last_movement_time_ is written exclusively from the RT update thread. Touching
+  // either from this non-RT callback would be a data race AND could mutate a result that
+  // a previously-active goal's wrapper still holds.
 
   auto rt_goal = std::make_shared<RealtimeGoalHandle>( goal_handle );
   rt_goal->execute();
-  rt_active_goal_.writeFromNonRT( rt_goal );
+  store_goal_slot( rt_active_goal_, rt_goal );
 
   goal_handle_timer_.reset();
   goal_handle_timer_ =
@@ -340,19 +332,18 @@ void MaxEffortGripperActionController::accepted_callback( std::shared_ptr<GoalHa
 
 void MaxEffortGripperActionController::preempt_active_goal( const std::string &reason )
 {
-  // Note: callable from both non-RT (accepted_callback / on_deactivate) and RT (update()
-  // topic-driven preemption). We do NOT call runNonRealtime() here because that would block
-  // on the wrapper's mutex; safe in non-RT but unsafe in RT. The terminal flag is set; the
-  // existing wall_timer will flush it on its next tick (within action_monitor_period_), and
-  // accepted_callback / on_deactivate explicitly flush via flush_previous_goal_if_any().
-  const auto active_goal = *rt_active_goal_.readFromNonRT();
+  // Callable from both non-RT (accepted_callback / on_deactivate) and RT (update()
+  // topic-driven preemption). All goal-slot access goes through the lock-free atomic
+  // helpers, so this is RT-safe. We do NOT call runNonRealtime() here because that
+  // would take the wrapper's mutex; the existing wall_timer will flush the terminal
+  // flag on its next tick (within action_monitor_period_), and the non-RT
+  // accepted_callback / on_deactivate paths explicitly call flush_previous_goal_if_any().
+  const auto active_goal = load_goal_slot( rt_active_goal_ );
   if ( active_goal ) {
     RCLCPP_INFO( get_node()->get_logger(), "Preempting active GripperCommand goal: %s",
                  reason.c_str() );
     clear_pending_action_command();
     auto res = std::make_shared<GripperCommandAction::Result>();
-    res->reached_goal = false;
-    res->stalled = false;
     active_goal->setAborted( res );
     clear_active_goal();
   }
@@ -360,36 +351,42 @@ void MaxEffortGripperActionController::preempt_active_goal( const std::string &r
 
 void MaxEffortGripperActionController::clear_active_goal()
 {
-  // Move the active goal wrapper into previous_rt_goal_ so the wall_timer that's bound to
-  // it can keep flushing pending terminal flags. Do NOT reset goal_handle_timer_ here;
-  // doing so would tear down the timer before the deferred succeed/abort/canceled call had
-  // a chance to fire, dropping the notification to the action client. The timer is reset
-  // in accepted_callback (after a synchronous flush) or in on_deactivate.
-  // Use the atomic helper because clear_active_goal() may be called from RT
-  // (check_for_success) AND non-RT (cancel_callback / preempt_active_goal).
-  store_previous_rt_goal( *rt_active_goal_.readFromNonRT() );
-  rt_active_goal_.writeFromNonRT( RealtimeGoalHandlePtr() );
+  // Atomically move the active goal wrapper into previous_rt_goal_ so the wall_timer
+  // bound to it can keep flushing pending terminal flags. Do NOT reset goal_handle_timer_
+  // here; doing so would tear down the timer before the deferred succeed/abort/canceled
+  // call had a chance to fire, dropping the notification to the action client. The timer
+  // is reset in accepted_callback (after a synchronous flush) or in on_deactivate.
+  // Both slot accesses are lock-free, so this is RT-safe (called from check_for_success).
+  store_goal_slot( previous_rt_goal_, exchange_goal_slot( rt_active_goal_, nullptr ) );
 }
 
 void MaxEffortGripperActionController::flush_previous_goal_if_any()
 {
   // Atomically yank the slot so a concurrent clear_active_goal cannot stash a fresh
   // wrapper into it after we've decided to flush.
-  auto handle = exchange_previous_rt_goal( nullptr );
+  auto handle = exchange_goal_slot( previous_rt_goal_, nullptr );
   if ( handle ) {
     handle->runNonRealtime();
   }
 }
 
-void MaxEffortGripperActionController::store_previous_rt_goal( RealtimeGoalHandlePtr handle )
+void MaxEffortGripperActionController::store_goal_slot( RealtimeGoalHandlePtr &slot,
+                                                        RealtimeGoalHandlePtr handle )
 {
-  std::atomic_store( &previous_rt_goal_, std::move( handle ) );
+  std::atomic_store( &slot, std::move( handle ) );
 }
 
 MaxEffortGripperActionController::RealtimeGoalHandlePtr
-MaxEffortGripperActionController::exchange_previous_rt_goal( RealtimeGoalHandlePtr handle )
+MaxEffortGripperActionController::load_goal_slot( const RealtimeGoalHandlePtr &slot )
 {
-  return std::atomic_exchange( &previous_rt_goal_, std::move( handle ) );
+  return std::atomic_load( &slot );
+}
+
+MaxEffortGripperActionController::RealtimeGoalHandlePtr
+MaxEffortGripperActionController::exchange_goal_slot( RealtimeGoalHandlePtr &slot,
+                                                      RealtimeGoalHandlePtr handle )
+{
+  return std::atomic_exchange( &slot, std::move( handle ) );
 }
 
 void MaxEffortGripperActionController::clear_pending_action_command()
@@ -535,14 +532,14 @@ MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp
   // ----- Action goal monitoring -----
   // Read active_goal AFTER arbitration so a goal that was just preempted by a topic input
   // is not still treated as active here.
-  auto active_goal = *rt_active_goal_.readFromRT();
+  auto active_goal = load_goal_slot( rt_active_goal_ );
   if ( active_goal ) {
     const double error_position = target_.position - current_position;
     check_for_success( time, error_position, current_position, current_velocity, current_effort );
 
     // check_for_success may have transitioned the goal to a terminal state and cleared
     // rt_active_goal_; only publish feedback if the goal is still active.
-    active_goal = *rt_active_goal_.readFromRT();
+    active_goal = load_goal_slot( rt_active_goal_ );
     if ( active_goal ) {
       auto feedback = std::make_shared<GripperCommandAction::Feedback>();
       feedback->position = current_position;
@@ -612,7 +609,7 @@ void MaxEffortGripperActionController::check_for_success( const rclcpp::Time &ti
                                                           double current_velocity,
                                                           double current_effort )
 {
-  const auto active_goal = *rt_active_goal_.readFromRT();
+  const auto active_goal = load_goal_slot( rt_active_goal_ );
   if ( !active_goal )
     return;
 

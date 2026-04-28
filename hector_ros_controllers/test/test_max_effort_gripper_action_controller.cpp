@@ -642,7 +642,7 @@ protected:
   // would normally trigger). Required to actually fire mock methods like succeed().
   void runActiveGoalNonRealtime()
   {
-    auto active = *controller_->rt_active_goal_.readFromRT();
+    auto active = std::atomic_load( &controller_->rt_active_goal_ );
     if ( active )
       active->runNonRealtime();
   }
@@ -686,7 +686,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, CancelDeliversCanceledToClient )
   } );
 
   cancelGoal( gh );
-  EXPECT_FALSE( *controller_->rt_active_goal_.readFromRT() )
+  EXPECT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) )
       << "Active goal must be cleared after cancel";
 }
 
@@ -707,13 +707,14 @@ TEST_F( MaxEffortGripperActionLifecycleTest, ReachedGoalDeliversSucceedToClient 
   setVelocity( 0.0 );
   callUpdate( 0.0 );
 
-  EXPECT_FALSE( *controller_->rt_active_goal_.readFromRT() ) << "Active goal must be cleared";
-  ASSERT_TRUE( controller_->previous_rt_goal_ )
-      << "Previous goal handle must be retained for the timer to flush";
+  EXPECT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) )
+      << "Active goal must be cleared";
+  auto prev = std::atomic_load( &controller_->previous_rt_goal_ );
+  ASSERT_TRUE( prev ) << "Previous goal handle must be retained for the timer to flush";
 
   // Simulate the wall_timer's next tick. In production this happens within
   // action_monitor_period_; here we drive it explicitly so the test is deterministic.
-  controller_->previous_rt_goal_->runNonRealtime();
+  prev->runNonRealtime();
   // gh.succeed should have fired (verified by the EXPECT_CALL above).
 }
 
@@ -730,10 +731,11 @@ TEST_F( MaxEffortGripperActionLifecycleTest, TopicPreemptionDeliversAbortToClien
   injectPositionCommand( 0.3 );
   callUpdate( 0.0 );
 
-  EXPECT_FALSE( *controller_->rt_active_goal_.readFromRT() );
-  ASSERT_TRUE( controller_->previous_rt_goal_ );
+  EXPECT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) );
+  auto prev = std::atomic_load( &controller_->previous_rt_goal_ );
+  ASSERT_TRUE( prev );
 
-  controller_->previous_rt_goal_->runNonRealtime();
+  prev->runNonRealtime();
   // gh.abort should have fired exactly once (verified by the EXPECT_CALL above).
 }
 
@@ -754,8 +756,9 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NoFeedbackAfterReachedGoal )
   setVelocity( 0.0 );
   callUpdate( 0.0 );
 
-  ASSERT_TRUE( controller_->previous_rt_goal_ );
-  controller_->previous_rt_goal_->runNonRealtime();
+  auto prev = std::atomic_load( &controller_->previous_rt_goal_ );
+  ASSERT_TRUE( prev );
+  prev->runNonRealtime();
 }
 
 // Review-high regression: when an action goal accepts after a previous goal has been
@@ -774,14 +777,15 @@ TEST_F( MaxEffortGripperActionLifecycleTest, AcceptingNewGoalFlushesPreviousTerm
   // Topic preempts the first goal in RT — terminal flag set, flush deferred to timer.
   injectPositionCommand( 0.3 );
   callUpdate( 0.0 );
-  ASSERT_TRUE( controller_->previous_rt_goal_ ) << "Previous goal must be retained";
+  ASSERT_TRUE( std::atomic_load( &controller_->previous_rt_goal_ ) )
+      << "Previous goal must be retained";
 
   // Before the wall_timer fires, a new action goal arrives. The new accepted_callback
   // MUST synchronously flush the previous goal so its abort reaches the client even
   // though the next line replaces the timer.
   auto second_gh = acceptGoal( 0.6, 2.0 );
 
-  EXPECT_FALSE( controller_->previous_rt_goal_ )
+  EXPECT_FALSE( std::atomic_load( &controller_->previous_rt_goal_ ) )
       << "previous_rt_goal_ must be cleared after flush_previous_goal_if_any";
   // first_gh.abort should have been called by the synchronous flush — verified by the
   // EXPECT_CALL above.
@@ -864,8 +868,8 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NaNPositionTopicDoesNotPreemptActiv
   callUpdate( 0.0 );
   EXPECT_NEAR( cmdPos(), 0.5, 1e-9 );
   EXPECT_NEAR( cmdEffort(), 2.0, 1e-9 );
-  EXPECT_TRUE( *controller_->rt_active_goal_.readFromRT() ) << "Goal must still be active";
-  EXPECT_FALSE( controller_->previous_rt_goal_ )
+  EXPECT_TRUE( std::atomic_load( &controller_->rt_active_goal_ ) ) << "Goal must still be active";
+  EXPECT_FALSE( std::atomic_load( &controller_->previous_rt_goal_ ) )
       << "Goal must not have been moved to previous (= preempted) state";
 
   // NaN topic arrives — must be dropped, must NOT preempt the goal
@@ -874,9 +878,9 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NaNPositionTopicDoesNotPreemptActiv
 
   EXPECT_NEAR( cmdPos(), 0.5, 1e-9 ) << "NaN topic must not change the position command";
   EXPECT_NEAR( cmdEffort(), 2.0, 1e-9 ) << "NaN topic must not change the effort command";
-  EXPECT_TRUE( *controller_->rt_active_goal_.readFromRT() )
+  EXPECT_TRUE( std::atomic_load( &controller_->rt_active_goal_ ) )
       << "NaN topic must not preempt the active action goal";
-  EXPECT_FALSE( controller_->previous_rt_goal_ )
+  EXPECT_FALSE( std::atomic_load( &controller_->previous_rt_goal_ ) )
       << "NaN topic must not transition the goal to previous (= preempted) state";
 }
 
@@ -887,40 +891,42 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NaNVelocityTopicDoesNotPreemptActiv
   auto gh = acceptGoal( 0.5, 2.0 );
 
   callUpdate( 0.0 );
-  EXPECT_TRUE( *controller_->rt_active_goal_.readFromRT() );
-  EXPECT_FALSE( controller_->previous_rt_goal_ );
+  EXPECT_TRUE( std::atomic_load( &controller_->rt_active_goal_ ) );
+  EXPECT_FALSE( std::atomic_load( &controller_->previous_rt_goal_ ) );
 
   injectVelocityCommand( std::numeric_limits<double>::infinity() );
   callUpdate( 0.01 );
 
   EXPECT_NEAR( cmdPos(), 0.5, 1e-9 );
-  EXPECT_TRUE( *controller_->rt_active_goal_.readFromRT() )
+  EXPECT_TRUE( std::atomic_load( &controller_->rt_active_goal_ ) )
       << "Inf velocity must not preempt the active action goal";
-  EXPECT_FALSE( controller_->previous_rt_goal_ );
+  EXPECT_FALSE( std::atomic_load( &controller_->previous_rt_goal_ ) );
 }
 
-// Bug 4 regression: a goal with NaN position must be rejected at accept time, not
-// propagated to the hardware.
-TEST_F( MaxEffortGripperActionLifecycleTest, NaNGoalIsRejectedAtAccept )
+// Bug 4 regression: goal_callback must REJECT non-finite goals up front so the action
+// client gets a clean rejection rather than an immediate abort, and so accepted_callback
+// is never invoked with invalid input.
+TEST_F( MaxEffortGripperActionLifecycleTest, NaNGoalIsRejectedAtGoalCallback )
 {
   initAndActivateWithActionServer();
 
-  setPosition( 0.2 );
-  callUpdate( 0.0 );
-  const double pos_before = cmdPos();
+  auto nan_goal = std::make_shared<ActionT::Goal>();
+  nan_goal->command.position = std::numeric_limits<double>::quiet_NaN();
+  nan_goal->command.max_effort = 1.0;
+  EXPECT_EQ( server_mock_->goal_callback( rclcpp_action::GoalUUID{}, nan_goal ),
+             rclcpp_action::GoalResponse::REJECT );
 
-  auto goal = std::make_shared<ActionT::Goal>();
-  goal->command.position = std::numeric_limits<double>::quiet_NaN();
-  goal->command.max_effort = 1.0;
+  auto inf_effort_goal = std::make_shared<ActionT::Goal>();
+  inf_effort_goal->command.position = 0.5;
+  inf_effort_goal->command.max_effort = std::numeric_limits<double>::infinity();
+  EXPECT_EQ( server_mock_->goal_callback( rclcpp_action::GoalUUID{}, inf_effort_goal ),
+             rclcpp_action::GoalResponse::REJECT );
 
-  auto gh = std::make_shared<testing::NiceMock<GoalHandleMock>>( goal );
-  // The rejected goal must transition to abort in the realtime wrapper. We don't strictly
-  // verify the abort here; we just verify that no command was queued for update().
-  server_mock_->accepted_callback( gh );
-
-  callUpdate( 0.01 );
-  EXPECT_NEAR( cmdPos(), pos_before, 1e-9 )
-      << "NaN goal position should not propagate to the hardware";
+  auto valid_goal = std::make_shared<ActionT::Goal>();
+  valid_goal->command.position = 0.5;
+  valid_goal->command.max_effort = 1.0;
+  EXPECT_EQ( server_mock_->goal_callback( rclcpp_action::GoalUUID{}, valid_goal ),
+             rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE );
 }
 
 // Review-high regression for the accepted_callback flush ordering. Goal A succeeds in RT
@@ -941,7 +947,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, AcceptingTwoGoalsRapidlyDeliversBot
   setVelocity( 0.0 );
   callUpdate( 0.0 );
   // A's terminal flag is now set on the wrapper but flush is deferred to the wall timer.
-  EXPECT_FALSE( *controller_->rt_active_goal_.readFromRT() );
+  EXPECT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) );
   ASSERT_TRUE( std::atomic_load( &controller_->previous_rt_goal_ ) )
       << "Goal A must be parked in previous_rt_goal_ awaiting flush";
 

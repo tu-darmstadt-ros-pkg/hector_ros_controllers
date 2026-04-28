@@ -1,5 +1,5 @@
 max_effort_gripper_action_controller:
-  joint: {type: string, default_value: '', description: Joint to control. Must expose 'position' and 'effort' command interfaces and 'position' and 'velocity' state interfaces.}
+  joint: {type: string, default_value: '', description: "Joint to control. Must expose 'position' and 'effort' command interfaces and 'position', 'velocity', and 'effort' state interfaces."}
   action_monitor_rate: {type: double, default_value: 20.0, description: Rate (Hz) at which the action goal status is monitored and the is_grasped topic is published., validation: {gt_eq: [0.1]}}
   goal_tolerance: {type: double, default_value: 0.01, description: Position error below which an action goal is considered reached., validation: {gt_eq: [0.0]}}
   default_max_effort: {type: double, default_value: 0.0, description: Effort written to the joint's effort command interface for topic-driven goals and for action goals where max_effort == 0. Used by Dynamixel actuators as a current/torque limit in current-based position mode., validation: {gt_eq: [0.0]}}
