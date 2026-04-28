@@ -41,7 +41,7 @@ A **safety layer for joint position commands**, usable both
         * `distance_lines_collision` — nearest-point lines for colliding pairs (bright red, thicker).
 * **Status topic** (`~/status`):
 
-    * Publishes `SafetyPositionControllerStatus` (latched) with diagnostic fields: `min_collision_distance`, `distance_scale`, `effective_scale`, `worst_directional_derivative`, `num_pairs_in_safety_zone`, plus safety bypass, E-stop, and mode flags.
+    * Publishes `SafetyPositionControllerStatus` (latched) at `status_publish_rate` Hz (and on events) with diagnostic fields: `min_collision_distance`, `distance_scale`, `effective_scale`, `worst_directional_derivative` (NaN when not evaluated), `num_pairs_in_safety_zone`, `manipulability`, plus safety bypass, E-stop, and mode flags. When `set_current_limits` is true, the message also carries the active per-joint current limits.
 * **E-Stop**:
 
     * Subscribes to `~/safety_estop` (`std_msgs/Bool`).
@@ -83,6 +83,8 @@ A **safety layer for joint position commands**, usable both
 | `publish_debug_joint_states`       | `bool`     | `false` | If `true`, publishes debug `JointState` messages for incoming references and outgoing commands.                     |
 | `safety_bypass_timeout`            | `double`   | `60.0`  | Time in seconds after which safety bypass auto-disables. Bounds: [0.1, 600.0].                                     |
 | `safety_bypass_joint_limit_tolerance` | `double` | `0.03`  | Tolerance factor added to joint limits during bypass. E.g., 0.03 = 3% of the total joint range added to both sides. Bounds: [0.0, 1.0]. |
+| `manipulability_ee_frame`          | `string`   | `arm_end_link` | URDF frame used for the Yoshikawa manipulability index `w = sqrt(det(J·Jᵀ))` published in `~/status`. Empty string disables the computation. |
+| `status_publish_rate`              | `double`   | `10.0`  | Rate [Hz] at which `~/status` is published periodically (in addition to event-driven publishes). `0` disables the periodic timer. Bounds: [0.0, 100.0]. |
 
 > **Note:** Parameters are read/updated at `on_activate()`. To apply runtime changes reliably, deactivate and reactivate the controller.
 
