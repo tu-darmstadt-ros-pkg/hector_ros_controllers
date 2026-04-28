@@ -283,6 +283,37 @@ TEST_F( MaxEffortGripperControllerTest, ActionGoalClampedToJointLimits )
   EXPECT_NEAR( cmdPos(), 1.0, 1e-9 );
 }
 
+// max_effort_limit is a hard ceiling on the effort value written to hardware. Verify that
+// (a) effort under the limit passes through unchanged, (b) effort over the limit is
+// clamped, and (c) limit=0 disables the cap.
+TEST_F( MaxEffortGripperControllerTest, EffortClampedToMaxEffortLimit )
+{
+  initController( { rclcpp::Parameter( "max_effort_limit", 1.5 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  injectActionCommand( 0.5, 1.0 );
+  callUpdate( 0.0 );
+  EXPECT_NEAR( cmdEffort(), 1.0, 1e-9 ) << "Effort below the limit must pass through";
+
+  injectActionCommand( 0.5, 5.0 );
+  callUpdate( 0.01 );
+  EXPECT_NEAR( cmdEffort(), 1.5, 1e-9 ) << "Effort above the limit must be clamped";
+}
+
+TEST_F( MaxEffortGripperControllerTest, MaxEffortLimitZeroDisablesCap )
+{
+  initController( { rclcpp::Parameter( "max_effort_limit", 0.0 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  injectActionCommand( 0.5, 99.0 );
+  callUpdate( 0.0 );
+  EXPECT_NEAR( cmdEffort(), 99.0, 1e-9 ) << "limit=0 must disable clamping";
+}
+
 // ============================================================================
 // Topic interfaces
 // ============================================================================

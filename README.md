@@ -281,6 +281,7 @@ make sure the joint's `command_interfaces` include both `position` and `current`
 | **action_monitor_rate**         | `double` | `20.0`  | Rate (Hz) at which action goal status is monitored and `is_grasped` is published.                                            |
 | **goal_tolerance**              | `double` | `0.01`  | Position error below which an action goal is considered reached.                                                             |
 | **default_max_effort**          | `double` | `0.0`   | Effort written to the joint's effort command interface for topic goals and for action goals with `max_effort == 0`.          |
+| **max_effort_limit**            | `double` | `0.0`   | Hard upper bound applied to the effort value written to hardware. `0` disables the limit. |
 | **allow_stalling**              | `bool`   | `false` | If `true`, a stalled action goal returns `SUCCEEDED` with `stalled=true`. If `false`, it is `ABORTED`.                       |
 | **stall_velocity_threshold**    | `double` | `0.001` | Velocity below which the joint is considered potentially stalled (action mode).                                              |
 | **stall_timeout**               | `double` | `1.0`   | Time (s) below `stall_velocity_threshold` without reaching the goal before stall is declared.                                |

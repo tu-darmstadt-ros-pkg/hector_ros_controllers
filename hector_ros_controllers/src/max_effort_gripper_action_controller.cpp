@@ -72,9 +72,17 @@ MaxEffortGripperActionController::on_configure( const rclcpp_lifecycle::State & 
 
   parse_joint_limits_from_urdf();
 
+  if ( params_.max_effort_limit > 0.0 && params_.default_max_effort > params_.max_effort_limit ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "default_max_effort (%.3f) exceeds max_effort_limit (%.3f); will be clamped",
+                 params_.default_max_effort, params_.max_effort_limit );
+  }
+
   RCLCPP_INFO( get_node()->get_logger(),
-               "Configured for joint '%s', default_max_effort=%.3f, action_monitor_rate=%.1f Hz",
-               params_.joint.c_str(), params_.default_max_effort, params_.action_monitor_rate );
+               "Configured for joint '%s', default_max_effort=%.3f, max_effort_limit=%.3f, "
+               "action_monitor_rate=%.1f Hz",
+               params_.joint.c_str(), params_.default_max_effort, params_.max_effort_limit,
+               params_.action_monitor_rate );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -525,8 +533,16 @@ MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp
                           "Refusing to write non-finite command (pos=%f, eff=%f)", target_.position,
                           target_.max_effort );
   } else {
+    // Clamp the effort to max_effort_limit (0 = no limit)
+    double effort_to_write = std::fabs( target_.max_effort );
+    if ( params_.max_effort_limit > 0.0 && effort_to_write > params_.max_effort_limit ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                            "Clamping commanded max_effort %.3f to max_effort_limit %.3f",
+                            effort_to_write, params_.max_effort_limit );
+      effort_to_write = params_.max_effort_limit;
+    }
     std::ignore = position_command_interface_->get().set_value( target_.position );
-    std::ignore = effort_command_interface_->get().set_value( std::fabs( target_.max_effort ) );
+    std::ignore = effort_command_interface_->get().set_value( effort_to_write );
   }
 
   // ----- Action goal monitoring -----
