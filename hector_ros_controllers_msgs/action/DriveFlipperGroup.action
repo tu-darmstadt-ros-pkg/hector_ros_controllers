@@ -1,0 +1,16 @@
+# Drive all joints in a synchronous group to a target position using a trapezoidal velocity profile.
+# Cancels immediately if a velocity command arrives for any joint in the group.
+
+# Goal
+string group_name
+float64 target_position     # target in radians (0 = use upright_position parameter)
+float64 max_velocity        # max velocity in rad/s (0 = use max_velocity parameter)
+float64 max_acceleration    # max acceleration in rad/s^2 (0 = use max_acceleration parameter)
+---
+# Result
+bool success
+string message
+---
+# Feedback
+float64 progress            # 0.0 to 1.0
+float64[] current_positions

@@ -47,8 +47,8 @@ set(DEFS PINOCCHIO_WITH_HPP_FCL PINOCCHIO_URDFDOM_TYPEDEF_SHARED_PTR
 # Add parameter_libraries here
 
 generate_parameter_library(
-  velocity_to_position_command_controller_parameters
-  params/velocity_to_position_command_controller_parameters.yaml)
+  sync_group_velocity_to_position_controller_parameters
+  params/sync_group_velocity_to_position_controller_parameters.yaml)
 
 generate_parameter_library(
   self_collision_avoidance_controller_parameters
@@ -68,7 +68,8 @@ generate_parameter_library(
 add_library(
   controllers SHARED
   src/safety_forward_controller.cpp
-  src/velocity_to_position_command_controller.cpp
+  src/sync_group_velocity_to_position_controller.cpp
+  src/sync_group_velocity_to_position_controller_actions.cpp
   src/self_collision_avoidance_controller.cpp
   src/safety_position_controller.cpp
   src/max_effort_gripper_action_controller.cpp
@@ -85,7 +86,7 @@ target_link_libraries(
   PUBLIC fcl
          hpp-fcl::hpp-fcl
          pinocchio::pinocchio
-         velocity_to_position_command_controller_parameters
+         sync_group_velocity_to_position_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
          safety_position_controller_parameters
@@ -102,7 +103,7 @@ pluginlib_export_plugin_description_file(controller_interface
 install(DIRECTORY include/ DESTINATION include/)
 install(
   TARGETS controllers
-          velocity_to_position_command_controller_parameters
+          sync_group_velocity_to_position_controller_parameters
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters
           safety_position_controller_parameters
@@ -146,11 +147,20 @@ if(BUILD_TESTING)
     hpp-fcl::hpp-fcl
     pinocchio::pinocchio
     ad_kinematics::ad_kinematics
-    velocity_to_position_command_controller_parameters
+    sync_group_velocity_to_position_controller_parameters
     self_collision_avoidance_controller_parameters
     safety_forward_controller_parameters
     safety_position_controller_parameters
     max_effort_gripper_action_controller_parameters)
+
+  ament_add_gmock(test_collision_checker test/test_collision_checker.cpp)
+  target_include_directories(
+    test_collision_checker PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                   ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_collision_checker ${PROJECT_NAME}::controllers_test_doubles
+    ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_collision_checker PRIVATE ${DEFS})
 
   ament_add_gmock(test_safety_forward_controller
                   test/test_safety_forward_controller.cpp)
@@ -172,15 +182,30 @@ if(BUILD_TESTING)
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_safety_position_controller PRIVATE ${DEFS})
 
+  find_package(ament_cmake_google_benchmark REQUIRED)
+  ament_add_google_benchmark(benchmark_collision_checker
+                             test/benchmark_collision_checker.cpp)
+  if(TARGET benchmark_collision_checker)
+    target_include_directories(
+      benchmark_collision_checker PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                          ${PROJECT_SOURCE_DIR}/test)
+    target_link_libraries(
+      benchmark_collision_checker ${PROJECT_NAME}::controllers_test_doubles
+      ament_index_cpp::ament_index_cpp)
+    target_compile_definitions(benchmark_collision_checker PRIVATE ${DEFS})
+  endif()
+
   ament_add_gmock(test_velocity_to_position_command_controller
                   test/test_velocity_to_position_command_controller.cpp)
+  ament_add_gmock(test_sync_group_velocity_to_position_controller
+                  test/test_sync_group_velocity_to_position_controller.cpp)
   target_include_directories(
-    test_velocity_to_position_command_controller
+    test_sync_group_velocity_to_position_controller
     PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/test)
   target_link_libraries(
-    test_velocity_to_position_command_controller
+    test_sync_group_velocity_to_position_controller
     ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
-  target_compile_definitions(test_velocity_to_position_command_controller
+  target_compile_definitions(test_sync_group_velocity_to_position_controller
                              PRIVATE ${DEFS})
 
   ament_add_gmock(test_max_effort_gripper_action_controller
@@ -193,6 +218,17 @@ if(BUILD_TESTING)
     ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_max_effort_gripper_action_controller
                              PRIVATE ${DEFS})
+  ament_add_gmock(
+    test_sync_group_velocity_to_position_controller_actions
+    test/test_sync_group_velocity_to_position_controller_actions.cpp)
+  target_include_directories(
+    test_sync_group_velocity_to_position_controller_actions
+    PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_sync_group_velocity_to_position_controller_actions
+    ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(
+    test_sync_group_velocity_to_position_controller_actions PRIVATE ${DEFS})
 endif()
 
 ament_package()

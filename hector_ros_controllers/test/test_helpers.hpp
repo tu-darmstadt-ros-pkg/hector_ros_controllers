@@ -7,13 +7,18 @@
 #include <rtest/service_mock.hpp>
 #include <rtest/subscription_mock.hpp>
 
-// Access private/protected members for testing
+// Expose private/protected members for testing. This is technically undefined
+// behavior per [macro.names], but is necessary here because tests must access
+// protected members of the ros2_control base classes (command_interfaces_,
+// state_interfaces_, reference_interfaces_) which cannot have friend
+// declarations added to third-party headers. In practice this is safe on
+// GCC/Clang as they do not reorder members across access specifiers.
 #define private public
 #define protected public
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <safety_forward_controller/safety_forward_controller.hpp>
 #include <safety_position_controller/safety_position_controller.hpp>
-#include <velocity_to_position_command_controller/velocity_to_position_command_controller.hpp>
+#include <sync_group_velocity_to_position_controller/sync_group_velocity_to_position_controller.hpp>
 #undef protected
 #undef private
 

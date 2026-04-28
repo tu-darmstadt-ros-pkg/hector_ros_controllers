@@ -19,31 +19,70 @@ safety_position_controller:
     type: bool
     default_value: true
     description: If true, the controller checks for potential self-collisions at the target pose before applying position commands.
+    read_only: true
 
   collision_padding:
     type: double
-    default_value: 0.0
+    default_value: 0.01
     description: Minimum allowed distance in [m] between any two links to consider the robot safe from self-collisions when 'check_self_collisions' is true.
+    validation:
+      bounds<>: [0.0, 1.0]
 
   collision_cache_epsilon:
     type: double
     default_value: 0.000001
     description: Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true.
 
-  block_if_too_far:
+  use_broadphase:
     type: bool
     default_value: true
-    description: If true, the controller blocks position commands that are too far from the current position. Automatically true when 'check_self_collisions' is true.
+    description: >
+      If true, uses AABB-tree broadphase acceleration for self-collision distance queries.
+      This prunes far-apart geometry pairs before running narrow-phase GJK, typically
+      yielding a 3-5x speedup. Only relevant when 'check_self_collisions' is true.
+    read_only: true
 
   block_velocity_scaling:
     type: double
     default_value: 1.5
-    description: Scaling factor block_if_too_far. it is blocked when (target_position - current_position) > block_velocity_scaling * dt * velocity limit.
+    description: >
+      Scaling factor for velocity-limited stepping. The maximum per-cycle step is
+      velocity_limit / update_rate * block_velocity_scaling. Only active when
+      'check_self_collisions' is true.
+    validation:
+      bounds<>: [0.01, 15.0]
+
+  collision_safety_zone:
+    type: double
+    default_value: 0.05
+    description: >
+      Outer safety zone distance in [m]. When the minimum collision distance falls between
+      'collision_padding' and 'collision_safety_zone', joint velocities are linearly scaled
+      down to zero. Must be strictly greater than 'collision_padding'.
+
+  directional_collision_scaling:
+    type: bool
+    default_value: true
+    description: >
+      If true, velocity scaling near collisions is direction-aware: only motions
+      that decrease any collision distance in the safety zone are slowed down.
+      Motions moving away from all collisions proceed at full speed.
+      Requires 'check_self_collisions' to be true.
 
   debug_visualize_collisions:
     type: bool
     default_value: false
     description: If true, the controller publishes visualization markers for potential self-collisions to help with debugging.
+
+  publish_collision_distances:
+    type: bool
+    default_value: false
+    description: >
+      If true, publishes lightweight visualization markers showing only the distance
+      lines for collision pairs within the safety zone. Much cheaper than
+      'debug_visualize_collisions' as it skips geometry markers and safe-pair lines.
+      Uses a realtime publisher for non-blocking operation. Ignored if
+      'debug_visualize_collisions' is true.
 
   publish_debug_joint_states:
     type: bool
@@ -67,12 +106,32 @@ safety_position_controller:
         default_value: 5.0
         description: Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off.
 
+  manipulability_ee_frame:
+    type: string
+    default_value: arm_end_link
+    description: >
+      Name of the URDF frame used for manipulability index computation
+      (Yoshikawa w = sqrt(det(J*J^T))). Set to empty string to disable.
+
+  status_publish_rate:
+    type: double
+    default_value: 10.0
+    description: >
+      Rate in Hz at which the safety controller status (including collision distance
+      and manipulability) is published. Set to 0 to only publish on events.
+    validation:
+      bounds<>: [0.0, 100.0]
+
   safety_bypass_timeout:
     type: double
     default_value: 60.0
     description: Time in seconds after which safety checks are automatically re-enabled when bypassed via service. Must be positive.
+    validation:
+      bounds<>: [0.1, 600.0]
 
   safety_bypass_joint_limit_tolerance:
     type: double
     default_value: 0.03
     description: Tolerance factor (0.0-1.0) added to joint limits when safety bypass is active. E.g., 0.03 means 3% tolerance beyond normal limits.
+    validation:
+      bounds<>: [0.0, 1.0]

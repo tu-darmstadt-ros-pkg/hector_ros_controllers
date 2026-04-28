@@ -1,6 +1,6 @@
 # Controller configuration for dynamics_mock_hardware simulation.
 # Simplified chain: no safety_position_controllers (need SRDF/MoveIt).
-# Flipper chain: flipper_velocity_controller -> vel_to_pos_controller -> hardware
+# Flipper chain: flipper_velocity_controller -> flipper_velocity_to_position_controller -> hardware
 # Arm chain: arm_trajectory_controller -> hardware
 /**:
   controller_manager:
@@ -17,8 +17,8 @@
       flipper_trajectory_controller:
         type: joint_trajectory_controller/JointTrajectoryController
 
-      vel_to_pos_controller:
-        type: velocity_to_position_command_controller/VelocityToPositionCommandController
+      flipper_velocity_to_position_controller:
+        type: sync_group_velocity_to_position_controller/SyncGroupVelocityToPositionController
 
       # --------- Arm Controllers ------------
       arm_trajectory_controller:
@@ -37,12 +37,12 @@
       - flipper_bl_joint
       - flipper_br_joint
 
-      passthrough_controller: vel_to_pos_controller
+      passthrough_controller: flipper_velocity_to_position_controller
       interface_type: velocity
       safety_timer_duration: 10000 # effectively disabled for simulation
 
   # ---------- Velocity to position controller ----------
-  vel_to_pos_controller:
+  flipper_velocity_to_position_controller:
     ros__parameters:
       joints:
       - flipper_fl_joint

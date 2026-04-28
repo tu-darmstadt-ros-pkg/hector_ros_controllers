@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <library path="libcontrollers">
-  <class name="velocity_to_position_command_controller/VelocityToPositionCommandController" type="velocity_to_position_command_controller::VelocityToPositionCommandController" base_class_type="controller_interface::ChainableControllerInterface">
+  <class name="sync_group_velocity_to_position_controller/SyncGroupVelocityToPositionController" type="sync_group_velocity_to_position_controller::SyncGroupVelocityToPositionController" base_class_type="controller_interface::ChainableControllerInterface">
     <description>
-            The velocity to position command controller provides a velocity input and converts it to position commands.
+            Converts per-joint velocity references into position commands, with trapezoidal braking,
+            optional pairwise group synchronization, and per-group action interfaces for drive-to-target
+            and sync-to-position motions.
         </description>
   </class>
   <class name="self_collision_avoidance_controller/SelfCollisionAvoidanceController" type="self_collision_avoidance_controller::SelfCollisionAvoidanceController" base_class_type="controller_interface::ChainableControllerInterface">

@@ -1,5 +1,5 @@
-#ifndef VELOCITY_TO_POSITION_COMMAND_CONTROLLER__SYNC_PAIR_MANAGER_HPP_
-#define VELOCITY_TO_POSITION_COMMAND_CONTROLLER__SYNC_PAIR_MANAGER_HPP_
+#ifndef SYNC_GROUP_VELOCITY_TO_POSITION_CONTROLLER__SYNC_PAIR_MANAGER_HPP_
+#define SYNC_GROUP_VELOCITY_TO_POSITION_CONTROLLER__SYNC_PAIR_MANAGER_HPP_
 
 #include <cmath>
 #include <limits>
@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace velocity_to_position_command_controller
+namespace sync_group_velocity_to_position_controller
 {
 
 /**
@@ -111,6 +111,6 @@ private:
   std::vector<double> pair_offsets_;
 };
 
-} // namespace velocity_to_position_command_controller
+} // namespace sync_group_velocity_to_position_controller
 
-#endif // VELOCITY_TO_POSITION_COMMAND_CONTROLLER__SYNC_PAIR_MANAGER_HPP_
+#endif // SYNC_GROUP_VELOCITY_TO_POSITION_CONTROLLER__SYNC_PAIR_MANAGER_HPP_
