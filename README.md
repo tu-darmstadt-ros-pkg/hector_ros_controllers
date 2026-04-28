@@ -167,34 +167,54 @@ The **safety timer is disabled in chained mode** and is only active when the con
 
 Converts **velocity references** into **position commands** for joint hardware. Useful when an upstream controller outputs velocity commands but the hardware only accepts position commands.
 
+> **Important:** This controller does **not** perform self-collision checking. It should be chained downstream of the **Safety Position Controller** (see section 4) to ensure collision avoidance and joint limit enforcement. A typical chain is:
+> `upstream velocity source → flipper_velocity_to_position_controller → safety_position_controller → hardware`
+
 ### Features
 
 * **Feedforward integration with PD velocity tracking:**
     * Integrates velocity commands into a desired position trajectory.
     * A proportional term corrects for velocity tracking error (commanded vs actual).
     * A derivative term damps acceleration to prevent overshoot and oscillation.
+* **Velocity clamping:**
+    * All incoming velocity references are clamped to `[-max_velocity, max_velocity]`.
 * **Desired position tracking:**
     * Maintains an internal `desired_positions` trajectory, providing implicit position error correction.
     * On state transitions (STOPPED/STOPPING → MOVING), the desired position re-syncs to the actual joint position to prevent jumps.
 * **State machine** (per joint):
     * **MOVING** – actively integrating velocity commands.
-    * **STOPPING** – velocity command is zero; joint decelerates at `braking_deceleration` rad/s² until stopped.
+    * **STOPPING** – velocity command is zero; joint follows a trapezoidal deceleration profile at `max_deceleration` until stopped.
     * **STOPPED** – joint velocity has reached zero; holds the last desired position.
-* **Braking deceleration:**
-    * Configurable deceleration ramp (`braking_deceleration`) for smooth stopping.
+* **Trapezoidal braking profiles:**
+    * When velocity commands go to zero, each joint computes a smooth deceleration-only profile using `max_deceleration`.
+    * Per-joint braking always runs, even for joints in a sync pair — each joint independently stops at `current_pos + braking_distance`. Coordinated braking that intentionally preserves a sync offset is available explicitly via `~/sync_flipper_group`.
 * **Joint synchronization:**
-    * Joints in the same synchronization group are kept aligned via P-control on position offsets.
-    * Braking is independent per joint — each decelerates at `braking_deceleration` regardless of sync group membership.
+    * Joints in the same synchronization group are kept aligned via P-control on position offsets while moving.
+    * Braking is independent per joint; the offset between sync partners may drift during a stop and is then re-aligned by `~/sync_flipper_group` if needed.
+* **Velocity command timeout:**
+    * If no new non-zero velocity command arrives within `velocity_command_timeout` seconds, all velocity references are zeroed. Disabled when set to 0.
+    * Works in both chained and standalone modes.
+* **Drive flipper group action** (`~/drive_flipper_group`):
+    * Drives all joints in a synchronous group to a target position using trapezoidal velocity profiles.
+    * Configurable target position, max velocity, and max acceleration per goal (defaults to `upright_position`, `max_velocity`, `max_acceleration` parameters).
+    * **Immediately cancelled** when a non-zero velocity command arrives for any joint in the group.
+    * Goals targeting a group that is already running another goal are **rejected** at goal acceptance — clients must cancel the in-flight goal first.
+* **Sync flipper group action** (`~/sync_flipper_group`):
+    * Drives each joint in the requested groups to the average position of its group.
+    * Supports syncing **multiple groups simultaneously** in a single action call. Empty `group_names` = sync all groups.
+    * Uses per-joint trapezoidal profiles (each joint may travel a different distance).
+    * **Immediately cancelled** when a non-zero velocity command arrives for any joint in a synced group.
+    * Goals are **rejected** if any target group is already executing another goal. If acceptance succeeds but a later group fails to start (e.g. invalid joint state), already-started groups are rolled back so the failed goal result accurately reflects no in-flight motion.
 * **URDF position limit clamping:**
     * Position commands are clamped to URDF joint limits for revolute/prismatic joints. Continuous joints are unclamped.
 * **E-Stop support:**
-    * Subscribes to an E-Stop topic; freezes all joints at their current positions when engaged.
+    * Subscribes to an E-Stop topic and tracks the latest state. The freeze-on-engage logic in the update loop is currently disabled (TODO); the subscription remains so downstream consumers can read the state.
 * **Chainable controller:**
     * Can receive velocity references from an upstream controller or from a `~/commands` topic.
 * **Debug joint state publishers:**
     * Optionally publishes incoming velocity references and outgoing position commands as `sensor_msgs/JointState` (dynamically togglable).
 * **Dynamic parameter reconfiguration:**
-    * `kp`, `kd`, `kp_sync`, and `braking_deceleration` can be changed at runtime via ROS parameter callbacks.
+    * `kp`, `kd`, `kp_sync`, `kd_sync`, `sync_velocity_factor`, `sync_velocity_min_threshold`, `max_velocity`, `max_acceleration`, and `max_deceleration` can be changed at runtime via ROS parameter callbacks.
 
 ### Control Law
 
@@ -213,11 +233,18 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | **kp**                          | `double`       | `1.0`                    | Proportional gain for velocity tracking.                                                                                                        |
 | **kd**                          | `double`       | `0.1`                    | Derivative gain for acceleration damping.                                                                                                       |
 | **kp_sync**                     | `double`       | `1.0`                    | Proportional gain for synchronization of synced joints during movement.                                                                         |
+| **kd_sync**                     | `double`       | `0.1`                    | Derivative gain for synchronization (damps oscillation using the velocity difference between sync partners).                                    |
+| **sync_velocity_factor**        | `double`       | `1.0`                    | Maximum sync correction as a factor of the commanded velocity.                                                                                  |
+| **sync_velocity_min_threshold** | `double`       | `0.1`                    | Minimum absolute sync correction (rad/s) applied regardless of commanded velocity. Ensures sync works at low speeds and at rest.                |
 | **stopping_velocity_threshold** | `double`       | `0.005`                  | Velocity threshold below which a joint is considered stopped.                                                                                   |
-| **braking_deceleration**        | `double`       | `5.0`                    | Deceleration in rad/s² used to smoothly bring joints to a stop when velocity command becomes zero.                                              |
+| **max_velocity**                | `double`       | `1.0`                    | Maximum velocity in rad/s. Clamps incoming velocity references and limits velocity during action profiles.                                      |
+| **max_acceleration**            | `double`       | `2.0`                    | Maximum acceleration in rad/s². Used for drive actions and sync actions.                                                                        |
+| **max_deceleration**            | `double`       | `4.0`                    | Maximum deceleration in rad/s². Used for braking profiles when velocity commands go to zero. Higher than max_acceleration for faster stopping.  |
 | **synchronous_groups**          | `string_array` | `[]`                     | Group names per joint for synchronization (empty = no sync).                                                                                    |
 | **passthrough_controller**      | `string`       | `""`                     | Prefix for the lower-level controller exposing command interfaces.                                                                              |
 | **e_stop_topic**                | `string`       | `estop_board/hard_estop` | Topic for emergency stop messages (`std_msgs/Bool`).                                                                                            |
+| **velocity_command_timeout**    | `double`       | `0.0`                    | Timeout in seconds. If no non-zero velocity command arrives within this duration, references are zeroed. 0 disables.                            |
+| **upright_position**            | `double`       | `1.517`                  | Default target position for the drive flipper group action (rad).                                                                               |
 | **publish_debug_joint_states**  | `bool`         | `false`                  | If `true`, publishes `~/debug_in_joint_states` (velocity refs) and `~/debug_out_joint_states` (position cmds) as `sensor_msgs/JointState`.     |
 
 ### Topics
@@ -228,6 +255,14 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | E-Stop topic               | `Bool`                   | Engages (`true`) or releases (`false`) the e-stop.                     |
 | `~/debug_in_joint_states`  | `sensor_msgs/JointState` | Incoming velocity references (only when `publish_debug_joint_states`). |
 | `~/debug_out_joint_states` | `sensor_msgs/JointState` | Outgoing position commands (only when `publish_debug_joint_states`).   |
+| `~/sync_status`            | `hector_ros_controllers_msgs/SyncStatus` | Per-joint input/output velocities and desired/current sync offsets (only when `publish_debug_joint_states`). |
+
+### Actions
+
+| Action                      | Type                                              | Description                                                                                                                                     |
+|-----------------------------|---------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `~/drive_flipper_group`     | `hector_ros_controllers_msgs/DriveFlipperGroup`   | Drives all joints in a synchronous group to a target position using trapezoidal profiles. Cancelled immediately by velocity commands on the group. |
+| `~/sync_flipper_group`      | `hector_ros_controllers_msgs/SyncFlipperGroup`    | Syncs one or more flipper groups to their average positions. Supports simultaneous multi-group sync. Cancelled immediately by velocity commands.  |
 
 
 ---

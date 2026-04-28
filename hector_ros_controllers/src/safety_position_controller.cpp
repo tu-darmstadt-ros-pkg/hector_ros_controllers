@@ -45,13 +45,24 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  auto qos = rclcpp::QoS( 10 );
-  qos.transient_local();
-  semantic_description_sub_ = get_node()->create_subscription<std_msgs::msg::String>(
-      "robot_description_semantic", qos, [this]( const std_msgs::msg::String::SharedPtr msg ) {
-        srdf_ = msg->data;
-        srdf_received_ = true;
-      } );
+  // Get SRDF: prefer parameter, fall back to topic subscription
+  if ( get_node()->has_parameter( "robot_description_semantic" ) ) {
+    srdf_ = get_node()->get_parameter( "robot_description_semantic" ).as_string();
+  }
+  if ( !srdf_.empty() ) {
+    srdf_received_ = true;
+    RCLCPP_INFO( get_node()->get_logger(), "Loaded robot_description_semantic from parameter." );
+  } else {
+    RCLCPP_INFO( get_node()->get_logger(),
+                 "robot_description_semantic parameter not set, subscribing to topic." );
+    auto qos = rclcpp::QoS( 10 );
+    qos.transient_local();
+    semantic_description_sub_ = get_node()->create_subscription<std_msgs::msg::String>(
+        "robot_description_semantic", qos, [this]( const std_msgs::msg::String::SharedPtr msg ) {
+          srdf_ = msg->data;
+          srdf_received_ = true;
+        } );
+  }
 
   if ( params_.check_self_collisions ) {
     collision_checker_ = std::make_unique<CollisionChecker>( node, params_.collision_padding,

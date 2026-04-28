@@ -201,15 +201,29 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
 
   transformTree_ = std::make_shared<ad_kinematics::Tree>( urdf );
 
-  auto qos = rclcpp::QoS( 10 );
-  qos.transient_local();
+  // Get SRDF: prefer parameter, fall back to topic subscription
   srdf_received_ = false;
-  semantic_description_sub = get_node()->create_subscription<std_msgs::msg::String>(
-      "robot_description_semantic", qos, [this, urdf]( const std_msgs::msg::String::SharedPtr msg ) {
-        srdf_ = srdf::Model();
-        srdf_.initString( *urdf, msg->data );
-        srdf_received_ = true;
-      } );
+  std::string srdf_xml;
+  if ( get_node()->has_parameter( "robot_description_semantic" ) ) {
+    srdf_xml = get_node()->get_parameter( "robot_description_semantic" ).as_string();
+  }
+  if ( !srdf_xml.empty() ) {
+    srdf_ = srdf::Model();
+    srdf_.initString( *urdf, srdf_xml );
+    srdf_received_ = true;
+    RCLCPP_INFO( get_node()->get_logger(), "Loaded robot_description_semantic from parameter." );
+  } else {
+    RCLCPP_INFO( get_node()->get_logger(),
+                 "robot_description_semantic parameter not set, subscribing to topic." );
+    auto qos = rclcpp::QoS( 10 );
+    qos.transient_local();
+    semantic_description_sub = get_node()->create_subscription<std_msgs::msg::String>(
+        "robot_description_semantic", qos, [this, urdf]( const std_msgs::msg::String::SharedPtr msg ) {
+          srdf_ = srdf::Model();
+          srdf_.initString( *urdf, msg->data );
+          srdf_received_ = true;
+        } );
+  }
 
   set_joint_infos( urdf );
 
