@@ -1,0 +1,63 @@
+sync_group_velocity_to_position_controller:
+  # --- Joint topology -------------------------------------------------------
+  joints: {type: string_array, default_value: [], description: Name of the joints to control}
+
+  # Per-joint group label (must be empty or have exactly one entry per joint).
+  # Joints sharing a label form a synchronous group; pairs in the same group
+  # hold their relative offset while receiving identical velocity commands.
+  synchronous_groups: {type: string_array, default_value: [], description: Per-joint group label for pairwise synchronization}
+
+  # Optional upstream chain controller. If set, command interfaces are claimed
+  # as "<passthrough_controller>/<joint>/position" instead of "<joint>/position".
+  passthrough_controller: {type: string, default_value: '', description: Name of passthrough controller exposing the position command interfaces}
+
+  # --- Safety ---------------------------------------------------------------
+  # Hard e-stop subscription. While true, all joints freeze in place.
+  e_stop_topic: {type: string, default_value: estop_board/hard_estop, description: Topic for hard e-stop (std_msgs/Bool). When true all joints are stopped.}
+
+  # Zero reference interfaces if no non-zero command is received for this many
+  # seconds. 0 disables (rely on upstream SafetyForwardController instead).
+  velocity_command_timeout: {type: double, default_value: 0.0, description: Auto-zero references if no non-zero command for N seconds (0 = disabled)}
+
+  # --- Per-joint PD (velocity tracking) -------------------------------------
+  # The control law integrates the velocity reference into a target position
+  # and adds a PD term on velocity error. kp scales (vel_cmd - vel_state);
+  # kd damps current velocity. Both terms are scaled by dt internally.
+  kp: {type: double, default_value: 1.0, description: P gain on velocity error (vel_cmd - vel_state)}
+  kd: {type: double, default_value: 0.1, description: D gain damping current velocity}
+
+  # --- Pair synchronization -------------------------------------------------
+  # When two joints in the same group receive identical non-zero velocity
+  # commands, their relative offset at that instant is captured and a PD
+  # correction pulls them back toward that offset. Offset is frozen until
+  # commands diverge again.
+  kp_sync: {type: double, default_value: 1.0, description: P gain on pair offset error}
+  kd_sync: {type: double, default_value: 0.1, description: D gain on pair velocity difference}
+
+  # Sync correction is clamped to max(|vel_cmd| * factor, min_threshold) rad/s.
+  # The factor lets correction grow with commanded speed; the min_threshold
+  # ensures non-zero correction at low speeds (set 0 to disable that floor).
+  sync_velocity_factor: {type: double, default_value: 1.0, description: Sync correction cap as a fraction of commanded velocity}
+  sync_velocity_min_threshold: {type: double, default_value: 0.1, description: Minimum sync correction cap in rad/s (floor for the factor-based cap)}
+
+  # --- Motion limits --------------------------------------------------------
+  # Velocity references are clamped to [-max_velocity, max_velocity].
+  # Acceleration / deceleration shape the trapezoidal profiles used for the
+  # action interfaces (drive/sync) and for stopping when vel_cmd hits zero.
+  # Deceleration is typically larger than acceleration for snappier stops.
+  max_velocity: {type: double, default_value: 1.0, description: Velocity clamp (rad/s) and cruise speed for action profiles}
+  max_acceleration: {type: double, default_value: 2.0, description: Trapezoidal accel for drive/sync action profiles (rad/s^2)}
+  max_deceleration: {type: double, default_value: 4.0, description: Trapezoidal decel for braking on vel_cmd -> 0 (rad/s^2)}
+
+  # --- Misc ----------------------------------------------------------------
+  # Below this measured velocity a joint is treated as "at rest" for state
+  # transitions out of STOPPING. Mostly affects edge cases at very low speeds.
+  stopping_velocity_threshold: {type: double, default_value: 0.005, description: abs(vel_state) below which a joint is considered stopped}
+
+  # If true, publishes ~/debug_in_joint_states, ~/debug_out_joint_states,
+  # and ~/sync_status for tuning. Off by default to avoid extra traffic.
+  publish_debug_joint_states: {type: bool, default_value: false, description: Enable RT debug publishers (in/out joint states + sync status)}
+
+  # Default target for the upright group action (used when the action goal
+  # leaves target_position unset).
+  upright_position: {type: double, default_value: 1.517, description: Default upright-action target position in radians}
