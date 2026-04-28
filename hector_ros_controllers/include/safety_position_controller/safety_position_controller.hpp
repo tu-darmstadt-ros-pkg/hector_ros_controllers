@@ -295,7 +295,7 @@ private:
   rclcpp::TimerBase::SharedPtr status_timer_;
   realtime_tools::RealtimeBuffer<StatusSnapshot> rt_status_buffer_;
 
-  static constexpr int throttle_logging_msg = 2000; ///< ms; throttle for WARN/ERROR logs
+  static constexpr int throttle_logging_msg = 10000; ///< ms; throttle for WARN/ERROR logs
 };
 
 } // namespace safety_position_controller

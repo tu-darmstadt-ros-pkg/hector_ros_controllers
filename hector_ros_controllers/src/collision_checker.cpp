@@ -383,18 +383,6 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
   const auto t_distance = clock::now();
 #endif
 
-  // Log collision outside the hot loop (throttled)
-  if ( global_min_distance <= collision_padding_ ) {
-    const auto &cp = geom_model_.collisionPairs[min_distance_pair];
-    const auto &o1 = geom_model_.geometryObjects[cp.first];
-    const auto &o2 = geom_model_.geometryObjects[cp.second];
-    RCLCPP_WARN_STREAM_THROTTLE( node_->get_logger(), *node_->get_clock(), 1000,
-                                 "Collision (or contact) distance "
-                                     << global_min_distance << " between "
-                                     << model_.frames[o1.parentFrame].name << " and "
-                                     << model_.frames[o2.parentFrame].name );
-  }
-
   CollisionResult result;
   result.in_collision = ( global_min_distance <= collision_padding_ );
   result.min_distance = global_min_distance;
@@ -733,11 +721,6 @@ void CollisionChecker::publishMarkers() const
     if ( dres.min_distance <= 0.0 ) {
       add_unique( cp.first );
       add_unique( cp.second );
-      RCLCPP_WARN(
-          node_->get_logger(),
-          "Collision detected between objects %zu and %zu (distance=%.6f), names '%s' - '%s'",
-          cp.first, cp.second, dres.min_distance, geom_model_.geometryObjects[cp.first].name.c_str(),
-          geom_model_.geometryObjects[cp.second].name.c_str() );
     }
   }
 
