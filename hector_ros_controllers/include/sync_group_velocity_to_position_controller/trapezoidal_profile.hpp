@@ -1,10 +1,10 @@
-#ifndef VELOCITY_TO_POSITION_COMMAND_CONTROLLER__TRAPEZOIDAL_PROFILE_HPP_
-#define VELOCITY_TO_POSITION_COMMAND_CONTROLLER__TRAPEZOIDAL_PROFILE_HPP_
+#ifndef SYNC_GROUP_VELOCITY_TO_POSITION_CONTROLLER__TRAPEZOIDAL_PROFILE_HPP_
+#define SYNC_GROUP_VELOCITY_TO_POSITION_CONTROLLER__TRAPEZOIDAL_PROFILE_HPP_
 
 #include <cmath>
 #include <utility>
 
-namespace velocity_to_position_command_controller
+namespace sync_group_velocity_to_position_controller
 {
 
 /// RT-safe trapezoidal velocity profile (pure math, no allocations).
@@ -135,6 +135,6 @@ struct TrapezoidalProfile {
   }
 };
 
-} // namespace velocity_to_position_command_controller
+} // namespace sync_group_velocity_to_position_controller
 
-#endif // VELOCITY_TO_POSITION_COMMAND_CONTROLLER__TRAPEZOIDAL_PROFILE_HPP_
+#endif // SYNC_GROUP_VELOCITY_TO_POSITION_CONTROLLER__TRAPEZOIDAL_PROFILE_HPP_

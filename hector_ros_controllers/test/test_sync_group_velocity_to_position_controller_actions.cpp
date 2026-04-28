@@ -6,8 +6,8 @@
 #include <thread>
 
 using VelToPosController =
-    velocity_to_position_command_controller::VelocityToPositionCommandController;
-using GroupActionState = velocity_to_position_command_controller::GroupActionState;
+    sync_group_velocity_to_position_controller::SyncGroupVelocityToPositionController;
+using GroupActionState = sync_group_velocity_to_position_controller::GroupActionState;
 using DriveFlipperGroupAction = hector_ros_controllers_msgs::action::DriveFlipperGroup;
 using SyncFlipperGroupAction = hector_ros_controllers_msgs::action::SyncFlipperGroup;
 
@@ -15,7 +15,7 @@ using SyncFlipperGroupAction = hector_ros_controllers_msgs::action::SyncFlipperG
 // Action Test Fixture
 //
 // Builds on the same hardware-interface scaffolding as
-// test_velocity_to_position_command_controller.cpp, plus rtest's
+// test_sync_group_velocity_to_position_controller.cpp, plus rtest's
 // findActionServer to drive the goal/cancel/accepted callbacks directly.
 //
 // `handle_*_accepted` spawns a monitor thread that polls is_canceling() on the

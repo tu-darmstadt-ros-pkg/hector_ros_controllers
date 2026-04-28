@@ -1,4 +1,4 @@
-#include "velocity_to_position_command_controller/velocity_to_position_command_controller.hpp"
+#include "sync_group_velocity_to_position_controller/sync_group_velocity_to_position_controller.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -12,10 +12,10 @@
 #include "rclcpp/logging.hpp"
 #include "rclcpp/qos.hpp"
 
-namespace velocity_to_position_command_controller
+namespace sync_group_velocity_to_position_controller
 {
 
-VelocityToPositionCommandController::VelocityToPositionCommandController()
+SyncGroupVelocityToPositionController::SyncGroupVelocityToPositionController()
     : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
       max_velocity_( 1.0 ), max_acceleration_( 2.0 ), max_deceleration_( 4.0 ),
       e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
@@ -27,12 +27,12 @@ VelocityToPositionCommandController::VelocityToPositionCommandController()
 // Parameter utilities
 // ---------------------------------------------------------------------------
 
-void VelocityToPositionCommandController::declare_parameters()
+void SyncGroupVelocityToPositionController::declare_parameters()
 {
   param_listener_ = std::make_shared<ParamListener>( get_node() );
 }
 
-controller_interface::CallbackReturn VelocityToPositionCommandController::read_parameters()
+controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read_parameters()
 {
   if ( !param_listener_ ) {
     RCLCPP_ERROR( get_node()->get_logger(), "Error encountered during init" );
@@ -139,7 +139,7 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::read_p
 // URDF joint limit parsing
 // ---------------------------------------------------------------------------
 
-void VelocityToPositionCommandController::parse_joint_limits_from_urdf()
+void SyncGroupVelocityToPositionController::parse_joint_limits_from_urdf()
 {
   const std::string &urdf_string = this->get_robot_description();
   if ( urdf_string.empty() ) {
@@ -184,7 +184,7 @@ void VelocityToPositionCommandController::parse_joint_limits_from_urdf()
 // ---------------------------------------------------------------------------
 
 rcl_interfaces::msg::SetParametersResult
-VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
+SyncGroupVelocityToPositionController::set_pid_gains( const rclcpp::Parameter &p )
 {
   auto result = rcl_interfaces::msg::SetParametersResult();
   const double val = p.as_double();
@@ -222,7 +222,7 @@ VelocityToPositionCommandController::set_pid_gains( const rclcpp::Parameter &p )
 // Lifecycle callbacks
 // ---------------------------------------------------------------------------
 
-controller_interface::CallbackReturn VelocityToPositionCommandController::on_init()
+controller_interface::CallbackReturn SyncGroupVelocityToPositionController::on_init()
 {
   try {
     declare_parameters();
@@ -230,51 +230,59 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
     param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( get_node() );
     cb_handle_kp_ = param_subscriber_->add_parameter_callback(
         "kp",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_kd_ = param_subscriber_->add_parameter_callback(
         "kd",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_sync_kp_ = param_subscriber_->add_parameter_callback(
         "kp_sync",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_sync_kd_ = param_subscriber_->add_parameter_callback(
         "kd_sync",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_sync_velocity_factor_ = param_subscriber_->add_parameter_callback(
         "sync_velocity_factor",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_sync_velocity_min_threshold_ = param_subscriber_->add_parameter_callback(
         "sync_velocity_min_threshold",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_max_velocity_ = param_subscriber_->add_parameter_callback(
         "max_velocity",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_max_acceleration_ = param_subscriber_->add_parameter_callback(
         "max_acceleration",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     cb_handle_max_deceleration_ = param_subscriber_->add_parameter_callback(
         "max_deceleration",
-        std::bind( &VelocityToPositionCommandController::set_pid_gains, this, std::placeholders::_1 ),
+        std::bind( &SyncGroupVelocityToPositionController::set_pid_gains, this,
+                   std::placeholders::_1 ),
         get_node()->get_name() );
 
     // Debug joint state publishers (dynamically reconfigurable)
-    update_debug_publishers( param_listener_->get_params().publish_debug_joint_states );
     cb_handle_debug_pubs_ = param_subscriber_->add_parameter_callback(
         "publish_debug_joint_states",
         [this]( const rclcpp::Parameter &p ) { update_debug_publishers( p.as_bool() ); },
@@ -288,8 +296,8 @@ controller_interface::CallbackReturn VelocityToPositionCommandController::on_ini
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn
-VelocityToPositionCommandController::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
+controller_interface::CallbackReturn SyncGroupVelocityToPositionController::on_configure(
+    const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   auto ret = read_parameters();
   if ( ret != controller_interface::CallbackReturn::SUCCESS ) {
@@ -298,12 +306,14 @@ VelocityToPositionCommandController::on_configure( const rclcpp_lifecycle::State
 
   parse_joint_limits_from_urdf();
 
+  update_debug_publishers( params_.publish_debug_joint_states );
+
   RCLCPP_INFO( get_node()->get_logger(), "configure successful" );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn
-VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
+SyncGroupVelocityToPositionController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_interfaces;
   if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_types_,
@@ -374,22 +384,22 @@ VelocityToPositionCommandController::on_activate( const rclcpp_lifecycle::State 
   using namespace std::placeholders;
   drive_flipper_action_server_ = rclcpp_action::create_server<DriveFlipperGroupAction>(
       get_node(), "~/drive_flipper_group",
-      std::bind( &VelocityToPositionCommandController::handle_drive_goal, this, _1, _2 ),
-      std::bind( &VelocityToPositionCommandController::handle_drive_cancel, this, _1 ),
-      std::bind( &VelocityToPositionCommandController::handle_drive_accepted, this, _1 ) );
+      std::bind( &SyncGroupVelocityToPositionController::handle_drive_goal, this, _1, _2 ),
+      std::bind( &SyncGroupVelocityToPositionController::handle_drive_cancel, this, _1 ),
+      std::bind( &SyncGroupVelocityToPositionController::handle_drive_accepted, this, _1 ) );
 
   sync_flipper_action_server_ = rclcpp_action::create_server<SyncFlipperGroupAction>(
       get_node(), "~/sync_flipper_group",
-      std::bind( &VelocityToPositionCommandController::handle_sync_goal, this, _1, _2 ),
-      std::bind( &VelocityToPositionCommandController::handle_sync_cancel, this, _1 ),
-      std::bind( &VelocityToPositionCommandController::handle_sync_accepted, this, _1 ) );
+      std::bind( &SyncGroupVelocityToPositionController::handle_sync_goal, this, _1, _2 ),
+      std::bind( &SyncGroupVelocityToPositionController::handle_sync_cancel, this, _1 ),
+      std::bind( &SyncGroupVelocityToPositionController::handle_sync_accepted, this, _1 ) );
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn
-VelocityToPositionCommandController::on_deactivate( const rclcpp_lifecycle::State & /*previous_state*/ )
+controller_interface::CallbackReturn SyncGroupVelocityToPositionController::on_deactivate(
+    const rclcpp_lifecycle::State & /*previous_state*/ )
 {
   // Cancel all active group actions
   for ( size_t i = 0; i < group_names_.size(); i++ ) {
@@ -406,7 +416,7 @@ VelocityToPositionCommandController::on_deactivate( const rclcpp_lifecycle::Stat
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-void VelocityToPositionCommandController::cleanup_monitor_threads()
+void SyncGroupVelocityToPositionController::cleanup_monitor_threads()
 {
   std::lock_guard<std::mutex> lock( action_monitor_threads_mutex_ );
   for ( auto &mt : action_monitor_threads_ ) {
@@ -417,7 +427,7 @@ void VelocityToPositionCommandController::cleanup_monitor_threads()
   action_monitor_threads_.clear();
 }
 
-void VelocityToPositionCommandController::reap_finished_monitor_threads()
+void SyncGroupVelocityToPositionController::reap_finished_monitor_threads()
 {
   std::lock_guard<std::mutex> lock( action_monitor_threads_mutex_ );
   auto it = action_monitor_threads_.begin();
@@ -438,7 +448,7 @@ void VelocityToPositionCommandController::reap_finished_monitor_threads()
 // ---------------------------------------------------------------------------
 
 controller_interface::InterfaceConfiguration
-VelocityToPositionCommandController::command_interface_configuration() const
+SyncGroupVelocityToPositionController::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration config;
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -447,7 +457,7 @@ VelocityToPositionCommandController::command_interface_configuration() const
 }
 
 controller_interface::InterfaceConfiguration
-VelocityToPositionCommandController::state_interface_configuration() const
+SyncGroupVelocityToPositionController::state_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration config;
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
@@ -456,7 +466,7 @@ VelocityToPositionCommandController::state_interface_configuration() const
 }
 
 std::vector<hardware_interface::CommandInterface>
-VelocityToPositionCommandController::on_export_reference_interfaces()
+SyncGroupVelocityToPositionController::on_export_reference_interfaces()
 {
   std::vector<hardware_interface::CommandInterface> reference_interfaces;
   RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interfaces" );
@@ -469,7 +479,8 @@ VelocityToPositionCommandController::on_export_reference_interfaces()
   return reference_interfaces;
 }
 
-controller_interface::return_type VelocityToPositionCommandController::update_reference_from_subscribers(
+controller_interface::return_type
+SyncGroupVelocityToPositionController::update_reference_from_subscribers(
     const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/ )
 {
   auto joint_commands = rt_buffer_ptr_.readFromRT();
@@ -488,7 +499,7 @@ controller_interface::return_type VelocityToPositionCommandController::update_re
   return controller_interface::return_type::OK;
 }
 
-bool VelocityToPositionCommandController::on_set_chained_mode( bool /*chained_mode*/ )
+bool SyncGroupVelocityToPositionController::on_set_chained_mode( bool /*chained_mode*/ )
 {
   return true;
 }
@@ -502,7 +513,7 @@ static bool is_valid( const std::optional<double> &v_opt )
   return v_opt.has_value() && !std::isnan( v_opt.value() );
 }
 
-void VelocityToPositionCommandController::update_joint_states_if_valid()
+void SyncGroupVelocityToPositionController::update_joint_states_if_valid()
 {
   bool all_joints_valid = true;
   for ( size_t i = 0; i < joints_.size(); ++i ) {
@@ -531,8 +542,8 @@ void VelocityToPositionCommandController::update_joint_states_if_valid()
 // State machine
 // ---------------------------------------------------------------------------
 
-void VelocityToPositionCommandController::update_move_states( double vel_command, size_t joint_idx,
-                                                              const rclcpp::Time &time )
+void SyncGroupVelocityToPositionController::update_move_states( double vel_command, size_t joint_idx,
+                                                                const rclcpp::Time &time )
 {
   switch ( move_states_[joint_idx] ) {
   case MOVING:
@@ -551,12 +562,6 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
       }
       braking_start_times_[joint_idx] = time;
       move_states_[joint_idx] = STOPPING;
-
-      RCLCPP_INFO( get_node()->get_logger(),
-                   "[BRAKE] %s: MOVING->STOPPING  vel=%.4f  pos=%.4f  target=%.4f  duration=%.4f",
-                   joints_[joint_idx].c_str(), current_vel, current_pos,
-                   braking_profiles_[joint_idx].target_position,
-                   braking_profiles_[joint_idx].total_time );
     }
     break;
 
@@ -580,29 +585,51 @@ void VelocityToPositionCommandController::update_move_states( double vel_command
 // Synchronization
 // ---------------------------------------------------------------------------
 
-void VelocityToPositionCommandController::update_sync_states( const std::vector<double> &vel_commands )
+void SyncGroupVelocityToPositionController::update_sync_states( const std::vector<double> &vel_commands )
 {
+  // Edge-triggered offset capture: when a group's joints all share the same non-zero
+  // velocity command (sync engages), snapshot their relative positions so synced
+  // control holds that pose. While engaged, the offset is frozen so that brief
+  // command flicker (e.g. FP jitter from upstream chained controllers) cannot
+  // corrupt it.
   for ( auto &group : groups_ ) {
     const std::vector<size_t> &group_indices = group.second;
 
-    if ( group_indices.size() == 1 ) {
+    if ( group_indices.size() < 2 ) {
       sync_states_[group_indices[0]] = false;
       continue;
     }
 
-    bool group_is_synchronized = true;
-    const double &common_vel_command = vel_commands[group_indices[0]];
-    for ( size_t i = 1; i < group_indices.size(); i++ ) {
-      group_is_synchronized &= common_vel_command == vel_commands[group_indices[i]];
+    const double common_vel_command = vel_commands[group_indices[0]];
+    bool group_is_synchronized = !std::isnan( common_vel_command ) && common_vel_command != 0.0;
+    for ( size_t i = 1; group_is_synchronized && i < group_indices.size(); i++ ) {
+      group_is_synchronized &= ( common_vel_command == vel_commands[group_indices[i]] );
     }
 
+    const bool was_synchronized = sync_states_[group_indices[0]];
     for ( size_t i = 0; i < group_indices.size(); i++ ) {
       sync_states_[group_indices[i]] = group_is_synchronized;
+    }
+
+    // On false -> true transition, capture the current relative offset for each
+    // pair in the group. Pair-based capture is safe even if a future group has
+    // more than two joints (sync_pairs_ only links pairs).
+    if ( group_is_synchronized && !was_synchronized ) {
+      for ( size_t idx : group_indices ) {
+        if ( !sync_pairs_.has_partner( idx ) )
+          continue;
+        if ( std::isnan( joint_position_states_[idx] ) )
+          continue;
+        const size_t p = sync_pairs_.partner( idx );
+        if ( std::isnan( joint_position_states_[p] ) )
+          continue;
+        sync_pairs_.set_offset( idx, joint_position_states_[p] - joint_position_states_[idx] );
+      }
     }
   }
 }
 
-void VelocityToPositionCommandController::reset_sync_offsets( size_t joint_idx )
+void SyncGroupVelocityToPositionController::reset_sync_offsets( size_t joint_idx )
 {
   if ( !sync_pairs_.has_partner( joint_idx ) || std::isnan( joint_position_states_[joint_idx] ) )
     return;
@@ -612,25 +639,7 @@ void VelocityToPositionCommandController::reset_sync_offsets( size_t joint_idx )
   }
 }
 
-void VelocityToPositionCommandController::update_sync_offsets()
-{
-  for ( size_t joint_idx = 0; joint_idx < joints_.size(); joint_idx++ ) {
-    // Only update offsets for MOVING joints that are NOT synced (moving independently).
-    if ( move_states_[joint_idx] != MOVING )
-      continue;
-    if ( !sync_pairs_.has_partner( joint_idx ) )
-      continue;
-    if ( sync_states_[joint_idx] || std::isnan( joint_position_states_[joint_idx] ) )
-      continue;
-    const size_t p = sync_pairs_.partner( joint_idx );
-    if ( !std::isnan( joint_position_states_[p] ) ) {
-      sync_pairs_.set_offset( joint_idx,
-                              joint_position_states_[p] - joint_position_states_[joint_idx] );
-    }
-  }
-}
-
-double VelocityToPositionCommandController::sync_pd_control( size_t joint_idx, double vel_command )
+double SyncGroupVelocityToPositionController::sync_pd_control( size_t joint_idx, double vel_command )
 {
   if ( !sync_pairs_.has_partner( joint_idx ) || sync_pairs_.is_offset_nan( joint_idx ) )
     return 0.0;
@@ -660,8 +669,8 @@ double VelocityToPositionCommandController::sync_pd_control( size_t joint_idx, d
 // Control law
 // ---------------------------------------------------------------------------
 
-double VelocityToPositionCommandController::pos_pd_control( size_t joint_idx, double vel_command,
-                                                            const rclcpp::Duration &period )
+double SyncGroupVelocityToPositionController::pos_pd_control( size_t joint_idx, double vel_command,
+                                                              const rclcpp::Duration &period )
 {
   const double dt = period.seconds();
   // feedforward position from velocity command
@@ -673,8 +682,8 @@ double VelocityToPositionCommandController::pos_pd_control( size_t joint_idx, do
   return desired_positions_[joint_idx] + vel_p - vel_d;
 }
 
-double VelocityToPositionCommandController::position_control( size_t joint_idx, double vel_command,
-                                                              const rclcpp::Duration &period )
+double SyncGroupVelocityToPositionController::position_control( size_t joint_idx, double vel_command,
+                                                                const rclcpp::Duration &period )
 {
   double next_position = pos_pd_control( joint_idx, vel_command, period );
   if ( sync_states_[joint_idx] ) {
@@ -698,7 +707,7 @@ double VelocityToPositionCommandController::position_control( size_t joint_idx, 
 // Debug publishers
 // ---------------------------------------------------------------------------
 
-void VelocityToPositionCommandController::update_debug_publishers( bool enable )
+void SyncGroupVelocityToPositionController::update_debug_publishers( bool enable )
 {
   if ( enable ) {
     if ( !rt_debug_in_js_pub_ ) {
@@ -744,7 +753,7 @@ void VelocityToPositionCommandController::update_debug_publishers( bool enable )
   }
 }
 
-void VelocityToPositionCommandController::publish_debug_joint_state_in()
+void SyncGroupVelocityToPositionController::publish_debug_joint_state_in()
 {
   if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
     return;
@@ -758,7 +767,7 @@ void VelocityToPositionCommandController::publish_debug_joint_state_in()
   rt_debug_in_js_pub_->unlockAndPublish();
 }
 
-void VelocityToPositionCommandController::publish_debug_joint_state_out(
+void SyncGroupVelocityToPositionController::publish_debug_joint_state_out(
     const std::vector<double> &positions )
 {
   if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
@@ -773,7 +782,8 @@ void VelocityToPositionCommandController::publish_debug_joint_state_out(
   rt_debug_out_js_pub_->unlockAndPublish();
 }
 
-void VelocityToPositionCommandController::publish_sync_status( const std::vector<double> &vel_commands_out )
+void SyncGroupVelocityToPositionController::publish_sync_status(
+    const std::vector<double> &vel_commands_out )
 {
   if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
     return;
@@ -805,8 +815,8 @@ void VelocityToPositionCommandController::publish_sync_status( const std::vector
 // ---------------------------------------------------------------------------
 
 controller_interface::return_type
-VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Time &time,
-                                                                const rclcpp::Duration &period )
+SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::Time &time,
+                                                                  const rclcpp::Duration &period )
 {
   update_joint_states_if_valid();
 
@@ -842,7 +852,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
   successful &= process_group_actions( time );
 
   update_sync_states( reference_interfaces_ );
-  update_sync_offsets();
 
   const double dt = period.seconds();
   std::vector<double> vel_commands_out( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
@@ -891,9 +900,6 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
         desired_positions_[joint_idx] = target;
         pos_command = target;
         move_states_[joint_idx] = STOPPED;
-
-        RCLCPP_INFO( get_node()->get_logger(), "[BRAKE] %s: stopped at pos=%.4f",
-                     joints_[joint_idx].c_str(), target );
       } else {
         desired_positions_[joint_idx] = pos;
         pos_command = pos;
@@ -943,9 +949,9 @@ VelocityToPositionCommandController::update_and_write_commands( const rclcpp::Ti
   return controller_interface::return_type::OK;
 }
 
-} // namespace velocity_to_position_command_controller
+} // namespace sync_group_velocity_to_position_controller
 
 #include "pluginlib/class_list_macros.hpp"
 
-PLUGINLIB_EXPORT_CLASS( velocity_to_position_command_controller::VelocityToPositionCommandController,
+PLUGINLIB_EXPORT_CLASS( sync_group_velocity_to_position_controller::SyncGroupVelocityToPositionController,
                         controller_interface::ChainableControllerInterface )

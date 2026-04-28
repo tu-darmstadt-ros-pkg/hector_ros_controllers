@@ -64,7 +64,7 @@ Acts as a motion gatekeeper in real-time.
 Converts **velocity references** into **position commands** for joint hardware. Useful when an upstream controller outputs velocity commands but the hardware only accepts position commands.
 
 > **Important:** This controller does **not** perform self-collision checking. It should be chained downstream of the **Safety Position Controller** (see section 4) to ensure collision avoidance and joint limit enforcement. A typical chain is:
-> `upstream velocity source → vel_to_pos_controller → safety_position_controller → hardware`
+> `upstream velocity source → flipper_velocity_to_position_controller → safety_position_controller → hardware`
 
 ### Features
 

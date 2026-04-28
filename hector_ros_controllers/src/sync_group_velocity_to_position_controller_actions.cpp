@@ -1,4 +1,4 @@
-#include "velocity_to_position_command_controller/velocity_to_position_command_controller.hpp"
+#include "sync_group_velocity_to_position_controller/sync_group_velocity_to_position_controller.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,14 +8,14 @@
 
 #include "rclcpp/logging.hpp"
 
-namespace velocity_to_position_command_controller
+namespace sync_group_velocity_to_position_controller
 {
 
 // ---------------------------------------------------------------------------
 // Action helpers
 // ---------------------------------------------------------------------------
 
-std::string VelocityToPositionCommandController::start_group_action(
+std::string SyncGroupVelocityToPositionController::start_group_action(
     const std::string &group_name, const std::vector<double> &target_positions_per_joint,
     double max_vel, double max_accel )
 {
@@ -66,7 +66,7 @@ std::string VelocityToPositionCommandController::start_group_action(
   return {};
 }
 
-void VelocityToPositionCommandController::cancel_group_actions( const std::vector<size_t> &group_indices )
+void SyncGroupVelocityToPositionController::cancel_group_actions( const std::vector<size_t> &group_indices )
 {
   for ( size_t gi : group_indices ) {
     if ( group_action_states_[gi].load() == GroupActionState::EXECUTING ) {
@@ -78,7 +78,7 @@ void VelocityToPositionCommandController::cancel_group_actions( const std::vecto
   }
 }
 
-void VelocityToPositionCommandController::monitor_group_actions(
+void SyncGroupVelocityToPositionController::monitor_group_actions(
     const std::vector<size_t> &group_indices, std::function<bool()> is_canceling,
     MonitorCompleteFn on_complete, MonitorAbortFn on_abort, MonitorFeedbackFn on_feedback )
 {
@@ -145,7 +145,7 @@ void VelocityToPositionCommandController::monitor_group_actions(
 // Action server callbacks
 // ---------------------------------------------------------------------------
 
-rclcpp_action::GoalResponse VelocityToPositionCommandController::handle_drive_goal(
+rclcpp_action::GoalResponse SyncGroupVelocityToPositionController::handle_drive_goal(
     const rclcpp_action::GoalUUID & /*uuid*/,
     std::shared_ptr<const DriveFlipperGroupAction::Goal> goal )
 {
@@ -167,13 +167,13 @@ rclcpp_action::GoalResponse VelocityToPositionCommandController::handle_drive_go
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
-rclcpp_action::CancelResponse VelocityToPositionCommandController::handle_drive_cancel(
+rclcpp_action::CancelResponse SyncGroupVelocityToPositionController::handle_drive_cancel(
     std::shared_ptr<DriveFlipperGroupGoalHandle> /*goal_handle*/ )
 {
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
-void VelocityToPositionCommandController::handle_drive_accepted(
+void SyncGroupVelocityToPositionController::handle_drive_accepted(
     std::shared_ptr<DriveFlipperGroupGoalHandle> goal_handle )
 {
   const auto goal = goal_handle->get_goal();
@@ -255,7 +255,7 @@ void VelocityToPositionCommandController::handle_drive_accepted(
   }
 }
 
-rclcpp_action::GoalResponse VelocityToPositionCommandController::handle_sync_goal(
+rclcpp_action::GoalResponse SyncGroupVelocityToPositionController::handle_sync_goal(
     const rclcpp_action::GoalUUID & /*uuid*/,
     std::shared_ptr<const SyncFlipperGroupAction::Goal> goal )
 {
@@ -290,13 +290,13 @@ rclcpp_action::GoalResponse VelocityToPositionCommandController::handle_sync_goa
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
-rclcpp_action::CancelResponse VelocityToPositionCommandController::handle_sync_cancel(
+rclcpp_action::CancelResponse SyncGroupVelocityToPositionController::handle_sync_cancel(
     std::shared_ptr<SyncFlipperGroupGoalHandle> /*goal_handle*/ )
 {
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
-void VelocityToPositionCommandController::handle_sync_accepted(
+void SyncGroupVelocityToPositionController::handle_sync_accepted(
     std::shared_ptr<SyncFlipperGroupGoalHandle> goal_handle )
 {
   const auto goal = goal_handle->get_goal();
@@ -424,7 +424,7 @@ void VelocityToPositionCommandController::handle_sync_accepted(
 // Group action processing (called from update loop)
 // ---------------------------------------------------------------------------
 
-bool VelocityToPositionCommandController::process_group_actions( const rclcpp::Time &time )
+bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp::Time &time )
 {
   bool all_successful = true;
   for ( size_t g = 0; g < group_names_.size(); g++ ) {
@@ -484,8 +484,6 @@ bool VelocityToPositionCommandController::process_group_actions( const rclcpp::T
       }
 
       group_action_states_[g].store( GroupActionState::COMPLETED );
-      RCLCPP_INFO( get_node()->get_logger(), "Group action for '%s' completed",
-                   group_names_[g].c_str() );
     } else {
       // Follow profile
       for ( size_t i = 0; i < group_joint_indices.size(); i++ ) {
@@ -513,4 +511,4 @@ bool VelocityToPositionCommandController::process_group_actions( const rclcpp::T
   return all_successful;
 }
 
-} // namespace velocity_to_position_command_controller
+} // namespace sync_group_velocity_to_position_controller
