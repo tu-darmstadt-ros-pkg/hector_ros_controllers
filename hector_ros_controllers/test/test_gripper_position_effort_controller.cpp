@@ -17,7 +17,7 @@
 // Access private/protected members for testing
 #define private public
 #define protected public
-#include <max_effort_gripper_action_controller/max_effort_gripper_action_controller.hpp>
+#include <gripper_position_effort_controller/gripper_position_effort_controller.hpp>
 #undef protected
 #undef private
 
@@ -26,7 +26,7 @@
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
 
-using GripperController = max_effort_gripper_action_controller::MaxEffortGripperActionController;
+using GripperController = gripper_position_effort_controller::GripperPositionEffortController;
 
 namespace
 {
@@ -45,7 +45,7 @@ std::string loadGripperUrdf()
 
 } // namespace
 
-class MaxEffortGripperControllerTest : public ::testing::Test
+class GripperPositionEffortControllerTest : public ::testing::Test
 {
 protected:
   static constexpr unsigned int kUpdateRate = 100;
@@ -187,13 +187,13 @@ protected:
 // Lifecycle / Configuration
 // ============================================================================
 
-TEST_F( MaxEffortGripperControllerTest, OnInitSucceeds )
+TEST_F( GripperPositionEffortControllerTest, OnInitSucceeds )
 {
   initController();
   EXPECT_TRUE( controller_->param_listener_ != nullptr );
 }
 
-TEST_F( MaxEffortGripperControllerTest, OnConfigureFailsEmptyJoint )
+TEST_F( GripperPositionEffortControllerTest, OnConfigureFailsEmptyJoint )
 {
   controller_interface::ControllerInterfaceParams params;
   params.controller_name = "test_gripper";
@@ -210,7 +210,7 @@ TEST_F( MaxEffortGripperControllerTest, OnConfigureFailsEmptyJoint )
   EXPECT_EQ( controller_->on_configure( unconfigured ), controller_interface::CallbackReturn::ERROR );
 }
 
-TEST_F( MaxEffortGripperControllerTest, JointLimitsParsedFromUrdf )
+TEST_F( GripperPositionEffortControllerTest, JointLimitsParsedFromUrdf )
 {
   initController();
   configureController();
@@ -218,7 +218,7 @@ TEST_F( MaxEffortGripperControllerTest, JointLimitsParsedFromUrdf )
   EXPECT_DOUBLE_EQ( controller_->joint_upper_limit_, 1.0 );
 }
 
-TEST_F( MaxEffortGripperControllerTest, InterfaceConfigurationsClaimPositionAndEffort )
+TEST_F( GripperPositionEffortControllerTest, InterfaceConfigurationsClaimPositionAndEffort )
 {
   initController();
   configureController();
@@ -234,7 +234,104 @@ TEST_F( MaxEffortGripperControllerTest, InterfaceConfigurationsClaimPositionAndE
   EXPECT_EQ( state_cfg.names[2], joint_name_ + "/effort" );
 }
 
-TEST_F( MaxEffortGripperControllerTest, ActivateInitialisesTargetToCurrentPosition )
+TEST_F( GripperPositionEffortControllerTest, OnInitFailsWhenEffortCommandInterfaceParamInvalid )
+{
+  controller_interface::ControllerInterfaceParams params;
+  params.controller_name = "test_gripper";
+  params.robot_description = loadGripperUrdf();
+  params.update_rate = kUpdateRate;
+  params.controller_manager_update_rate = kUpdateRate;
+  rclcpp::NodeOptions opts;
+  opts.parameter_overrides( { rclcpp::Parameter( "joint", joint_name_ ),
+                              rclcpp::Parameter( "effort_command_interface", std::string( "" ) ) } );
+  params.node_options = opts;
+  // Empty string fails one_of<> validation in the generated ParamListener constructor,
+  // which throws — caught by on_init and surfaced as ERROR.
+  EXPECT_EQ( controller_->init( params ), controller_interface::return_type::ERROR );
+}
+
+TEST_F( GripperPositionEffortControllerTest, DisabledModeOmitsEffortCommandInterface )
+{
+  initController( { rclcpp::Parameter( "effort_command_interface", std::string( "disabled" ) ) } );
+  configureController();
+  auto cmd_cfg = controller_->command_interface_configuration();
+  ASSERT_EQ( cmd_cfg.names.size(), 1u );
+  EXPECT_EQ( cmd_cfg.names[0], joint_name_ + "/position" );
+
+  auto state_cfg = controller_->state_interface_configuration();
+  ASSERT_EQ( state_cfg.names.size(), 3u );
+  EXPECT_EQ( state_cfg.names[0], joint_name_ + "/position" );
+  EXPECT_EQ( state_cfg.names[1], joint_name_ + "/velocity" );
+  EXPECT_EQ( state_cfg.names[2], joint_name_ + "/effort" );
+}
+
+TEST_F( GripperPositionEffortControllerTest, DisabledModeWritesPositionOnly )
+{
+  initController( { rclcpp::Parameter( "effort_command_interface", std::string( "disabled" ) ) } );
+  configureController();
+
+  // Hardware setup without an effort command interface, mirroring a sim joint
+  // that exposes only a position command.
+  hw_cmd_values_.assign( 1, 0.0 );
+  hw_state_values_.assign( 3, 0.0 );
+  cmd_ifaces_.clear();
+  state_ifaces_.clear();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+      joint_name_, "position", &hw_cmd_values_[0] ) );
+  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+      joint_name_, "position", &hw_state_values_[0] ) );
+  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+      joint_name_, "velocity", &hw_state_values_[1] ) );
+  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+      joint_name_, "effort", &hw_state_values_[2] ) );
+#pragma GCC diagnostic pop
+  controller_->command_interfaces_.clear();
+  controller_->state_interfaces_.clear();
+  for ( auto &ci : cmd_ifaces_ ) controller_->command_interfaces_.emplace_back( ci, []() { } );
+  for ( auto &si : state_ifaces_ ) controller_->state_interfaces_.emplace_back( si );
+
+  activateController();
+  EXPECT_FALSE( controller_->effort_command_interface_.has_value() );
+
+  injectActionCommand( 0.4, 1.5 );
+  ASSERT_EQ( callUpdate( 0.0 ), controller_interface::return_type::OK );
+  EXPECT_NEAR( hw_cmd_values_[0], 0.4, 1e-9 );
+}
+
+TEST_F( GripperPositionEffortControllerTest, RequiredModeFailsActivateWhenEffortInterfaceMissing )
+{
+  initController(); // effort_command_interface defaults to "required"
+  configureController();
+
+  // Provide ONLY a position command interface, not an effort one.
+  hw_cmd_values_.assign( 1, 0.0 );
+  hw_state_values_.assign( 3, 0.0 );
+  cmd_ifaces_.clear();
+  state_ifaces_.clear();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+      joint_name_, "position", &hw_cmd_values_[0] ) );
+  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+      joint_name_, "position", &hw_state_values_[0] ) );
+  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+      joint_name_, "velocity", &hw_state_values_[1] ) );
+  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+      joint_name_, "effort", &hw_state_values_[2] ) );
+#pragma GCC diagnostic pop
+  controller_->command_interfaces_.clear();
+  controller_->state_interfaces_.clear();
+  for ( auto &ci : cmd_ifaces_ ) controller_->command_interfaces_.emplace_back( ci, []() { } );
+  for ( auto &si : state_ifaces_ ) controller_->state_interfaces_.emplace_back( si );
+
+  rclcpp_lifecycle::State inactive( lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+                                    "inactive" );
+  EXPECT_EQ( controller_->on_activate( inactive ), controller_interface::CallbackReturn::ERROR );
+}
+
+TEST_F( GripperPositionEffortControllerTest, ActivateInitialisesTargetToCurrentPosition )
 {
   initController();
   configureController();
@@ -255,7 +352,7 @@ TEST_F( MaxEffortGripperControllerTest, ActivateInitialisesTargetToCurrentPositi
 
 // Simulate accepted_callback by directly populating the action command buffer
 // (full action server interaction would require an executor + node spinning).
-TEST_F( MaxEffortGripperControllerTest, ActionLikeCommandWritesPositionAndEffort )
+TEST_F( GripperPositionEffortControllerTest, ActionLikeCommandWritesPositionAndEffort )
 {
   initController();
   configureController();
@@ -269,7 +366,7 @@ TEST_F( MaxEffortGripperControllerTest, ActionLikeCommandWritesPositionAndEffort
   EXPECT_NEAR( cmdEffort(), 2.0, 1e-9 );
 }
 
-TEST_F( MaxEffortGripperControllerTest, ActionGoalClampedToJointLimits )
+TEST_F( GripperPositionEffortControllerTest, ActionGoalClampedToJointLimits )
 {
   initController();
   configureController();
@@ -286,7 +383,7 @@ TEST_F( MaxEffortGripperControllerTest, ActionGoalClampedToJointLimits )
 // max_effort_limit is a hard ceiling on the effort value written to hardware. Verify that
 // (a) effort under the limit passes through unchanged, (b) effort over the limit is
 // clamped, and (c) limit=0 disables the cap.
-TEST_F( MaxEffortGripperControllerTest, EffortClampedToMaxEffortLimit )
+TEST_F( GripperPositionEffortControllerTest, EffortClampedToMaxEffortLimit )
 {
   initController( { rclcpp::Parameter( "max_effort_limit", 1.5 ) } );
   configureController();
@@ -302,7 +399,7 @@ TEST_F( MaxEffortGripperControllerTest, EffortClampedToMaxEffortLimit )
   EXPECT_NEAR( cmdEffort(), 1.5, 1e-9 ) << "Effort above the limit must be clamped";
 }
 
-TEST_F( MaxEffortGripperControllerTest, MaxEffortLimitZeroDisablesCap )
+TEST_F( GripperPositionEffortControllerTest, MaxEffortLimitZeroDisablesCap )
 {
   initController( { rclcpp::Parameter( "max_effort_limit", 0.0 ) } );
   configureController();
@@ -318,7 +415,7 @@ TEST_F( MaxEffortGripperControllerTest, MaxEffortLimitZeroDisablesCap )
 // Topic interfaces
 // ============================================================================
 
-TEST_F( MaxEffortGripperControllerTest, PositionTopicCommandsJoint )
+TEST_F( GripperPositionEffortControllerTest, PositionTopicCommandsJoint )
 {
   initController();
   configureController();
@@ -331,7 +428,7 @@ TEST_F( MaxEffortGripperControllerTest, PositionTopicCommandsJoint )
   EXPECT_NEAR( cmdEffort(), 1.0, 1e-9 ); // default_max_effort
 }
 
-TEST_F( MaxEffortGripperControllerTest, PositionTopicClampedToJointLimits )
+TEST_F( GripperPositionEffortControllerTest, PositionTopicClampedToJointLimits )
 {
   initController();
   configureController();
@@ -347,7 +444,7 @@ TEST_F( MaxEffortGripperControllerTest, PositionTopicClampedToJointLimits )
   EXPECT_NEAR( cmdPos(), -1.0, 1e-9 );
 }
 
-TEST_F( MaxEffortGripperControllerTest, VelocityTopicIntegratesPosition )
+TEST_F( GripperPositionEffortControllerTest, VelocityTopicIntegratesPosition )
 {
   initController();
   configureController();
@@ -362,7 +459,7 @@ TEST_F( MaxEffortGripperControllerTest, VelocityTopicIntegratesPosition )
   EXPECT_NEAR( cmdPos(), 0.005, 1e-9 );
 }
 
-TEST_F( MaxEffortGripperControllerTest, VelocityTopicWatchdogStopsIntegration )
+TEST_F( GripperPositionEffortControllerTest, VelocityTopicWatchdogStopsIntegration )
 {
   initController();
   configureController();
@@ -390,7 +487,7 @@ TEST_F( MaxEffortGripperControllerTest, VelocityTopicWatchdogStopsIntegration )
   EXPECT_NEAR( cmdPos(), after_timeout, 1e-9 );
 }
 
-TEST_F( MaxEffortGripperControllerTest, VelocityTopicClampsAtUpperLimit )
+TEST_F( GripperPositionEffortControllerTest, VelocityTopicClampsAtUpperLimit )
 {
   initController();
   configureController();
@@ -409,7 +506,7 @@ TEST_F( MaxEffortGripperControllerTest, VelocityTopicClampsAtUpperLimit )
 // the RT-only velocity_cached_valid_ flag, NOT by calling rt_velocity_cmd_.writeFromNonRT
 // (which takes a mutex and is RT-unsafe). After the watchdog fires, the buffer must still
 // contain the original message — proving the RT update path did not call writeFromNonRT.
-TEST_F( MaxEffortGripperControllerTest, StaleVelocityWatchdogStopsIntegrationWithoutBufferWrite )
+TEST_F( GripperPositionEffortControllerTest, StaleVelocityWatchdogStopsIntegrationWithoutBufferWrite )
 {
   initController();
   configureController();
@@ -446,7 +543,7 @@ TEST_F( MaxEffortGripperControllerTest, StaleVelocityWatchdogStopsIntegrationWit
 // Stall / success logic
 // ============================================================================
 
-TEST_F( MaxEffortGripperControllerTest, ReachedGoalSucceedsAndClearsActiveGoal )
+TEST_F( GripperPositionEffortControllerTest, ReachedGoalSucceedsAndClearsActiveGoal )
 {
   initController();
   configureController();
@@ -472,7 +569,7 @@ TEST_F( MaxEffortGripperControllerTest, ReachedGoalSucceedsAndClearsActiveGoal )
 // Topic preempts active goal
 // ============================================================================
 
-TEST_F( MaxEffortGripperControllerTest, PositionTopicPreemptsActiveActionCommand )
+TEST_F( GripperPositionEffortControllerTest, PositionTopicPreemptsActiveActionCommand )
 {
   initController();
   configureController();
@@ -496,7 +593,7 @@ TEST_F( MaxEffortGripperControllerTest, PositionTopicPreemptsActiveActionCommand
 // is_grasped detection
 // ============================================================================
 
-TEST_F( MaxEffortGripperControllerTest, IsGraspedLatchesAfterDwellCycles )
+TEST_F( GripperPositionEffortControllerTest, IsGraspedLatchesAfterDwellCycles )
 {
   initController();
   configureController();
@@ -527,7 +624,7 @@ TEST_F( MaxEffortGripperControllerTest, IsGraspedLatchesAfterDwellCycles )
   EXPECT_FALSE( controller_->is_grasped_ );
 }
 
-TEST_F( MaxEffortGripperControllerTest, IsGraspedRequiresEffortAboveThreshold )
+TEST_F( GripperPositionEffortControllerTest, IsGraspedRequiresEffortAboveThreshold )
 {
   initController();
   configureController();
@@ -547,7 +644,7 @@ TEST_F( MaxEffortGripperControllerTest, IsGraspedRequiresEffortAboveThreshold )
 // Hold position when no goal received
 // ============================================================================
 
-TEST_F( MaxEffortGripperControllerTest, HoldsPositionWithoutAnyCommand )
+TEST_F( GripperPositionEffortControllerTest, HoldsPositionWithoutAnyCommand )
 {
   initController();
   configureController();
@@ -566,7 +663,7 @@ TEST_F( MaxEffortGripperControllerTest, HoldsPositionWithoutAnyCommand )
 // max_effort == 0 falls back to default
 // ============================================================================
 
-TEST_F( MaxEffortGripperControllerTest, ZeroMaxEffortFallsBackToDefault )
+TEST_F( GripperPositionEffortControllerTest, ZeroMaxEffortFallsBackToDefault )
 {
   initController();
   configureController();
@@ -594,7 +691,7 @@ TEST_F( MaxEffortGripperControllerTest, ZeroMaxEffortFallsBackToDefault )
 // calls so we can verify the full lifecycle is correct.
 // ============================================================================
 
-class MaxEffortGripperActionLifecycleTest : public MaxEffortGripperControllerTest
+class GripperPositionEffortLifecycleTest : public GripperPositionEffortControllerTest
 {
 protected:
   using ActionT = control_msgs::action::GripperCommand;
@@ -681,7 +778,7 @@ protected:
 
 // Bug 1 regression: a cancel arriving before the next update() must NOT be followed by
 // the goal still moving the gripper one cycle later.
-TEST_F( MaxEffortGripperActionLifecycleTest, CancelBeforeUpdateDoesNotMoveGripper )
+TEST_F( GripperPositionEffortLifecycleTest, CancelBeforeUpdateDoesNotMoveGripper )
 {
   initAndActivateWithActionServer();
 
@@ -708,7 +805,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, CancelBeforeUpdateDoesNotMoveGrippe
 // cancel_callback runs on a non-RT thread and synchronously flushes the realtime wrapper
 // before clearing the active goal, so gh.canceled() must have been called by the time
 // cancel_callback returns.
-TEST_F( MaxEffortGripperActionLifecycleTest, CancelDeliversCanceledToClient )
+TEST_F( GripperPositionEffortLifecycleTest, CancelDeliversCanceledToClient )
 {
   initAndActivateWithActionServer();
 
@@ -725,7 +822,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, CancelDeliversCanceledToClient )
 // terminal flag on the wrapper. The wall_timer must remain alive afterward so that its
 // next tick can flush gh.succeed() to the client. If the timer were reset prematurely,
 // the success notification would be lost.
-TEST_F( MaxEffortGripperActionLifecycleTest, ReachedGoalDeliversSucceedToClient )
+TEST_F( GripperPositionEffortLifecycleTest, ReachedGoalDeliversSucceedToClient )
 {
   initAndActivateWithActionServer();
 
@@ -749,7 +846,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, ReachedGoalDeliversSucceedToClient 
   // gh.succeed should have fired (verified by the EXPECT_CALL above).
 }
 
-TEST_F( MaxEffortGripperActionLifecycleTest, TopicPreemptionDeliversAbortToClient )
+TEST_F( GripperPositionEffortLifecycleTest, TopicPreemptionDeliversAbortToClient )
 {
   initAndActivateWithActionServer();
 
@@ -774,7 +871,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, TopicPreemptionDeliversAbortToClien
 // terminal state in the same update() cycle. We verify by having runNonRealtime() flush
 // the goal AFTER update(): publish_feedback should still never be called because update()
 // re-checks rt_active_goal_ before calling setFeedback.
-TEST_F( MaxEffortGripperActionLifecycleTest, NoFeedbackAfterReachedGoal )
+TEST_F( GripperPositionEffortLifecycleTest, NoFeedbackAfterReachedGoal )
 {
   initAndActivateWithActionServer();
 
@@ -797,7 +894,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NoFeedbackAfterReachedGoal )
 // flag must be flushed synchronously by accepted_callback before the timer is replaced.
 // Without flush_previous_goal_if_any(), replacing goal_handle_timer_ would destroy the
 // timer that was supposed to deliver the previous goal's terminal status.
-TEST_F( MaxEffortGripperActionLifecycleTest, AcceptingNewGoalFlushesPreviousTerminalState )
+TEST_F( GripperPositionEffortLifecycleTest, AcceptingNewGoalFlushesPreviousTerminalState )
 {
   initAndActivateWithActionServer();
 
@@ -825,7 +922,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, AcceptingNewGoalFlushesPreviousTerm
 // Review-high regression: a stale velocity command must NOT resume integrating after a
 // newer action or position command has won. Once a non-velocity source takes over, the
 // cached velocity buffer is invalidated.
-TEST_F( MaxEffortGripperControllerTest, StaleVelocityDoesNotResumeAfterPositionTopicWins )
+TEST_F( GripperPositionEffortControllerTest, StaleVelocityDoesNotResumeAfterPositionTopicWins )
 {
   initController();
   configureController();
@@ -854,7 +951,7 @@ TEST_F( MaxEffortGripperControllerTest, StaleVelocityDoesNotResumeAfterPositionT
   }
 }
 
-TEST_F( MaxEffortGripperControllerTest, StaleVelocityDoesNotResumeAfterActionWins )
+TEST_F( GripperPositionEffortControllerTest, StaleVelocityDoesNotResumeAfterActionWins )
 {
   initController();
   configureController();
@@ -889,7 +986,7 @@ TEST_F( MaxEffortGripperControllerTest, StaleVelocityDoesNotResumeAfterActionWin
 // here because ~RealtimeServerGoalHandle defensively calls gh_->abort() during test
 // teardown if the goal is still in is_executing() state — this happens in unit tests
 // because we never spin a real action server lifecycle to flip the state.)
-TEST_F( MaxEffortGripperActionLifecycleTest, NaNPositionTopicDoesNotPreemptActiveGoal )
+TEST_F( GripperPositionEffortLifecycleTest, NaNPositionTopicDoesNotPreemptActiveGoal )
 {
   initAndActivateWithActionServer();
 
@@ -915,7 +1012,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NaNPositionTopicDoesNotPreemptActiv
       << "NaN topic must not transition the goal to previous (= preempted) state";
 }
 
-TEST_F( MaxEffortGripperActionLifecycleTest, NaNVelocityTopicDoesNotPreemptActiveGoal )
+TEST_F( GripperPositionEffortLifecycleTest, NaNVelocityTopicDoesNotPreemptActiveGoal )
 {
   initAndActivateWithActionServer();
 
@@ -937,7 +1034,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NaNVelocityTopicDoesNotPreemptActiv
 // Bug 4 regression: goal_callback must REJECT non-finite goals up front so the action
 // client gets a clean rejection rather than an immediate abort, and so accepted_callback
 // is never invoked with invalid input.
-TEST_F( MaxEffortGripperActionLifecycleTest, NaNGoalIsRejectedAtGoalCallback )
+TEST_F( GripperPositionEffortLifecycleTest, NaNGoalIsRejectedAtGoalCallback )
 {
   initAndActivateWithActionServer();
 
@@ -966,7 +1063,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, NaNGoalIsRejectedAtGoalCallback )
 // though the next line replaces the timer. Bug 3 in the review: the previous flush used
 // to happen AFTER rt_active_goal_ was overwritten, allowing an interleaved RT cycle to
 // stash B's wrapper into previous_rt_goal_ and lose A's terminal state.
-TEST_F( MaxEffortGripperActionLifecycleTest, AcceptingTwoGoalsRapidlyDeliversBothTerminalStates )
+TEST_F( GripperPositionEffortLifecycleTest, AcceptingTwoGoalsRapidlyDeliversBothTerminalStates )
 {
   initAndActivateWithActionServer();
 
@@ -994,7 +1091,7 @@ TEST_F( MaxEffortGripperActionLifecycleTest, AcceptingTwoGoalsRapidlyDeliversBot
 }
 
 // Bug 4 regression: NaN on the position topic must not be written to hardware.
-TEST_F( MaxEffortGripperControllerTest, NaNPositionTopicIsRejected )
+TEST_F( GripperPositionEffortControllerTest, NaNPositionTopicIsRejected )
 {
   initController();
   configureController();
@@ -1010,7 +1107,7 @@ TEST_F( MaxEffortGripperControllerTest, NaNPositionTopicIsRejected )
   EXPECT_TRUE( std::isfinite( cmdPos() ) );
 }
 
-TEST_F( MaxEffortGripperControllerTest, NaNVelocityTopicIsRejected )
+TEST_F( GripperPositionEffortControllerTest, NaNVelocityTopicIsRejected )
 {
   initController();
   configureController();
@@ -1030,7 +1127,7 @@ TEST_F( MaxEffortGripperControllerTest, NaNVelocityTopicIsRejected )
 // update()'s internal source ordering. If two messages arrive between updates with the
 // position-topic arriving AFTER the action goal, the position topic must win even
 // though action is processed earlier in the dispatch switch.
-TEST_F( MaxEffortGripperControllerTest, LastWriterWinsAcrossSourcesByOrderOfArrival )
+TEST_F( GripperPositionEffortControllerTest, LastWriterWinsAcrossSourcesByOrderOfArrival )
 {
   initController();
   configureController();
@@ -1048,7 +1145,7 @@ TEST_F( MaxEffortGripperControllerTest, LastWriterWinsAcrossSourcesByOrderOfArri
   EXPECT_NEAR( cmdEffort(), 1.0, 1e-9 );
 }
 
-TEST_F( MaxEffortGripperControllerTest, LastWriterWinsActionAfterTopic )
+TEST_F( GripperPositionEffortControllerTest, LastWriterWinsActionAfterTopic )
 {
   initController();
   configureController();
@@ -1065,7 +1162,7 @@ TEST_F( MaxEffortGripperControllerTest, LastWriterWinsActionAfterTopic )
   EXPECT_NEAR( cmdEffort(), 2.5, 1e-9 );
 }
 
-TEST_F( MaxEffortGripperControllerTest, LastWriterWinsVelocityAfterAction )
+TEST_F( GripperPositionEffortControllerTest, LastWriterWinsVelocityAfterAction )
 {
   initController();
   configureController();

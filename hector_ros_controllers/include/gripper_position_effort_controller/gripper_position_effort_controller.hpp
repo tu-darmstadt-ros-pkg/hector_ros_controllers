@@ -1,5 +1,5 @@
-#ifndef MAX_EFFORT_GRIPPER_ACTION_CONTROLLER__MAX_EFFORT_GRIPPER_ACTION_CONTROLLER_HPP_
-#define MAX_EFFORT_GRIPPER_ACTION_CONTROLLER__MAX_EFFORT_GRIPPER_ACTION_CONTROLLER_HPP_
+#ifndef GRIPPER_POSITION_EFFORT_CONTROLLER__GRIPPER_POSITION_EFFORT_CONTROLLER_HPP_
+#define GRIPPER_POSITION_EFFORT_CONTROLLER__GRIPPER_POSITION_EFFORT_CONTROLLER_HPP_
 
 #include <atomic>
 #include <memory>
@@ -18,9 +18,9 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64.hpp"
 
-#include <hector_ros_controllers/max_effort_gripper_action_controller_parameters.hpp>
+#include <hector_ros_controllers/gripper_position_effort_controller_parameters.hpp>
 
-namespace max_effort_gripper_action_controller
+namespace gripper_position_effort_controller
 {
 
 /**
@@ -37,7 +37,7 @@ namespace max_effort_gripper_action_controller
  *
  * Publishes std_msgs/msg/Bool on ~/is_grasped at action_monitor_rate.
  */
-class MaxEffortGripperActionController : public controller_interface::ControllerInterface
+class GripperPositionEffortController : public controller_interface::ControllerInterface
 {
 public:
   using GripperCommandAction = control_msgs::action::GripperCommand;
@@ -50,8 +50,8 @@ public:
     double max_effort;
   };
 
-  MaxEffortGripperActionController();
-  ~MaxEffortGripperActionController() override = default;
+  GripperPositionEffortController();
+  ~GripperPositionEffortController() override = default;
 
   controller_interface::InterfaceConfiguration command_interface_configuration() const override;
   controller_interface::InterfaceConfiguration state_interface_configuration() const override;
@@ -161,6 +161,6 @@ private:
   realtime_tools::RealtimePublisherSharedPtr<std_msgs::msg::Bool> rt_is_grasped_pub_;
 };
 
-} // namespace max_effort_gripper_action_controller
+} // namespace gripper_position_effort_controller
 
-#endif // MAX_EFFORT_GRIPPER_ACTION_CONTROLLER__MAX_EFFORT_GRIPPER_ACTION_CONTROLLER_HPP_
+#endif // GRIPPER_POSITION_EFFORT_CONTROLLER__GRIPPER_POSITION_EFFORT_CONTROLLER_HPP_

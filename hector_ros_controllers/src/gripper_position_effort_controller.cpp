@@ -1,4 +1,4 @@
-#include "max_effort_gripper_action_controller/max_effort_gripper_action_controller.hpp"
+#include "gripper_position_effort_controller/gripper_position_effort_controller.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include "controller_interface/helpers.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -13,7 +14,7 @@
 #include "rclcpp/qos.hpp"
 #include "urdf_parser/urdf_parser.h"
 
-namespace max_effort_gripper_action_controller
+namespace gripper_position_effort_controller
 {
 
 namespace
@@ -28,7 +29,7 @@ double clamp_to_limits( double value, double lower, double upper )
 }
 } // namespace
 
-MaxEffortGripperActionController::MaxEffortGripperActionController()
+GripperPositionEffortController::GripperPositionEffortController()
     : controller_interface::ControllerInterface(),
       joint_lower_limit_( std::numeric_limits<double>::quiet_NaN() ),
       joint_upper_limit_( std::numeric_limits<double>::quiet_NaN() ), target_{ 0.0, 0.0 },
@@ -42,7 +43,7 @@ MaxEffortGripperActionController::MaxEffortGripperActionController()
 {
 }
 
-controller_interface::CallbackReturn MaxEffortGripperActionController::on_init()
+controller_interface::CallbackReturn GripperPositionEffortController::on_init()
 {
   try {
     param_listener_ = std::make_shared<ParamListener>( get_node() );
@@ -55,7 +56,7 @@ controller_interface::CallbackReturn MaxEffortGripperActionController::on_init()
 }
 
 controller_interface::CallbackReturn
-MaxEffortGripperActionController::on_configure( const rclcpp_lifecycle::State & )
+GripperPositionEffortController::on_configure( const rclcpp_lifecycle::State & )
 {
   params_ = param_listener_->get_params();
 
@@ -75,15 +76,15 @@ MaxEffortGripperActionController::on_configure( const rclcpp_lifecycle::State & 
   }
 
   RCLCPP_INFO( get_node()->get_logger(),
-               "Configured for joint '%s', default_max_effort=%.3f, max_effort_limit=%.3f, "
-               "action_monitor_rate=%.1f Hz",
-               params_.joint.c_str(), params_.default_max_effort, params_.max_effort_limit,
-               params_.action_monitor_rate );
+               "Configured for joint '%s', effort_command_interface='%s', default_max_effort=%.3f, "
+               "max_effort_limit=%.3f, action_monitor_rate=%.1f Hz",
+               params_.joint.c_str(), params_.effort_command_interface.c_str(),
+               params_.default_max_effort, params_.max_effort_limit, params_.action_monitor_rate );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-void MaxEffortGripperActionController::parse_joint_limits_from_urdf()
+void GripperPositionEffortController::parse_joint_limits_from_urdf()
 {
   joint_lower_limit_ = std::numeric_limits<double>::quiet_NaN();
   joint_upper_limit_ = std::numeric_limits<double>::quiet_NaN();
@@ -122,15 +123,19 @@ void MaxEffortGripperActionController::parse_joint_limits_from_urdf()
 }
 
 controller_interface::InterfaceConfiguration
-MaxEffortGripperActionController::command_interface_configuration() const
+GripperPositionEffortController::command_interface_configuration() const
 {
-  return { controller_interface::interface_configuration_type::INDIVIDUAL,
-           { params_.joint + "/" + hardware_interface::HW_IF_POSITION,
-             params_.joint + "/" + hardware_interface::HW_IF_EFFORT } };
+  std::vector<std::string> names;
+  names.reserve( 2 );
+  names.push_back( params_.joint + "/" + hardware_interface::HW_IF_POSITION );
+  if ( params_.effort_command_interface == "required" ) {
+    names.push_back( params_.joint + "/" + hardware_interface::HW_IF_EFFORT );
+  }
+  return { controller_interface::interface_configuration_type::INDIVIDUAL, std::move( names ) };
 }
 
 controller_interface::InterfaceConfiguration
-MaxEffortGripperActionController::state_interface_configuration() const
+GripperPositionEffortController::state_interface_configuration() const
 {
   return { controller_interface::interface_configuration_type::INDIVIDUAL,
            { params_.joint + "/" + hardware_interface::HW_IF_POSITION,
@@ -139,8 +144,10 @@ MaxEffortGripperActionController::state_interface_configuration() const
 }
 
 controller_interface::CallbackReturn
-MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
+GripperPositionEffortController::on_activate( const rclcpp_lifecycle::State & )
 {
+  const bool effort_required = ( params_.effort_command_interface == "required" );
+
   // Locate command interfaces
   auto pos_cmd_it =
       std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
@@ -148,17 +155,26 @@ MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
                       return ci.get_prefix_name() == params_.joint &&
                              ci.get_interface_name() == hardware_interface::HW_IF_POSITION;
                     } );
-  auto eff_cmd_it =
-      std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
-                    [this]( const hardware_interface::LoanedCommandInterface &ci ) {
-                      return ci.get_prefix_name() == params_.joint &&
-                             ci.get_interface_name() == hardware_interface::HW_IF_EFFORT;
-                    } );
-  if ( pos_cmd_it == command_interfaces_.end() || eff_cmd_it == command_interfaces_.end() ) {
-    RCLCPP_ERROR( get_node()->get_logger(),
-                  "Expected position and effort command interfaces for joint '%s'",
+  if ( pos_cmd_it == command_interfaces_.end() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Expected position command interface for joint '%s'",
                   params_.joint.c_str() );
     return controller_interface::CallbackReturn::ERROR;
+  }
+
+  auto eff_cmd_it = command_interfaces_.end();
+  if ( effort_required ) {
+    eff_cmd_it = std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
+                               [this]( const hardware_interface::LoanedCommandInterface &ci ) {
+                                 return ci.get_prefix_name() == params_.joint &&
+                                        ci.get_interface_name() == hardware_interface::HW_IF_EFFORT;
+                               } );
+    if ( eff_cmd_it == command_interfaces_.end() ) {
+      RCLCPP_ERROR( get_node()->get_logger(),
+                    "effort_command_interface='required' but no effort command interface was "
+                    "claimed for joint '%s'",
+                    params_.joint.c_str() );
+      return controller_interface::CallbackReturn::ERROR;
+    }
   }
 
   auto pos_state_it =
@@ -188,7 +204,11 @@ MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
   }
 
   position_command_interface_ = *pos_cmd_it;
-  effort_command_interface_ = *eff_cmd_it;
+  if ( effort_required ) {
+    effort_command_interface_ = *eff_cmd_it;
+  } else {
+    effort_command_interface_ = std::nullopt;
+  }
   position_state_interface_ = *pos_state_it;
   velocity_state_interface_ = *vel_state_it;
   effort_state_interface_ = *eff_state_it;
@@ -221,10 +241,10 @@ MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
   // Action server
   action_server_ = rclcpp_action::create_server<GripperCommandAction>(
       get_node(), "~/gripper_cmd",
-      std::bind( &MaxEffortGripperActionController::goal_callback, this, std::placeholders::_1,
+      std::bind( &GripperPositionEffortController::goal_callback, this, std::placeholders::_1,
                  std::placeholders::_2 ),
-      std::bind( &MaxEffortGripperActionController::cancel_callback, this, std::placeholders::_1 ),
-      std::bind( &MaxEffortGripperActionController::accepted_callback, this, std::placeholders::_1 ) );
+      std::bind( &GripperPositionEffortController::cancel_callback, this, std::placeholders::_1 ),
+      std::bind( &GripperPositionEffortController::accepted_callback, this, std::placeholders::_1 ) );
 
   // Topic subscribers
   auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
@@ -247,7 +267,7 @@ MaxEffortGripperActionController::on_activate( const rclcpp_lifecycle::State & )
 }
 
 controller_interface::CallbackReturn
-MaxEffortGripperActionController::on_deactivate( const rclcpp_lifecycle::State & )
+GripperPositionEffortController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   preempt_active_goal( "controller deactivated" );
   // Flush before tearing down the timer so the canceled status reaches the client.
@@ -266,7 +286,7 @@ MaxEffortGripperActionController::on_deactivate( const rclcpp_lifecycle::State &
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-rclcpp_action::GoalResponse MaxEffortGripperActionController::goal_callback(
+rclcpp_action::GoalResponse GripperPositionEffortController::goal_callback(
     const rclcpp_action::GoalUUID &, std::shared_ptr<const GripperCommandAction::Goal> goal )
 {
   if ( !std::isfinite( goal->command.position ) || !std::isfinite( goal->command.max_effort ) ) {
@@ -280,7 +300,7 @@ rclcpp_action::GoalResponse MaxEffortGripperActionController::goal_callback(
 }
 
 rclcpp_action::CancelResponse
-MaxEffortGripperActionController::cancel_callback( std::shared_ptr<GoalHandle> goal_handle )
+GripperPositionEffortController::cancel_callback( std::shared_ptr<GoalHandle> goal_handle )
 {
   const auto active_goal = load_goal_slot( rt_active_goal_ );
   if ( !active_goal || active_goal->gh_ != goal_handle ) {
@@ -298,7 +318,7 @@ MaxEffortGripperActionController::cancel_callback( std::shared_ptr<GoalHandle> g
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
-void MaxEffortGripperActionController::accepted_callback( std::shared_ptr<GoalHandle> goal_handle )
+void GripperPositionEffortController::accepted_callback( std::shared_ptr<GoalHandle> goal_handle )
 {
   // goal_callback already validated finiteness.
   preempt_active_goal( "superseded by new action goal" );
@@ -329,7 +349,7 @@ void MaxEffortGripperActionController::accepted_callback( std::shared_ptr<GoalHa
                                      std::bind( &RealtimeGoalHandle::runNonRealtime, rt_goal ) );
 }
 
-void MaxEffortGripperActionController::preempt_active_goal( const std::string &reason )
+void GripperPositionEffortController::preempt_active_goal( const std::string &reason )
 {
   // Callable from both non-RT and RT (topic-driven preemption in update()). Goal-slot
   // access is lock-free; the formatting/allocation here are not hard-RT but match the
@@ -347,14 +367,14 @@ void MaxEffortGripperActionController::preempt_active_goal( const std::string &r
   }
 }
 
-void MaxEffortGripperActionController::clear_active_goal()
+void GripperPositionEffortController::clear_active_goal()
 {
   // Park the active goal in previous_rt_goal_ so its bound wall_timer can still flush
   // the terminal flag. The timer is reset only in accepted_callback / on_deactivate.
   store_goal_slot( previous_rt_goal_, exchange_goal_slot( rt_active_goal_, nullptr ) );
 }
 
-void MaxEffortGripperActionController::flush_previous_goal_if_any()
+void GripperPositionEffortController::flush_previous_goal_if_any()
 {
   auto handle = exchange_goal_slot( previous_rt_goal_, nullptr );
   if ( handle ) {
@@ -362,33 +382,33 @@ void MaxEffortGripperActionController::flush_previous_goal_if_any()
   }
 }
 
-void MaxEffortGripperActionController::store_goal_slot( RealtimeGoalHandlePtr &slot,
-                                                        RealtimeGoalHandlePtr handle )
+void GripperPositionEffortController::store_goal_slot( RealtimeGoalHandlePtr &slot,
+                                                       RealtimeGoalHandlePtr handle )
 {
   std::atomic_store( &slot, std::move( handle ) );
 }
 
-MaxEffortGripperActionController::RealtimeGoalHandlePtr
-MaxEffortGripperActionController::load_goal_slot( const RealtimeGoalHandlePtr &slot )
+GripperPositionEffortController::RealtimeGoalHandlePtr
+GripperPositionEffortController::load_goal_slot( const RealtimeGoalHandlePtr &slot )
 {
   return std::atomic_load( &slot );
 }
 
-MaxEffortGripperActionController::RealtimeGoalHandlePtr
-MaxEffortGripperActionController::exchange_goal_slot( RealtimeGoalHandlePtr &slot,
-                                                      RealtimeGoalHandlePtr handle )
+GripperPositionEffortController::RealtimeGoalHandlePtr
+GripperPositionEffortController::exchange_goal_slot( RealtimeGoalHandlePtr &slot,
+                                                     RealtimeGoalHandlePtr handle )
 {
   return std::atomic_exchange( &slot, std::move( handle ) );
 }
 
-void MaxEffortGripperActionController::clear_pending_action_command()
+void GripperPositionEffortController::clear_pending_action_command()
 {
   // One-cycle race: if update() already snapshotted action_cmd_seq_, it may apply the
   // command once before observing the zero. Accepted; cancel still completes terminally.
   action_cmd_seq_.store( 0 );
 }
 
-void MaxEffortGripperActionController::set_hold_position()
+void GripperPositionEffortController::set_hold_position()
 {
   if ( position_state_interface_ ) {
     target_.position = position_state_interface_->get().get_optional().value_or( target_.position );
@@ -397,10 +417,10 @@ void MaxEffortGripperActionController::set_hold_position()
 }
 
 controller_interface::return_type
-MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp::Duration &period )
+GripperPositionEffortController::update( const rclcpp::Time &time, const rclcpp::Duration &period )
 {
-  if ( !position_command_interface_ || !effort_command_interface_ || !position_state_interface_ ||
-       !velocity_state_interface_ || !effort_state_interface_ ) {
+  if ( !position_command_interface_ || !position_state_interface_ || !velocity_state_interface_ ||
+       !effort_state_interface_ ) {
     return controller_interface::return_type::ERROR;
   }
 
@@ -516,7 +536,9 @@ MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp
       effort_to_write = params_.max_effort_limit;
     }
     std::ignore = position_command_interface_->get().set_value( target_.position );
-    std::ignore = effort_command_interface_->get().set_value( effort_to_write );
+    if ( effort_command_interface_ ) {
+      std::ignore = effort_command_interface_->get().set_value( effort_to_write );
+    }
   }
 
   // ----- Action goal monitoring -----
@@ -563,7 +585,7 @@ MaxEffortGripperActionController::update( const rclcpp::Time &time, const rclcpp
   return controller_interface::return_type::OK;
 }
 
-bool MaxEffortGripperActionController::continue_velocity_integration_if_within_watchdog(
+bool GripperPositionEffortController::continue_velocity_integration_if_within_watchdog(
     const rclcpp::Time &time, const rclcpp::Duration &period )
 {
   if ( !velocity_cached_valid_ )
@@ -591,11 +613,11 @@ bool MaxEffortGripperActionController::continue_velocity_integration_if_within_w
   return true;
 }
 
-void MaxEffortGripperActionController::check_for_success( const rclcpp::Time &time,
-                                                          double error_position,
-                                                          double current_position,
-                                                          double current_velocity,
-                                                          double current_effort )
+void GripperPositionEffortController::check_for_success( const rclcpp::Time &time,
+                                                         double error_position,
+                                                         double current_position,
+                                                         double current_velocity,
+                                                         double current_effort )
 {
   const auto active_goal = load_goal_slot( rt_active_goal_ );
   if ( !active_goal )
@@ -630,8 +652,8 @@ void MaxEffortGripperActionController::check_for_success( const rclcpp::Time &ti
   }
 }
 
-} // namespace max_effort_gripper_action_controller
+} // namespace gripper_position_effort_controller
 
 #include "pluginlib/class_list_macros.hpp"
-PLUGINLIB_EXPORT_CLASS( max_effort_gripper_action_controller::MaxEffortGripperActionController,
+PLUGINLIB_EXPORT_CLASS( gripper_position_effort_controller::GripperPositionEffortController,
                         controller_interface::ControllerInterface )

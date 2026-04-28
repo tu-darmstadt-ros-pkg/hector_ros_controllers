@@ -61,8 +61,8 @@ generate_parameter_library(safety_position_controller_parameters
                            params/safety_position_controller_parameters.yaml)
 
 generate_parameter_library(
-  max_effort_gripper_action_controller_parameters
-  params/max_effort_gripper_action_controller_parameters.yaml)
+  gripper_position_effort_controller_parameters
+  params/gripper_position_effort_controller_parameters.yaml)
 # Add controllers here Define Controllers as Shared Libraries
 
 add_library(
@@ -72,7 +72,7 @@ add_library(
   src/sync_group_velocity_to_position_controller_actions.cpp
   src/self_collision_avoidance_controller.cpp
   src/safety_position_controller.cpp
-  src/max_effort_gripper_action_controller.cpp
+  src/gripper_position_effort_controller.cpp
   src/collision_checker.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
@@ -90,7 +90,7 @@ target_link_libraries(
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
          safety_position_controller_parameters
-         max_effort_gripper_action_controller_parameters)
+         gripper_position_effort_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -107,7 +107,7 @@ install(
           self_collision_avoidance_controller_parameters
           safety_forward_controller_parameters
           safety_position_controller_parameters
-          max_effort_gripper_action_controller_parameters
+          gripper_position_effort_controller_parameters
   EXPORT export_hector_ros_controllers
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
@@ -151,7 +151,7 @@ if(BUILD_TESTING)
     self_collision_avoidance_controller_parameters
     safety_forward_controller_parameters
     safety_position_controller_parameters
-    max_effort_gripper_action_controller_parameters)
+    gripper_position_effort_controller_parameters)
 
   ament_add_gmock(test_collision_checker test/test_collision_checker.cpp)
   target_include_directories(
@@ -195,8 +195,6 @@ if(BUILD_TESTING)
     target_compile_definitions(benchmark_collision_checker PRIVATE ${DEFS})
   endif()
 
-  ament_add_gmock(test_velocity_to_position_command_controller
-                  test/test_velocity_to_position_command_controller.cpp)
   ament_add_gmock(test_sync_group_velocity_to_position_controller
                   test/test_sync_group_velocity_to_position_controller.cpp)
   target_include_directories(
@@ -208,15 +206,15 @@ if(BUILD_TESTING)
   target_compile_definitions(test_sync_group_velocity_to_position_controller
                              PRIVATE ${DEFS})
 
-  ament_add_gmock(test_max_effort_gripper_action_controller
-                  test/test_max_effort_gripper_action_controller.cpp)
+  ament_add_gmock(test_gripper_position_effort_controller
+                  test/test_gripper_position_effort_controller.cpp)
   target_include_directories(
-    test_max_effort_gripper_action_controller
+    test_gripper_position_effort_controller
     PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/test)
   target_link_libraries(
-    test_max_effort_gripper_action_controller
+    test_gripper_position_effort_controller
     ${PROJECT_NAME}::controllers_test_doubles ament_index_cpp::ament_index_cpp)
-  target_compile_definitions(test_max_effort_gripper_action_controller
+  target_compile_definitions(test_gripper_position_effort_controller
                              PRIVATE ${DEFS})
   ament_add_gmock(
     test_sync_group_velocity_to_position_controller_actions

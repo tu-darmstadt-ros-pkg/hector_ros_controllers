@@ -367,7 +367,7 @@ Enabled if `publish_debug_joint_states = true`:
 
 ---
 
-## 5. Max-Effort Gripper Action Controller
+## 5. Gripper Position-Effort Controller
 
 A single-joint gripper controller that **simultaneously commands position and a max-effort (current/torque) limit**.
 Designed for Dynamixel actuators in *current-based position control* mode, where writing the effort/current command
@@ -406,20 +406,23 @@ other tooling, and additionally accepts goals via two topics for teleop / script
 
 The configured joint must expose:
 
-| Interface kind | Names                |
-|----------------|----------------------|
-| Command        | `position`, `effort` |
-| State          | `position`, `velocity`, `effort` |
+| Interface kind | Names                                         |
+|----------------|-----------------------------------------------|
+| Command        | `position`, `effort` (the latter only when `effort_command_interface: required`) |
+| State          | `position`, `velocity`, `effort`              |
 
-If the effort *state* interface is not exposed, activation fails with a clear error. For `dynamixel_ros_control`,
+If a required interface is not exposed, activation fails with a clear error. For `dynamixel_ros_control`,
 make sure the joint's `command_interfaces` include both `position` and `current` (mapped to `effort`) and the
-`state_interfaces` include `position`, `velocity`, and `current`/`effort`.
+`state_interfaces` include `position`, `velocity`, and `current`/`effort`. In simulation environments where
+no effort command interface is exposed, set `effort_command_interface: disabled`; the controller then runs
+in position-only mode while still publishing `is_grasped` from the effort *state*.
 
 ### Parameters
 
 | Name                            | Type     | Default | Description                                                                                                                  |
 |---------------------------------|----------|---------|------------------------------------------------------------------------------------------------------------------------------|
 | **joint**                       | `string` | `""`    | Joint to control. Must expose the interfaces above.                                                                          |
+| **effort_command_interface**    | `string` | `"required"` | `"required"`: claim and write the effort command interface (real Dynamixel hardware). `"disabled"`: position-only mode, no effort claim (simulation). |
 | **action_monitor_rate**         | `double` | `20.0`  | Rate (Hz) at which action goal status is monitored and `is_grasped` is published.                                            |
 | **goal_tolerance**              | `double` | `0.01`  | Position error below which an action goal is considered reached.                                                             |
 | **default_max_effort**          | `double` | `0.0`   | Effort written to the joint's effort command interface for topic goals and for action goals with `max_effort == 0`.          |
@@ -449,7 +452,7 @@ controller_manager:
     update_rate: 100
 
     gripper_controller:
-      type: max_effort_gripper_action_controller/MaxEffortGripperActionController
+      type: gripper_position_effort_controller/GripperPositionEffortController
 
 gripper_controller:
   ros__parameters:
