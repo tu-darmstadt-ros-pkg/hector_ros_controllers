@@ -76,10 +76,11 @@ GripperPositionEffortController::on_configure( const rclcpp_lifecycle::State & )
   }
 
   RCLCPP_INFO( get_node()->get_logger(),
-               "Configured for joint '%s', effort_command_interface='%s', default_max_effort=%.3f, "
-               "max_effort_limit=%.3f, action_monitor_rate=%.1f Hz",
+               "Configured for joint '%s', effort_command_interface='%s' (name='%s'), "
+               "default_max_effort=%.3f, max_effort_limit=%.3f, action_monitor_rate=%.1f Hz",
                params_.joint.c_str(), params_.effort_command_interface.c_str(),
-               params_.default_max_effort, params_.max_effort_limit, params_.action_monitor_rate );
+               params_.effort_command_interface_name.c_str(), params_.default_max_effort,
+               params_.max_effort_limit, params_.action_monitor_rate );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -129,7 +130,7 @@ GripperPositionEffortController::command_interface_configuration() const
   names.reserve( 2 );
   names.push_back( params_.joint + "/" + hardware_interface::HW_IF_POSITION );
   if ( params_.effort_command_interface == "required" ) {
-    names.push_back( params_.joint + "/" + hardware_interface::HW_IF_EFFORT );
+    names.push_back( params_.joint + "/" + params_.effort_command_interface_name );
   }
   return { controller_interface::interface_configuration_type::INDIVIDUAL, std::move( names ) };
 }
@@ -163,16 +164,17 @@ GripperPositionEffortController::on_activate( const rclcpp_lifecycle::State & )
 
   auto eff_cmd_it = command_interfaces_.end();
   if ( effort_required ) {
-    eff_cmd_it = std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
-                               [this]( const hardware_interface::LoanedCommandInterface &ci ) {
-                                 return ci.get_prefix_name() == params_.joint &&
-                                        ci.get_interface_name() == hardware_interface::HW_IF_EFFORT;
-                               } );
+    eff_cmd_it =
+        std::find_if( command_interfaces_.begin(), command_interfaces_.end(),
+                      [this]( const hardware_interface::LoanedCommandInterface &ci ) {
+                        return ci.get_prefix_name() == params_.joint &&
+                               ci.get_interface_name() == params_.effort_command_interface_name;
+                      } );
     if ( eff_cmd_it == command_interfaces_.end() ) {
       RCLCPP_ERROR( get_node()->get_logger(),
-                    "effort_command_interface='required' but no effort command interface was "
+                    "effort_command_interface='required' but no '%s' command interface was "
                     "claimed for joint '%s'",
-                    params_.joint.c_str() );
+                    params_.effort_command_interface_name.c_str(), params_.joint.c_str() );
       return controller_interface::CallbackReturn::ERROR;
     }
   }
