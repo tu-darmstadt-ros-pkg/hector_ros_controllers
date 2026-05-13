@@ -23,4 +23,13 @@
             A chainable position controller ensuring that revolute joints are unwrapped and joint limits are satisfied.
         </description>
   </class>
+  <class name="gripper_position_effort_controller/GripperPositionEffortController" type="gripper_position_effort_controller::GripperPositionEffortController" base_class_type="controller_interface::ControllerInterface">
+    <description>
+            Gripper controller that simultaneously commands position and a max-effort (current/torque limit)
+            on a single joint. Implements control_msgs/action/GripperCommand and additionally accepts position and
+            velocity goals via topics. Publishes is_grasped (std_msgs/Bool) at action_monitor_rate. Designed for
+            Dynamixel actuators in current-based position control mode; the effort command interface can be
+            disabled via the effort_command_interface parameter for position-only setups (e.g. simulation).
+        </description>
+  </class>
 </library>
