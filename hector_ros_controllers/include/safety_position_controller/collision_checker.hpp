@@ -124,6 +124,13 @@ public:
   std::size_t getNumCollisionPairs() const;
 
   /**
+   * @brief Get the geometry-object names making up a collision pair.
+   * @param pair_index index into geom_model_.collisionPairs
+   * @return {first_name, second_name}; empty strings if pair_index is out of range
+   */
+  std::pair<std::string, std::string> getPairNames( std::size_t pair_index ) const;
+
+  /**
    * @brief Set collision padding [m].
    * @param collision_padding new threshold
    */

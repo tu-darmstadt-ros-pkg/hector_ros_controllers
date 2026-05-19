@@ -692,6 +692,14 @@ std::size_t CollisionChecker::getNumCollisionPairs() const
   return geom_model_.collisionPairs.size();
 }
 
+std::pair<std::string, std::string> CollisionChecker::getPairNames( std::size_t pair_index ) const
+{
+  if ( pair_index >= geom_model_.collisionPairs.size() )
+    return { "", "" };
+  const auto &cp = geom_model_.collisionPairs[pair_index];
+  return { geom_model_.geometryObjects[cp.first].name, geom_model_.geometryObjects[cp.second].name };
+}
+
 void CollisionChecker::setDirectionalInfo( const std::vector<double> &derivatives,
                                            double safety_zone_threshold )
 {
