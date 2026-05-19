@@ -198,6 +198,18 @@ private:
    */
   double compute_directional_derivative( const Eigen::VectorXd &gradient ) const;
 
+  /**
+   * @brief Format collision-pair info for log warnings: "'a' <-> 'b': 0.0123 m, 'c' <-> 'd': -0.0050 m".
+   * Filters @p pairs to those with distance <= max_distance. If the filtered list is empty, falls
+   * back to the single closest pair identified by @p fallback_pair_index (or "unknown" if invalid).
+   * @param pairs candidate safety-zone pairs (typically from CollisionResult::safety_zone_pairs)
+   * @param max_distance upper distance bound for inclusion (e.g. collision_padding or safety_zone)
+   * @param fallback_pair_index pair index to use when @p pairs is empty
+   * @return human-readable, comma-separated description
+   */
+  std::string format_collision_pairs( const std::vector<CollisionResult::PairInfo> &pairs,
+                                      double max_distance, std::size_t fallback_pair_index ) const;
+
   void publish_debug_joint_state_in();
   void publish_debug_joint_state_out( const std::vector<double> &positions );
   void update_debug_publishers( bool enable );
@@ -252,7 +264,9 @@ private:
   std::atomic<bool> srdf_received_{ false };             ///< latched SRDF received
   double last_min_distance_{
       std::numeric_limits<double>::max() }; ///< previous cycle's min collision distance
-  double last_manipulability_{ 0.0 };       ///< latest Yoshikawa manipulability index
+  std::size_t last_min_distance_pair_index_{
+      std::numeric_limits<std::size_t>::max() }; ///< previous cycle's closest collision pair
+  double last_manipulability_{ 0.0 };            ///< latest Yoshikawa manipulability index
 
   // ---- Directional collision scaling ----
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index

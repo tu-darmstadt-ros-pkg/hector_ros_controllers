@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
@@ -500,6 +502,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       collision_checker_->setSafetyZoneThreshold( gradient_threshold );
       const auto cc_result = collision_checker_->checkCollision( cc_positions_ );
       last_min_distance_ = cc_result.min_distance;
+      last_min_distance_pair_index_ = cc_result.min_distance_pair_index;
       last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
 
       // Provide directional derivative info to collision checker for visualization
@@ -517,10 +520,14 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       if ( !cc_result.in_collision ) {
         write_position_commands( cmd_positions_ );
       } else {
+        const std::string pairs_str =
+            format_collision_pairs( cc_result.safety_zone_pairs, params_.collision_padding,
+                                    cc_result.min_distance_pair_index );
         RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                               throttle_logging_msg,
-                              "Collision detected (min_dist=%.4f)! Holding current positions.",
-                              cc_result.min_distance );
+                              "Collision detected (min_dist=%.4f m). Pairs in collision: %s. "
+                              "Holding current positions.",
+                              cc_result.min_distance, pairs_str.c_str() );
         write_position_commands( current_positions_ );
       }
     } else {
@@ -609,6 +616,20 @@ void SafetyPositionController::apply_velocity_limits( const double distance_scal
 {
   // distance_scale: 1.0 → full speed, 0.0 → stop; can be used to smoothly reduce speed when close to collisions
   const double clamped_scale = std::clamp( distance_scale, 0.0, 1.0 );
+  const bool fully_stopped = ( clamped_scale <= 0.0 );
+
+  // When scaling fully stops motion (proximity to collision), emit a single
+  // informative warning listing the safety-zone pairs instead of one per joint.
+  if ( fully_stopped && collision_checker_ ) {
+    const std::string pairs_str = format_collision_pairs(
+        last_safety_zone_pairs_, params_.collision_safety_zone, last_min_distance_pair_index_ );
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                          "Motion stopped: min_dist=%.4f m within safety zone "
+                          "(padding=%.4f, zone=%.4f). Pairs: %s. Holding positions.",
+                          last_min_distance_, params_.collision_padding,
+                          params_.collision_safety_zone, pairs_str.c_str() );
+  }
+
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( !std::isnan( velocity_limits_[i] ) ) {
       // shortest signed distance from current -> command
@@ -617,17 +638,16 @@ void SafetyPositionController::apply_velocity_limits( const double distance_scal
                               : ( cmd_positions_[i] - current_positions_[i] );
       const double max_step = max_allowed_distance_per_cycle_[i] * clamped_scale;
 
-      // RCLCPP_INFO( get_node()->get_logger(),
-      //             "Joint '%s': distance=%.4f, max_step=%.4f, scale=%.3f",
-      //             params_.joints[i].c_str(), diff, max_step, clamped_scale );
-
       if ( std::abs( diff ) > max_step ) {
-        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                              throttle_logging_msg,
-                              "Joint '%s' step limited (|diff|=%.4f > allowed=%.4f, "
-                              "dist_scale=%.3f). [current=%.3f, cmd=%.3f]",
-                              params_.joints[i].c_str(), std::abs( diff ), max_step, clamped_scale,
-                              current_positions_[i], cmd_positions_[i] );
+        // Skip the per-joint warning when motion is fully stopped (already logged above).
+        if ( !fully_stopped ) {
+          RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                                throttle_logging_msg,
+                                "Joint '%s' step limited (|diff|=%.4f > allowed=%.4f, "
+                                "dist_scale=%.3f). [current=%.3f, cmd=%.3f]",
+                                params_.joints[i].c_str(), std::abs( diff ), max_step,
+                                clamped_scale, current_positions_[i], cmd_positions_[i] );
+        }
 
         if ( max_step <= 0.0 ) {
           cmd_positions_[i] = current_positions_[i]; // zero speed = hold
@@ -657,6 +677,39 @@ double SafetyPositionController::compute_directional_derivative( const Eigen::Ve
     dot_product += gradient[joint_v_index_[i]] * delta_q_i;
   }
   return dot_product;
+}
+
+std::string SafetyPositionController::format_collision_pairs(
+    const std::vector<CollisionResult::PairInfo> &pairs, const double max_distance,
+    const std::size_t fallback_pair_index ) const
+{
+  if ( !collision_checker_ )
+    return "unknown";
+
+  std::ostringstream oss;
+  bool first = true;
+  for ( const auto &pi : pairs ) {
+    if ( pi.distance > max_distance )
+      continue;
+    const auto [name_a, name_b] = collision_checker_->getPairNames( pi.pair_index );
+    if ( name_a.empty() || name_b.empty() )
+      continue;
+    if ( !first )
+      oss << ", ";
+    oss << "'" << name_a << "' <-> '" << name_b << "': " << std::fixed << std::setprecision( 4 )
+        << pi.distance << " m";
+    first = false;
+  }
+  if ( !first )
+    return oss.str();
+
+  // Fallback: no per-pair list available (e.g. directional scaling off → empty safety_zone_pairs).
+  const auto [name_a, name_b] = collision_checker_->getPairNames( fallback_pair_index );
+  if ( name_a.empty() || name_b.empty() )
+    return "unknown";
+  std::ostringstream fallback;
+  fallback << "'" << name_a << "' <-> '" << name_b << "'";
+  return fallback.str();
 }
 
 bool SafetyPositionController::write_current_limits()
