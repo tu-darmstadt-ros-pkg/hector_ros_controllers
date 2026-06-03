@@ -32,4 +32,9 @@
             disabled via the effort_command_interface parameter for position-only setups (e.g. simulation).
         </description>
   </class>
+  <class name="input_shaping_controller/InputShapingController" type="input_shaping_controller::InputShapingController" base_class_type="controller_interface::ChainableControllerInterface">
+    <description>
+            A chainable controller that applies input shaping to reduce vibrations and improve tracking performance.
+        </description>
+  </class>
 </library>

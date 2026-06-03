@@ -1,0 +1,7 @@
+input_shaping_controller:
+  enabled: {type: bool, default_value: true, description: "Whether to apply input shaping. If false, passes input through."}
+  joints: {type: string_array, default_value: [], description: Name of the joints to control}
+
+  shaper_type: {type: string_array, default_value: [], description: "Type of shaper for each joint (none, zv, zvd)"}
+  shaping_frequency: {type: double_array, default_value: [], description: "Natural frequency for shaping for each joint"}
+  shaping_damping_ratio: {type: double_array, default_value: [], description: "Damping ratio for shaping for each joint"}
