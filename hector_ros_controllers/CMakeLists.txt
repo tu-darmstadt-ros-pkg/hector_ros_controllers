@@ -26,7 +26,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     hardware_interface
     hector_ros_controllers_msgs
     pluginlib
-    hpp-fcl
+    coal
     pinocchio
     rclcpp
     rclcpp_action
@@ -83,8 +83,7 @@ target_include_directories(
 
 target_link_libraries(
   controllers
-  PUBLIC fcl
-         hpp-fcl::hpp-fcl
+  PUBLIC coal::coal
          pinocchio::pinocchio
          sync_group_velocity_to_position_controller_parameters
          self_collision_avoidance_controller_parameters
@@ -143,8 +142,7 @@ if(BUILD_TESTING)
     realtime_tools::realtime_tools
     pluginlib::pluginlib
     ${srdfdom_TARGETS}
-    fcl
-    hpp-fcl::hpp-fcl
+    coal::coal
     pinocchio::pinocchio
     ad_kinematics::ad_kinematics
     sync_group_velocity_to_position_controller_parameters

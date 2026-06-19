@@ -14,18 +14,18 @@
 
 #include "pinocchio/collision/distance.hpp"
 #include <cmath>
-#include <hpp/fcl/collision_data.h>
-#include <hpp/fcl/distance.h>
+#include <coal/collision_data.h>
+#include <coal/distance.h>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/fcl.hpp>
 #include <pinocchio/multibody/model.hpp>
 
 namespace
 {
-/// Custom hpp-fcl broadphase distance callback that collects all safety-zone pairs
+/// Custom coal broadphase distance callback that collects all safety-zone pairs
 /// and tracks the global minimum distance. Follows the same pattern as
 /// pinocchio::CollisionCallBackDefault (broadphase-callbacks.hpp:90-96).
-struct SafetyZoneDistanceCallback : hpp::fcl::DistanceCallBackBase {
+struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
   // Inputs (set before each broadphase scan)
   const pinocchio::GeometryModel *geom_model_ptr{ nullptr };
   pinocchio::GeometryData *geom_data_ptr{ nullptr };
@@ -44,8 +44,7 @@ struct SafetyZoneDistanceCallback : hpp::fcl::DistanceCallBackBase {
     safety_zone_indices.clear();
   }
 
-  bool distance( hpp::fcl::CollisionObject *o1, hpp::fcl::CollisionObject *o2,
-                 hpp::fcl::FCL_REAL &dist ) override
+  bool distance( coal::CollisionObject *o1, coal::CollisionObject *o2, coal::CoalScalar &dist ) override
   {
     // Cast to pinocchio::CollisionObject to get geometry indices
     // (safe: pinocchio creates these objects in BroadPhaseManagerTpl::init)
@@ -70,13 +69,13 @@ struct SafetyZoneDistanceCallback : hpp::fcl::DistanceCallBackBase {
     if ( !geom_data_ptr->activeCollisionPairs[k] )
       return false;
 
-    // Run narrow-phase distance via hpp-fcl
+    // Run narrow-phase distance via coal
     auto &dreq = geom_data_ptr->distanceRequests[k];
     auto &dres = geom_data_ptr->distanceResults[k];
     dreq.enable_nearest_points = compute_nearest_points;
     dres.clear();
 
-    hpp::fcl::distance( o1, o2, dreq, dres );
+    coal::distance( o1, o2, dreq, dres );
     const double d = dres.min_distance;
 
     // Update outputs
@@ -753,7 +752,7 @@ void CollisionChecker::publishMarkers() const
     m.pose.orientation.z = q.z();
     m.pose.orientation.w = q.w();
 
-    using namespace hpp::fcl;
+    using namespace coal;
     const auto *s = go.geometry.get();
     if ( auto sp = dynamic_cast<const Sphere *>( s ) ) {
       m.type = visualization_msgs::msg::Marker::SPHERE;
@@ -802,13 +801,13 @@ void CollisionChecker::publishMarkers() const
   }
 
   // Helper to check if nearest points are valid
-  auto valid_nearest_points = []( const hpp::fcl::DistanceResult &dres ) -> bool {
+  auto valid_nearest_points = []( const coal::DistanceResult &dres ) -> bool {
     return !dres.nearest_points[0].hasNaN() && !dres.nearest_points[1].hasNaN() &&
            dres.nearest_points[0].allFinite() && dres.nearest_points[1].allFinite();
   };
 
   // Helper to create a line marker between nearest points of a pair
-  auto make_line_points = []( const hpp::fcl::DistanceResult &dres )
+  auto make_line_points = []( const coal::DistanceResult &dres )
       -> std::pair<geometry_msgs::msg::Point, geometry_msgs::msg::Point> {
     geometry_msgs::msg::Point pA, pB;
     pA.x = dres.nearest_points[0][0];

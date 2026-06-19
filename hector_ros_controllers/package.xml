@@ -13,13 +13,12 @@
 
   <depend>ad_kinematics</depend>
   <depend>backward_ros</depend>
+  <depend>coal</depend>
   <depend>control_msgs</depend>
   <depend>controller_interface</depend>
   <depend>generate_parameter_library</depend>
   <depend>hardware_interface</depend>
   <depend>hector_ros_controllers_msgs</depend>
-  <depend>hpp-fcl</depend>
-  <depend>libfcl-dev</depend>
   <depend>pinocchio</depend>
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>

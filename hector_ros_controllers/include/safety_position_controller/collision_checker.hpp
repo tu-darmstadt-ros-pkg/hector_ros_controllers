@@ -17,8 +17,8 @@
 #include <pinocchio/collision/broadphase-manager.hpp>
 
 #include <Eigen/Core>
-#include <hpp/fcl/broadphase/broadphase_dynamic_AABB_tree.h>
-#include <hpp/fcl/collision.h>
+#include <coal/broadphase/broadphase_dynamic_AABB_tree.h>
+#include <coal/collision.h>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -42,7 +42,7 @@ struct CollisionResult {
   std::vector<PairInfo> safety_zone_pairs; ///< pairs with distance < safety_zone_threshold
 };
 
-/// Self-collision checker using Pinocchio + hpp-fcl; optional RViz debug markers.
+/// Self-collision checker using Pinocchio + coal; optional RViz debug markers.
 class CollisionChecker
 {
 public:
@@ -240,8 +240,7 @@ private:
 
   // Broadphase acceleration
   bool use_broadphase_{ true };
-  using BroadPhaseManager =
-      pinocchio::BroadPhaseManagerTpl<hpp::fcl::DynamicAABBTreeCollisionManager>;
+  using BroadPhaseManager = pinocchio::BroadPhaseManagerTpl<coal::DynamicAABBTreeCollisionManager>;
   std::unique_ptr<BroadPhaseManager> broadphase_manager_;
 
 #ifdef SAFETY_CC_ENABLE_TIMING
