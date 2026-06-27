@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <set>
 
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
@@ -275,6 +276,17 @@ private:
   double last_distance_scale_{ 1.0 };
   double last_effective_scale_{ 1.0 };
   double last_worst_directional_derivative_{ std::numeric_limits<double>::quiet_NaN() };
+
+  // ---- Edge-triggered collision logging ----
+  /// Pair indices that were in collision last time we logged. We warn only when this set changes
+  /// to a (different) non-empty set, so a steady collision (e.g. arm resting on the body while
+  /// driving) is logged once instead of every throttle interval. Cleared silently when collisions
+  /// resolve.
+  std::set<std::size_t> logged_collision_pairs_;
+  /// Safety-zone pair indices reported in the last "Motion stopped" warning. Same edge-trigger
+  /// idea as logged_collision_pairs_ but for the proximity full-stop in apply_velocity_limits().
+  /// Cleared silently when motion is no longer fully stopped.
+  std::set<std::size_t> logged_motion_stopped_pairs_;
 
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> cmd_positions_;     ///< post-enforcement commands

@@ -215,6 +215,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   }
   last_min_distance_ = std::numeric_limits<double>::max();
   last_safety_zone_pairs_.clear();
+  logged_collision_pairs_.clear();
+  logged_motion_stopped_pairs_.clear();
   last_distance_scale_ = 1.0;
   last_effective_scale_ = 1.0;
   last_worst_directional_derivative_ = std::numeric_limits<double>::quiet_NaN();
@@ -518,16 +520,33 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       }
 
       if ( !cc_result.in_collision ) {
+        logged_collision_pairs_.clear(); // collisions resolved → reset silently
         write_position_commands( cmd_positions_ );
       } else {
-        const std::string pairs_str =
-            format_collision_pairs( cc_result.safety_zone_pairs, params_.collision_padding,
-                                    cc_result.min_distance_pair_index );
-        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                              throttle_logging_msg,
-                              "Collision detected (min_dist=%.4f m). Pairs in collision: %s. "
-                              "Holding current positions.",
-                              cc_result.min_distance, pairs_str.c_str() );
+        // Build the set of pairs currently in collision (distance <= padding). Fall back to the
+        // single closest pair when no per-pair list is available (directional scaling off).
+        std::set<std::size_t> current_pairs;
+        for ( const auto &pi : cc_result.safety_zone_pairs ) {
+          if ( pi.distance <= params_.collision_padding ) {
+            current_pairs.insert( pi.pair_index );
+          }
+        }
+        if ( current_pairs.empty() &&
+             cc_result.min_distance_pair_index != std::numeric_limits<std::size_t>::max() ) {
+          current_pairs.insert( cc_result.min_distance_pair_index );
+        }
+
+        // Edge-triggered: warn only when the set of colliding pairs changes.
+        if ( current_pairs != logged_collision_pairs_ ) {
+          const std::string pairs_str =
+              format_collision_pairs( cc_result.safety_zone_pairs, params_.collision_padding,
+                                      cc_result.min_distance_pair_index );
+          RCLCPP_WARN( get_node()->get_logger(),
+                       "Collision detected (min_dist=%.4f m). Pairs in collision: %s. "
+                       "Holding current positions.",
+                       cc_result.min_distance, pairs_str.c_str() );
+          logged_collision_pairs_ = std::move( current_pairs );
+        }
         write_position_commands( current_positions_ );
       }
     } else {
@@ -618,16 +637,34 @@ void SafetyPositionController::apply_velocity_limits( const double distance_scal
   const double clamped_scale = std::clamp( distance_scale, 0.0, 1.0 );
   const bool fully_stopped = ( clamped_scale <= 0.0 );
 
-  // When scaling fully stops motion (proximity to collision), emit a single
-  // informative warning listing the safety-zone pairs instead of one per joint.
+  // When scaling fully stops motion (proximity to collision), emit a single informative warning
+  // listing the safety-zone pairs instead of one per joint. Edge-triggered: warn only when the set
+  // of safety-zone pairs changes, so a steady stop (e.g. arm resting on the body while driving) is
+  // logged once instead of every throttle interval.
   if ( fully_stopped && collision_checker_ ) {
-    const std::string pairs_str = format_collision_pairs(
-        last_safety_zone_pairs_, params_.collision_safety_zone, last_min_distance_pair_index_ );
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                          "Motion stopped: min_dist=%.4f m within safety zone "
-                          "(padding=%.4f, zone=%.4f). Pairs: %s. Holding positions.",
-                          last_min_distance_, params_.collision_padding,
-                          params_.collision_safety_zone, pairs_str.c_str() );
+    std::set<std::size_t> current_pairs;
+    for ( const auto &pi : last_safety_zone_pairs_ ) {
+      if ( pi.distance <= params_.collision_safety_zone ) {
+        current_pairs.insert( pi.pair_index );
+      }
+    }
+    if ( current_pairs.empty() &&
+         last_min_distance_pair_index_ != std::numeric_limits<std::size_t>::max() ) {
+      current_pairs.insert( last_min_distance_pair_index_ );
+    }
+
+    if ( current_pairs != logged_motion_stopped_pairs_ ) {
+      const std::string pairs_str = format_collision_pairs(
+          last_safety_zone_pairs_, params_.collision_safety_zone, last_min_distance_pair_index_ );
+      RCLCPP_WARN( get_node()->get_logger(),
+                   "Motion stopped: min_dist=%.4f m within safety zone "
+                   "(padding=%.4f, zone=%.4f). Pairs: %s. Holding positions.",
+                   last_min_distance_, params_.collision_padding, params_.collision_safety_zone,
+                   pairs_str.c_str() );
+      logged_motion_stopped_pairs_ = std::move( current_pairs );
+    }
+  } else {
+    logged_motion_stopped_pairs_.clear(); // motion resumed → reset silently
   }
 
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
