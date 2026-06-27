@@ -428,13 +428,26 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
 {
   bool all_successful = true;
   for ( size_t g = 0; g < group_names_.size(); g++ ) {
+    const GroupActionState prev_rt_state = group_last_rt_state_[g];
+    const GroupActionState cur_state = group_action_states_[g].load();
+
+    // EXECUTING -> IDLE here is exclusively a non-RT abort/cancel (client cancel
+    // or rollback); RT stamps COMPLETED/CANCELLED inline below. Re-seed the offset
+    // from measured state so the pair holds its current physical pose.
+    if ( prev_rt_state == GroupActionState::EXECUTING && cur_state == GroupActionState::IDLE ) {
+      for ( size_t idx : groups_[group_names_[g]] ) { reset_sync_offsets( idx ); }
+      group_pending_recapture_[g] = false;
+    }
+
     // Gate on the atomic state — RT must NOT call writeFromNonRT on the buffer.
     // The buffer's `active` flag stays as-is and is overwritten on the next goal start.
-    if ( group_action_states_[g].load() != GroupActionState::EXECUTING ) {
+    if ( cur_state != GroupActionState::EXECUTING ) {
+      group_last_rt_state_[g] = cur_state;
       continue;
     }
     const auto *cmd_ptr = rt_group_action_cmds_[g].readFromRT();
     if ( !cmd_ptr || !cmd_ptr->active ) {
+      group_last_rt_state_[g] = cur_state;
       continue;
     }
 
@@ -449,10 +462,22 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
       }
     }
 
+    // Post-tick RT state, stamped into the latch so a later COMPLETED/CANCELLED
+    // -> IDLE collapse is not misread as an EXECUTING -> IDLE cancel.
+    GroupActionState next_rt_state = GroupActionState::EXECUTING;
+
     if ( velocity_override ) {
+      // Velocity command overrides the action. Re-seed the offset from the
+      // current measured pose so the pair holds its physical relative position.
+      for ( size_t idx : group_joint_indices ) { reset_sync_offsets( idx ); }
+      group_pending_recapture_[g] = false;
       group_action_states_[g].store( GroupActionState::CANCELLED );
+      next_rt_state = GroupActionState::CANCELLED;
       RCLCPP_INFO( get_node()->get_logger(), "Group action for '%s' cancelled by velocity command",
                    group_names_[g].c_str() );
+      // Fall through: leave reference_interfaces_ as-is so normal velocity
+      // control resumes for these joints this tick.
+      group_last_rt_state_[g] = next_rt_state;
       continue;
     }
 
@@ -471,19 +496,40 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
       // Hold at target — clamp to URDF limits before writing, matching the
       // in-flight branch. Without this, a target outside joint limits would
       // produce an out-of-range command on the completion tick.
+      std::vector<double> clamped_targets( group_joint_indices.size() );
       for ( size_t i = 0; i < group_joint_indices.size(); i++ ) {
         const size_t idx = group_joint_indices[i];
         double target = cmd_ptr->joint_profiles[i].target_position;
         if ( !std::isnan( joint_lower_limits_[idx] ) ) {
           target = std::clamp( target, joint_lower_limits_[idx], joint_upper_limits_[idx] );
         }
+        clamped_targets[i] = target;
         desired_positions_[idx] = target;
         hold_positions_[idx] = target;
         move_states_[idx] = STOPPED;
         all_successful &= command_interfaces_[idx].set_value( target );
       }
 
+      // Record the offset from the final commanded targets (not measured state,
+      // which may not have settled). Normally 0, but non-zero if a partner
+      // clamped against a different URDF limit.
+      for ( size_t i = 0; i < group_joint_indices.size(); i++ ) {
+        const size_t idx = group_joint_indices[i];
+        if ( !sync_pairs_.has_partner( idx ) )
+          continue;
+        const size_t p = sync_pairs_.partner( idx );
+        // Find the partner's position within this group's index list.
+        for ( size_t j = 0; j < group_joint_indices.size(); j++ ) {
+          if ( group_joint_indices[j] == p ) {
+            sync_pairs_.set_offset( idx, clamped_targets[j] - clamped_targets[i] );
+            break;
+          }
+        }
+      }
+      group_pending_recapture_[g] = false;
+
       group_action_states_[g].store( GroupActionState::COMPLETED );
+      next_rt_state = GroupActionState::COMPLETED;
     } else {
       // Follow profile
       for ( size_t i = 0; i < group_joint_indices.size(); i++ ) {
@@ -507,6 +553,8 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
     for ( size_t idx : group_joint_indices ) {
       reference_interfaces_[idx] = std::numeric_limits<double>::quiet_NaN();
     }
+
+    group_last_rt_state_[g] = next_rt_state;
   }
   return all_successful;
 }

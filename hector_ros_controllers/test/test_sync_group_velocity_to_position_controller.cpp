@@ -3,6 +3,9 @@
 using VelToPosController =
     sync_group_velocity_to_position_controller::SyncGroupVelocityToPositionController;
 using MoveState = sync_group_velocity_to_position_controller::MoveState;
+using GroupActionState = sync_group_velocity_to_position_controller::GroupActionState;
+using GroupActionCommand = sync_group_velocity_to_position_controller::GroupActionCommand;
+using TrapezoidalProfile = sync_group_velocity_to_position_controller::TrapezoidalProfile;
 
 // ============================================================================
 // Test Fixture
@@ -183,6 +186,17 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OnConfigureFailsEmptyJoints )
   } );
   params.node_options = opts;
   controller_->init( params );
+
+  rclcpp_lifecycle::State unconfigured( lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED,
+                                        "unconfigured" );
+  auto cb = controller_->on_configure( unconfigured );
+  EXPECT_EQ( cb, controller_interface::CallbackReturn::ERROR );
+}
+
+// Verify configure fails when a synchronous group does not contain exactly two joints
+TEST_F( SyncGroupVelocityToPositionControllerTest, OnConfigureFailsNonPairSyncGroup )
+{
+  initController( { "group1", "group1", "group1" } );
 
   rclcpp_lifecycle::State unconfigured( lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED,
                                         "unconfigured" );
@@ -961,6 +975,285 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SyncRestoredAfterRepeatedStop
 }
 
 // ============================================================================
+// Sticky Sync Offset Tests
+// ============================================================================
+
+// The offset must be preserved across a plain stop -> restart with equal
+// commands. Independent braking lets the partners settle at slightly different
+// positions; the stored offset must NOT adopt that drift on the next start.
+TEST_F( SyncGroupVelocityToPositionControllerTest, OffsetPreservedAcrossStopRestart )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.1 ); // deliberate initial offset of 0.1
+  activateController();
+
+  const double seeded_offset = controller_->sync_pairs_.get_offset( 0 );
+  ASSERT_NEAR( seeded_offset, 0.1, 1e-9 );
+
+  // Move together for a few ticks (commands equal -> synced, offset frozen).
+  for ( int i = 0; i < 5; i++ ) {
+    controller_->reference_interfaces_[0] = 1.0;
+    controller_->reference_interfaces_[1] = 1.0;
+    controller_->reference_interfaces_[2] = 0.0;
+    setVelocity( 0, 1.0 );
+    setVelocity( 1, 1.0 );
+    callUpdate();
+  }
+
+  // Stop both. Inject asymmetric braking drift: joint1 ends up further than the
+  // captured offset would imply (offset becomes 0.2 physically).
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  callUpdate();
+  for ( int i = 0; i < 20; i++ ) { callUpdate(); }
+  setPosition( 0, 0.5 );
+  setPosition( 1, 0.7 ); // physical offset now 0.2, not the seeded 0.1
+  setVelocity( 0, 0.0 );
+  setVelocity( 1, 0.0 );
+  callUpdate();
+
+  // Restart with EQUAL commands -> must NOT re-capture the drifted offset.
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 1.0;
+  setVelocity( 0, 1.0 );
+  setVelocity( 1, 1.0 );
+  callUpdate();
+
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), seeded_offset, 1e-9 )
+      << "Plain stop->restart must preserve the offset, not adopt braking drift";
+}
+
+// Driving the partners independently (divergent commands) then returning to
+// common motion must re-baseline the offset to the new relative pose.
+TEST_F( SyncGroupVelocityToPositionControllerTest, OffsetRecapturedAfterIndependentDriving )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.1 );
+  activateController();
+  ASSERT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.1, 1e-9 );
+
+  // Drive independently: only joint0 moves. This arms re-capture and applies no
+  // correction. Advance joint0 so the relative pose changes to ~0.3.
+  for ( int i = 0; i < 5; i++ ) {
+    controller_->reference_interfaces_[0] = 1.0;
+    controller_->reference_interfaces_[1] = 0.0;
+    controller_->reference_interfaces_[2] = 0.0;
+    callUpdate();
+  }
+  EXPECT_TRUE( controller_->group_pending_recapture_[controller_->group_index_map_["group1"]] );
+
+  // Move them to a known new relative pose, then re-converge to equal commands.
+  setPosition( 0, -0.2 );
+  setPosition( 1, 0.1 ); // new offset should become 0.1 - (-0.2) = 0.3
+  setVelocity( 0, 1.0 );
+  setVelocity( 1, 1.0 );
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 1.0;
+  callUpdate();
+
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.3, 1e-9 )
+      << "Re-converging after independent driving must re-baseline the offset";
+  EXPECT_FALSE( controller_->group_pending_recapture_[controller_->group_index_map_["group1"]] );
+}
+
+// Commanding one partner while the other is held at zero counts as independent
+// driving (arms re-capture).
+TEST_F( SyncGroupVelocityToPositionControllerTest, OnePartnerZeroIsIndependentDriving )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  const size_t g = controller_->group_index_map_["group1"];
+  EXPECT_FALSE( controller_->group_pending_recapture_[g] );
+
+  controller_->reference_interfaces_[0] = 0.8;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate();
+
+  EXPECT_TRUE( controller_->group_pending_recapture_[g] );
+  // No correction while diverged.
+  EXPECT_FALSE( controller_->sync_states_[0] );
+  EXPECT_FALSE( controller_->sync_states_[1] );
+}
+
+// A successful group action records the aligned offset analytically from the
+// final clamped commanded targets. When partners share a target and clamp
+// equally, the offset becomes ~0.
+TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionSuccessZeroesOffset )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.1 ); // starts with a non-zero offset
+  activateController();
+  ASSERT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.1, 1e-9 );
+
+  const size_t group_idx = controller_->group_index_map_["group1"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 0.5;
+  // Both joints driven to the same target 0.5 (within URDF limits) -> offset 0.
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 0.5, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int i = 0; i < 110; i++ ) { callUpdate(); }
+
+  ASSERT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.0, 1e-9 )
+      << "Successful action to a common target must align the offset to ~0";
+}
+
+// When partners share a target but clamp to *different* URDF limits, the success
+// offset must be the difference of the final clamped targets, not a hardcoded 0.
+// joint1 limits [-3.14, 3.14], joint2 limits [-1.5, 1.5]; target 2.0 -> joint1
+// stays 2.0, joint2 clamps to 1.5 -> offset(1->2) = 1.5 - 2.0 = -0.5.
+TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionSuccessUsesClampedTargetDiff )
+{
+  // Pair joint1 (idx 1, limits +/-3.14) with joint2 (idx 2, limits +/-1.5).
+  std::vector<std::string> sync_groups = { "solo", "pair", "pair" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  const size_t group_idx = controller_->group_index_map_["pair"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 2.0;
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 2.0, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof ); // joint1 (idx 1)
+  cmd.joint_profiles.push_back( prof ); // joint2 (idx 2)
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int i = 0; i < 400; i++ ) { callUpdate(); }
+
+  ASSERT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
+  // The offset must equal the difference of the final *clamped* commanded targets
+  // (magnitude 0.5 = the clamp gap), not a hardcoded 0, and must be anti-symmetric.
+  const double off1 = controller_->sync_pairs_.get_offset( 1 );
+  const double off2 = controller_->sync_pairs_.get_offset( 2 );
+  EXPECT_NEAR( std::abs( off1 ), 0.5, 1e-9 )
+      << "Success offset must come from the clamped-target difference, not 0";
+  EXPECT_NEAR( off1, -off2, 1e-12 ) << "Pair offset must be anti-symmetric by construction";
+}
+
+// Regression for the latch race: a successful action stamps COMPLETED in RT;
+// when the monitor thread later collapses COMPLETED -> IDLE, the subsequent RT
+// ticks must NOT misread that as an EXECUTING -> IDLE cancel and overwrite the
+// success offset with the (drifted) measured pose.
+TEST_F( SyncGroupVelocityToPositionControllerTest, SuccessOffsetSurvivesCompletedToIdleCollapse )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  const size_t group_idx = controller_->group_index_map_["group1"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 0.5;
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 0.5, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int i = 0; i < 110; i++ ) { callUpdate(); }
+  ASSERT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.0, 1e-9 );
+
+  // Simulate the monitor thread collapsing COMPLETED -> IDLE, then inject a
+  // drifted measured pose. If the latch misclassifies this as a cancel, the
+  // offset would be overwritten to 0.3.
+  controller_->group_action_states_[group_idx].store( GroupActionState::IDLE );
+  setPosition( 0, 0.0 );
+  setPosition( 1, 0.3 );
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  callUpdate();
+  callUpdate();
+
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.0, 1e-9 )
+      << "COMPLETED->IDLE collapse must not be misread as a cancel re-seed";
+}
+
+// A non-RT abort/cancel to IDLE (e.g. client cancel) while RT last saw EXECUTING
+// must re-seed the offset from the current measured pose.
+TEST_F( SyncGroupVelocityToPositionControllerTest, ClientCancelReseedsCurrentOffset )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  const size_t group_idx = controller_->group_index_map_["group1"];
+
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 1.0;
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 1.0, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  // One RT tick observes EXECUTING.
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  callUpdate();
+  ASSERT_EQ( controller_->group_last_rt_state_[group_idx], GroupActionState::EXECUTING );
+
+  // Non-RT cancel: monitor/cancel thread collapses to IDLE. Inject a new pose.
+  controller_->group_action_states_[group_idx].store( GroupActionState::IDLE );
+  setPosition( 0, 0.2 );
+  setPosition( 1, 0.45 ); // measured offset now 0.25
+  callUpdate();
+
+  EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.25, 1e-9 )
+      << "Client cancel must re-seed the offset from current measured pose";
+}
+
+// ============================================================================
 // Trapezoidal Profile Unit Tests
 // ============================================================================
 
@@ -1107,10 +1400,6 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityClampedToMaxVelocity 
 // ============================================================================
 // Group Action Cancellation by Velocity Command Tests
 // ============================================================================
-
-using GroupActionState = sync_group_velocity_to_position_controller::GroupActionState;
-using GroupActionCommand = sync_group_velocity_to_position_controller::GroupActionCommand;
-using TrapezoidalProfile = sync_group_velocity_to_position_controller::TrapezoidalProfile;
 
 // Verify that an active group action is cancelled when a non-zero velocity command arrives
 TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionCancelledByVelocityCommand )

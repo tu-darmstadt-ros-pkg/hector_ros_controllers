@@ -83,6 +83,15 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read
     groups_[params_.synchronous_groups[i]].push_back( i );
   }
 
+  for ( const auto &group : groups_ ) {
+    if ( group.second.size() != 2 ) {
+      RCLCPP_ERROR( get_node()->get_logger(),
+                    "Synchronous group '%s' must contain exactly 2 joints, got %zu",
+                    group.first.c_str(), group.second.size() );
+      return controller_interface::CallbackReturn::ERROR;
+    }
+  }
+
   sync_pairs_.init( joints_.size(), groups_ );
 
   for ( size_t i = 0; i < joints_.size(); ++i ) {
@@ -131,6 +140,10 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read
   rt_group_action_cmds_.resize( group_names_.size() );
   group_action_states_ = std::vector<std::atomic<GroupActionState>>( group_names_.size() );
   for ( auto &state : group_action_states_ ) { state.store( GroupActionState::IDLE ); }
+  group_last_rt_state_.assign( group_names_.size(), GroupActionState::IDLE );
+
+  // Per-group sticky-offset bookkeeping (indexed by group_index_map_ order).
+  group_pending_recapture_.assign( group_names_.size(), false );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -364,6 +377,8 @@ SyncGroupVelocityToPositionController::on_activate( const rclcpp_lifecycle::Stat
 
     sync_states_[i] = false;
   }
+  // Seed each pair offset from the current measured relative pose. The offset
+  // is then sticky and only changes on deliberate independent driving.
   for ( size_t i = 0; i < joints_.size(); i++ ) { reset_sync_offsets( i ); }
 
   // Initialize velocity command timeout (use Time(0) as default; update loop will set it)
@@ -375,6 +390,8 @@ SyncGroupVelocityToPositionController::on_activate( const rclcpp_lifecycle::Stat
     idle_cmd.active = false;
     rt_group_action_cmds_[i].writeFromNonRT( idle_cmd );
     group_action_states_[i].store( GroupActionState::IDLE );
+    group_last_rt_state_[i] = GroupActionState::IDLE;
+    group_pending_recapture_[i] = false;
   }
 
   // Seed snapshot so non-RT readers see a correctly sized vector before the first update tick.
@@ -587,11 +604,10 @@ void SyncGroupVelocityToPositionController::update_move_states( double vel_comma
 
 void SyncGroupVelocityToPositionController::update_sync_states( const std::vector<double> &vel_commands )
 {
-  // Edge-triggered offset capture: when a group's joints all share the same non-zero
-  // velocity command (sync engages), snapshot their relative positions so synced
-  // control holds that pose. While engaged, the offset is frozen so that brief
-  // command flicker (e.g. FP jitter from upstream chained controllers) cannot
-  // corrupt it.
+  // Classify each group every tick from its velocity commands: independent
+  // driving (diverged -> no correction, arm re-capture), moving together
+  // (equal & non-zero -> correct, re-baseline once if armed), or stopped (both
+  // zero -> hold, offset untouched so stop/restart preserves it).
   for ( auto &group : groups_ ) {
     const std::vector<size_t> &group_indices = group.second;
 
@@ -600,31 +616,40 @@ void SyncGroupVelocityToPositionController::update_sync_states( const std::vecto
       continue;
     }
 
-    const double common_vel_command = vel_commands[group_indices[0]];
-    bool group_is_synchronized = !std::isnan( common_vel_command ) && common_vel_command != 0.0;
-    for ( size_t i = 1; group_is_synchronized && i < group_indices.size(); i++ ) {
-      group_is_synchronized &= ( common_vel_command == vel_commands[group_indices[i]] );
-    }
+    // Indexed by group_index_map_ order, NOT groups_ iteration order.
+    const size_t g = group_index_map_.at( group.first );
 
-    const bool was_synchronized = sync_states_[group_indices[0]];
-    for ( size_t i = 0; i < group_indices.size(); i++ ) {
-      sync_states_[group_indices[i]] = group_is_synchronized;
-    }
+    const double vel_a = vel_commands[group_indices[0]];
+    const double vel_b = vel_commands[group_indices[1]];
+    const bool commands_valid = !std::isnan( vel_a ) && !std::isnan( vel_b );
 
-    // On false -> true transition, capture the current relative offset for each
-    // pair in the group. Pair-based capture is safe even if a future group has
-    // more than two joints (sync_pairs_ only links pairs).
-    if ( group_is_synchronized && !was_synchronized ) {
-      for ( size_t idx : group_indices ) {
-        if ( !sync_pairs_.has_partner( idx ) )
-          continue;
-        if ( std::isnan( joint_position_states_[idx] ) )
-          continue;
-        const size_t p = sync_pairs_.partner( idx );
-        if ( std::isnan( joint_position_states_[p] ) )
-          continue;
-        sync_pairs_.set_offset( idx, joint_position_states_[p] - joint_position_states_[idx] );
+    // Commands are exactly zero/equal in practice; the epsilon is a guard.
+    const bool diverged = commands_valid && std::abs( vel_a - vel_b ) > SYNC_DIVERGENCE_EPS;
+    // Moving together: equal, non-zero commands.
+    const bool moving_together = commands_valid && !diverged && ( vel_a != 0.0 || vel_b != 0.0 );
+
+    if ( diverged ) {
+      for ( size_t idx : group_indices ) { sync_states_[idx] = false; }
+      group_pending_recapture_[g] = true;
+    } else if ( moving_together ) {
+      // Re-baseline once on the return to common motion after independent driving.
+      if ( group_pending_recapture_[g] ) {
+        for ( size_t idx : group_indices ) {
+          if ( !sync_pairs_.has_partner( idx ) )
+            continue;
+          if ( std::isnan( joint_position_states_[idx] ) )
+            continue;
+          const size_t p = sync_pairs_.partner( idx );
+          if ( std::isnan( joint_position_states_[p] ) )
+            continue;
+          sync_pairs_.set_offset( idx, joint_position_states_[p] - joint_position_states_[idx] );
+        }
+        group_pending_recapture_[g] = false;
       }
+      for ( size_t idx : group_indices ) { sync_states_[idx] = true; }
+    } else {
+      // Stopped (both commands zero) or invalid commands: hold, do not touch offset.
+      for ( size_t idx : group_indices ) { sync_states_[idx] = false; }
     }
   }
 }

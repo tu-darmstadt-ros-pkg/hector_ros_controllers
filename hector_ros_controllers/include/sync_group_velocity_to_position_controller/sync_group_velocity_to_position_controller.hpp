@@ -156,11 +156,17 @@ private:
   std::vector<TrapezoidalProfile> braking_profiles_;
   std::vector<rclcpp::Time> braking_start_times_;
 
-  // Synchronization
+  // Synchronization. The pair offset is sticky: it survives stop/restart and is
+  // only re-baselined on independent driving, so braking drift doesn't accumulate.
+  static constexpr double SYNC_DIVERGENCE_EPS =
+      1e-3; ///< |vel_cmd diff| above which a pair counts as independently driven
   SyncPairManager sync_pairs_;
   std::vector<bool> sync_states_;
   std::vector<std::string> joint_groups_;
   std::unordered_map<std::string, std::vector<size_t>> groups_;
+  // Armed on independent driving, disarmed after re-capture on return to common
+  // motion. Indexed by group_index_map_ order (NOT groups_ iteration order).
+  std::vector<bool> group_pending_recapture_;
 
   // E-stop
   std::string e_stop_topic_;
@@ -220,6 +226,11 @@ private:
   std::vector<std::string> group_names_;                    ///< ordered group names
   std::vector<realtime_tools::RealtimeBuffer<GroupActionCommand>> rt_group_action_cmds_;
   std::vector<std::atomic<GroupActionState>> group_action_states_;
+
+  // Previous-tick RT-observed action state, per group. Lets RT tell its own
+  // terminal transitions (COMPLETED/CANCELLED, stamped inline) from a non-RT
+  // EXECUTING -> IDLE collapse, so only the latter re-seeds the offset.
+  std::vector<GroupActionState> group_last_rt_state_;
 
   // RT-safe snapshot of joint position states for use by non-RT monitor threads (action feedback).
   // Written from update_and_write_commands() via try_set, read from monitor_group_actions().
