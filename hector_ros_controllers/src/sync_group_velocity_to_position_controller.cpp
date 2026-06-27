@@ -84,10 +84,13 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read
   }
 
   for ( const auto &group : groups_ ) {
-    if ( group.second.size() != 2 ) {
+    const size_t n = group.second.size();
+    // Allow singleton groups (solo, unsynchronized joints) and pairs (synchronized
+    // joints). Larger groups are unsupported: sync_pairs_ only links pairs.
+    if ( n != 1 && n != 2 ) {
       RCLCPP_ERROR( get_node()->get_logger(),
-                    "Synchronous group '%s' must contain exactly 2 joints, got %zu",
-                    group.first.c_str(), group.second.size() );
+                    "Synchronous group '%s' must contain 1 (solo) or 2 (pair) joints, got %zu",
+                    group.first.c_str(), n );
       return controller_interface::CallbackReturn::ERROR;
     }
   }
