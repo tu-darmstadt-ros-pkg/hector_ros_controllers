@@ -501,7 +501,7 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
       // Hold at target — clamp to URDF limits before writing, matching the
       // in-flight branch. Without this, a target outside joint limits would
       // produce an out-of-range command on the completion tick.
-      std::vector<double> clamped_targets( group_joint_indices.size() );
+      double clamped_targets[2] = { 0.0, 0.0 }; // groups max 2 joints
       for ( size_t i = 0; i < group_joint_indices.size(); i++ ) {
         const size_t idx = group_joint_indices[i];
         double target = cmd_ptr->joint_profiles[i].target_position;

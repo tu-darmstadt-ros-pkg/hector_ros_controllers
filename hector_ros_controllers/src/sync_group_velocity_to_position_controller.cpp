@@ -633,8 +633,10 @@ void SyncGroupVelocityToPositionController::update_sync_states( const std::vecto
 
     // Commands are exactly zero/equal in practice; the epsilon is a guard.
     const bool diverged = commands_valid && std::abs( vel_a - vel_b ) > SYNC_DIVERGENCE_EPS;
-    // Moving together: equal, non-zero commands.
-    const bool moving_together = commands_valid && !diverged && ( vel_a != 0.0 || vel_b != 0.0 );
+    // Moving together: equal (within epsilon), both non-zero commands. Requiring
+    // both non-zero keeps a partner that is exactly stopped while the other holds
+    // a tiny non-zero command from being misread as common motion.
+    const bool moving_together = commands_valid && !diverged && ( vel_a != 0.0 && vel_b != 0.0 );
 
     if ( diverged ) {
       for ( size_t idx : group_indices ) { sync_states_[idx] = false; }
