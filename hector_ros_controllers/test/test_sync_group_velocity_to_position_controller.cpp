@@ -193,8 +193,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OnConfigureFailsEmptyJoints )
   EXPECT_EQ( cb, controller_interface::CallbackReturn::ERROR );
 }
 
-// Verify configure fails when a synchronous group does not contain exactly two joints
-TEST_F( SyncGroupVelocityToPositionControllerTest, OnConfigureFailsNonPairSyncGroup )
+// Verify configure fails when a synchronous group contains more than two joints
+// (solo and pair groups are allowed; larger groups are rejected).
+TEST_F( SyncGroupVelocityToPositionControllerTest, OnConfigureFailsOversizedSyncGroup )
 {
   initController( { "group1", "group1", "group1" } );
 

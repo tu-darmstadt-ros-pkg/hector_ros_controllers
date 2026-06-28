@@ -431,11 +431,18 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
     const GroupActionState prev_rt_state = group_last_rt_state_[g];
     const GroupActionState cur_state = group_action_states_[g].load();
 
+    const auto group_it = groups_.find( group_names_[g] );
+    if ( group_it == groups_.end() ) {
+      group_last_rt_state_[g] = cur_state;
+      continue;
+    }
+    const std::vector<size_t> &group_joint_indices = group_it->second;
+
     // EXECUTING -> IDLE here is exclusively a non-RT abort/cancel (client cancel
     // or rollback); RT stamps COMPLETED/CANCELLED inline below. Re-seed the offset
     // from measured state so the pair holds its current physical pose.
     if ( prev_rt_state == GroupActionState::EXECUTING && cur_state == GroupActionState::IDLE ) {
-      for ( size_t idx : groups_[group_names_[g]] ) { reset_sync_offsets( idx ); }
+      for ( size_t idx : group_joint_indices ) { reset_sync_offsets( idx ); }
       group_pending_recapture_[g] = false;
     }
 
@@ -450,8 +457,6 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
       group_last_rt_state_[g] = cur_state;
       continue;
     }
-
-    const auto &group_joint_indices = groups_[group_names_[g]];
 
     // Check if any joint in this group has a non-zero velocity command -> cancel action
     bool velocity_override = false;

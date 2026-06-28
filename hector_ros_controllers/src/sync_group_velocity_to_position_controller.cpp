@@ -620,7 +620,12 @@ void SyncGroupVelocityToPositionController::update_sync_states( const std::vecto
     }
 
     // Indexed by group_index_map_ order, NOT groups_ iteration order.
-    const size_t g = group_index_map_.at( group.first );
+    const auto group_it = group_index_map_.find( group.first );
+    if ( group_it == group_index_map_.end() ) {
+      for ( size_t idx : group_indices ) { sync_states_[idx] = false; }
+      continue;
+    }
+    const size_t g = group_it->second;
 
     const double vel_a = vel_commands[group_indices[0]];
     const double vel_b = vel_commands[group_indices[1]];
