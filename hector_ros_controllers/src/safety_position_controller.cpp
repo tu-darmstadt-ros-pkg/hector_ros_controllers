@@ -215,7 +215,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   }
   last_min_distance_ = std::numeric_limits<double>::max();
   last_safety_zone_pairs_.clear();
-  logged_collision_pairs_.clear();
+  was_in_collision_ = false;
   logged_motion_stopped_pairs_.clear();
   last_distance_scale_ = 1.0;
   last_effective_scale_ = 1.0;
@@ -481,6 +481,8 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       RCLCPP_DEBUG_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                              throttle_logging_msg, "Safety bypass active: skipping collision check" );
     }
+    // Collision state is no longer observed → reset so a collision after checks resume re-warns.
+    was_in_collision_ = false;
     write_position_commands( cmd_positions_ );
   } else {
     // prepare collision checker input
@@ -520,24 +522,13 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       }
 
       if ( !cc_result.in_collision ) {
-        logged_collision_pairs_.clear(); // collisions resolved → reset silently
+        was_in_collision_ = false; // collisions resolved → reset silently
         write_position_commands( cmd_positions_ );
       } else {
-        // Build the set of pairs currently in collision (distance <= padding). Fall back to the
-        // single closest pair when no per-pair list is available (directional scaling off).
-        std::set<std::size_t> current_pairs;
-        for ( const auto &pi : cc_result.safety_zone_pairs ) {
-          if ( pi.distance <= params_.collision_padding ) {
-            current_pairs.insert( pi.pair_index );
-          }
-        }
-        if ( current_pairs.empty() &&
-             cc_result.min_distance_pair_index != std::numeric_limits<std::size_t>::max() ) {
-          current_pairs.insert( cc_result.min_distance_pair_index );
-        }
-
-        // Edge-triggered: warn only when the set of colliding pairs changes.
-        if ( current_pairs != logged_collision_pairs_ ) {
+        // Edge-triggered: warn once per entry into collision (not-in-collision → in-collision), so
+        // a steady collision is logged once instead of every cycle. Which pairs collide may change
+        // freely within an episode without re-logging.
+        if ( !was_in_collision_ ) {
           const std::string pairs_str =
               format_collision_pairs( cc_result.safety_zone_pairs, params_.collision_padding,
                                       cc_result.min_distance_pair_index );
@@ -545,13 +536,15 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
                        "Collision detected (min_dist=%.4f m). Pairs in collision: %s. "
                        "Holding current positions.",
                        cc_result.min_distance, pairs_str.c_str() );
-          logged_collision_pairs_ = std::move( current_pairs );
+          was_in_collision_ = true;
         }
         write_position_commands( current_positions_ );
       }
     } else {
       RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
                             throttle_logging_msg, "Failed to setup collision checking." );
+      // Collision state is no longer observed → reset so a collision after setup recovers re-warns.
+      was_in_collision_ = false;
       write_position_commands( current_positions_ );
     }
   }

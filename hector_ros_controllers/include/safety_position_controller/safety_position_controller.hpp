@@ -278,13 +278,13 @@ private:
   double last_worst_directional_derivative_{ std::numeric_limits<double>::quiet_NaN() };
 
   // ---- Edge-triggered collision logging ----
-  /// Pair indices that were in collision last time we logged. We warn only when this set changes
-  /// to a (different) non-empty set, so a steady collision (e.g. arm resting on the body while
-  /// driving) is logged once instead of every throttle interval. Cleared silently when collisions
-  /// resolve.
-  std::set<std::size_t> logged_collision_pairs_;
+  /// Last observed collision state. We warn only on the not-in-collision → in-collision transition,
+  /// so a steady collision (e.g. arm resting on the body, with pairs flickering at rest) is logged
+  /// once per episode instead of every cycle. Reset silently whenever collision state stops being
+  /// observed (collisions resolve, bypass active, or setup fails) so the next collision re-warns.
+  bool was_in_collision_ = false;
   /// Safety-zone pair indices reported in the last "Motion stopped" warning. Same edge-trigger
-  /// idea as logged_collision_pairs_ but for the proximity full-stop in apply_velocity_limits().
+  /// idea as was_in_collision_ but for the proximity full-stop in apply_velocity_limits().
   /// Cleared silently when motion is no longer fully stopped.
   std::set<std::size_t> logged_motion_stopped_pairs_;
 
