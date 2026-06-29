@@ -114,7 +114,12 @@ void expectDistanceMatch( double broadphase_min, double bf_min, double padding,
     // but must still detect collision
     EXPECT_LE( broadphase_min, padding )
         << "Broadphase should detect collision when brute-force says penetrating. " << label;
-    EXPECT_GE( broadphase_min, bf_min )
+    // Broadphase may legitimately report a less-negative (pruned) distance, so the
+    // bound is one-sided. When the same closest pair wins in both paths the two
+    // distances should be equal but, computed via different traversal orders, can
+    // differ by a few ULP; allow a small FP slack so an exact tie is not flagged.
+    constexpr double kFpTolerance = 1e-9;
+    EXPECT_GE( broadphase_min, bf_min - kFpTolerance )
         << "Broadphase should not report more penetration than brute-force. " << label;
   }
 }

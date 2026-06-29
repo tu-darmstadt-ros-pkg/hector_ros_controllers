@@ -191,8 +191,10 @@ Converts **velocity references** into **position commands** for joint hardware. 
     * When velocity commands go to zero, each joint computes a smooth deceleration-only profile using `max_deceleration`.
     * Per-joint braking always runs, even for joints in a sync pair — each joint independently stops at `current_pos + braking_distance`. Coordinated braking that intentionally preserves a sync offset is available explicitly via `~/sync_flipper_group`.
 * **Joint synchronization:**
-    * Joints in the same synchronization group are kept aligned via P-control on position offsets while moving.
-    * Braking is independent per joint; the offset between sync partners may drift during a stop and is then re-aligned by `~/sync_flipper_group` if needed.
+    * Joints in the same synchronization group are kept aligned via PD-control on their relative position offset while moving together.
+    * **The captured offset is sticky.** It is seeded from the current relative pose on activation and then *preserved across stop/restart of common motion* — a plain stop followed by restart with equal velocity commands does **not** re-baseline it, so braking drift does not accumulate over repeated start/stop cycles.
+    * The offset is only re-captured when the partners are driven **independently** (their velocity commands diverge)
+    * The drive/sync group actions re-baseline the offset on success to the aligned commanded pose (≈ 0); on cancel/abort the offset is re-seeded from the current measured pose.
 * **Velocity command timeout:**
     * If no new non-zero velocity command arrives within `velocity_command_timeout` seconds, all velocity references are zeroed. Disabled when set to 0.
     * Works in both chained and standalone modes.
