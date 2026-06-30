@@ -230,6 +230,13 @@ private:
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;
 
+  /// Per-pair: true if nearest_points were recomputed this cycle. Broadphase pruning leaves pruned
+  /// pairs holding stale data, so publishMarkers() must skip pairs that are not fresh.
+  std::vector<bool> nearest_points_fresh_;
+
+  /// Model root link (URDF root); frame_id for markers since FK is relative to it. Defaults to "base_link".
+  std::string root_frame_{ "base_link" };
+
   // Per-pair directional derivatives for visualization (set by controller via setDirectionalInfo)
   std::vector<double> viz_directional_derivatives_; ///< one per collision pair; NaN = no info
   double viz_safety_zone_threshold_{ 0.0 };
