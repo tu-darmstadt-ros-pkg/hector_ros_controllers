@@ -36,12 +36,14 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
   double global_min_distance{ std::numeric_limits<double>::max() };
   std::size_t min_distance_pair{ 0 };
   std::vector<std::size_t> safety_zone_indices;
+  std::vector<std::size_t> visited_indices; ///< pairs whose distance (and nearest points) were computed
 
   void init() override
   {
     global_min_distance = std::numeric_limits<double>::max();
     min_distance_pair = 0;
     safety_zone_indices.clear();
+    visited_indices.clear();
   }
 
   bool distance( coal::CollisionObject *o1, coal::CollisionObject *o2, coal::CoalScalar &dist ) override
@@ -77,6 +79,8 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
 
     coal::distance( o1, o2, dreq, dres );
     const double d = dres.min_distance;
+    if ( compute_nearest_points )
+      visited_indices.push_back( k );
 
     // Update outputs
     if ( d < global_min_distance ) {
@@ -120,6 +124,17 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
 
     data_ = pinocchio::Data( model_ );
 
+    // Root link = first BODY frame that is not "universe"; used as the marker frame_id.
+    // Keeps the "base_link" default if none is found.
+    for ( const auto &frame : model_.frames ) {
+      if ( frame.type == pinocchio::FrameType::BODY && frame.name != "universe" ) {
+        root_frame_ = frame.name;
+        break;
+      }
+    }
+    RCLCPP_INFO( node_->get_logger(), "[CollisionChecker] Using root frame '%s' for markers.",
+                 root_frame_.c_str() );
+
     std::istringstream urdf_stream( urdf_xml );
     // Build collision geometry from the XML stream.
     pinocchio::urdf::buildGeom( model_, urdf_stream, pinocchio::COLLISION, geom_model_ );
@@ -129,13 +144,13 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
 
     geom_data_ = pinocchio::GeometryData( geom_model_ );
     q_default_ = pinocchio::neutral( model_ );
-
     name_to_id_.clear();
     for ( pinocchio::JointIndex jid = 1; jid < model_.joints.size(); ++jid ) {
       name_to_id_[model_.names[jid]] = jid;
     }
     // Filter collision pairs based on controlled joints
     filterCollisionPairs( controlled_joints );
+    nearest_points_fresh_.assign( geom_model_.collisionPairs.size(), false );
 
     // Pre-allocate Jacobian workspace matrices
     J1_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
@@ -318,6 +333,11 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 
   const bool single_pass = pub_debug_geometry_;
 
+  if ( single_pass ) {
+    // Only the debug-viz path uses freshness; reset it just there.
+    std::fill( nearest_points_fresh_.begin(), nearest_points_fresh_.end(), false );
+  }
+
   double global_min_distance = std::numeric_limits<double>::max();
   std::size_t min_distance_pair = 0;
   bool has_safety_zone_pairs = false;
@@ -341,8 +361,11 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
     safety_zone_indices = std::move( callback.safety_zone_indices );
     has_safety_zone_pairs = !safety_zone_indices.empty();
 
-    // Pass 2: recompute safety-zone pairs with nearest points (for gradients)
-    if ( !single_pass && has_safety_zone_pairs ) {
+    if ( single_pass ) {
+      // Only un-pruned (visited) pairs have fresh nearest points.
+      for ( const std::size_t k : callback.visited_indices ) { nearest_points_fresh_[k] = true; }
+    } else if ( has_safety_zone_pairs ) {
+      // Pass 2: recompute safety-zone pairs with nearest points (for gradients)
       for ( const std::size_t k : safety_zone_indices ) {
         geom_data_.distanceRequests[k].enable_nearest_points = true;
         geom_data_.distanceResults[k].clear();
@@ -368,8 +391,11 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
       }
     }
 
-    // Pass 2: recompute only safety-zone pairs with nearest points (for gradients)
-    if ( !single_pass && has_safety_zone_pairs ) {
+    if ( single_pass ) {
+      // Brute force recomputes every pair, so all are fresh.
+      std::fill( nearest_points_fresh_.begin(), nearest_points_fresh_.end(), true );
+    } else if ( has_safety_zone_pairs ) {
+      // Pass 2: recompute only safety-zone pairs with nearest points (for gradients)
       for ( const std::size_t k : safety_zone_indices ) {
         geom_data_.distanceRequests[k].enable_nearest_points = true;
         geom_data_.distanceResults[k].clear();
@@ -515,7 +541,7 @@ void CollisionChecker::publishMinimalMarkers()
 
   // Delete all previous markers
   visualization_msgs::msg::Marker delete_all;
-  delete_all.header.frame_id = "base_link";
+  delete_all.header.frame_id = root_frame_;
   delete_all.header.stamp = now;
   delete_all.action = visualization_msgs::msg::Marker::DELETEALL;
   arr.markers.push_back( std::move( delete_all ) );
@@ -533,7 +559,7 @@ void CollisionChecker::publishMinimalMarkers()
   // Build LINE_LIST markers for safety zone and collision pairs
   auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "base_link";
+    m.header.frame_id = root_frame_;
     m.header.stamp = now;
     m.ns = ns;
     m.id = id;
@@ -621,8 +647,15 @@ void CollisionChecker::publishMinimalMarkers()
     }
   }
 
-  arr.markers.push_back( std::move( lines_zone ) );
-  arr.markers.push_back( std::move( lines_coll ) );
+  // RViz ignores an empty-points LINE_LIST update (old lines persist); DELETE to clear instead.
+  auto push_line_marker = [&]( visualization_msgs::msg::Marker &&m ) {
+    if ( m.points.empty() ) {
+      m.action = visualization_msgs::msg::Marker::DELETE;
+    }
+    arr.markers.push_back( std::move( m ) );
+  };
+  push_line_marker( std::move( lines_zone ) );
+  push_line_marker( std::move( lines_coll ) );
 
   rt_markers_pub_->unlockAndPublish();
 }
@@ -723,6 +756,8 @@ void CollisionChecker::publishMarkers() const
       objects_in_collision.push_back( idx );
   };
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+    if ( !nearest_points_fresh_[k] )
+      continue; // skip stale (pruned) pairs
     const auto &cp = geom_model_.collisionPairs[k];
     const auto &dres = geom_data_.distanceResults[k];
     if ( dres.min_distance <= 0.0 ) {
@@ -737,7 +772,7 @@ void CollisionChecker::publishMarkers() const
     const auto &M = geom_data_.oMg[i];
 
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "base_link";
+    m.header.frame_id = root_frame_;
     m.header.stamp = now;
     m.ns = "collision_geometry";
     m.id = static_cast<int>( i );
@@ -827,7 +862,7 @@ void CollisionChecker::publishMarkers() const
   // Initialize LINE_LIST markers for each category
   auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "base_link";
+    m.header.frame_id = root_frame_;
     m.header.stamp = now;
     m.ns = ns;
     m.id = id;
@@ -870,6 +905,10 @@ void CollisionChecker::publishMarkers() const
   lines_coll.color = bright_red;
 
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+    // Skip stale (pruned) pairs; their nearest points are from an earlier cycle.
+    if ( !nearest_points_fresh_[k] )
+      continue;
+
     const auto &dres = geom_data_.distanceResults[k];
     if ( !valid_nearest_points( dres ) )
       continue;
@@ -915,9 +954,16 @@ void CollisionChecker::publishMarkers() const
     }
   }
 
-  arr.markers.push_back( std::move( lines_safe ) );
-  arr.markers.push_back( std::move( lines_zone ) );
-  arr.markers.push_back( std::move( lines_coll ) );
+  // RViz ignores an empty-points LINE_LIST update (old lines persist); DELETE to clear instead.
+  auto push_line_marker = [&]( visualization_msgs::msg::Marker &&m ) {
+    if ( m.points.empty() ) {
+      m.action = visualization_msgs::msg::Marker::DELETE;
+    }
+    arr.markers.push_back( std::move( m ) );
+  };
+  push_line_marker( std::move( lines_safe ) );
+  push_line_marker( std::move( lines_zone ) );
+  push_line_marker( std::move( lines_coll ) );
 
   markers_pub_->publish( arr );
 }
