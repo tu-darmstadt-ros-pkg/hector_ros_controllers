@@ -113,7 +113,6 @@ public:
         rclcpp::Parameter( "unwrap_continuous_joints", true ),
         rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", check_self_collisions ),
-        rclcpp::Parameter( "block_velocity_scaling", 1.5 ),
         rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", set_current_limits ),
         rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
@@ -273,29 +272,6 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsUnwrapsContinuous )
 // Velocity Limiting Tests (no collision fixture — collision checks disabled)
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, NoVelocityLimitingWithoutCollisionChecks )
-{
-  // When check_self_collisions=false, velocity limiting is not applied
-  initController(); // check_self_collisions=false by default
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-
-  // Large jump within joint limits
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Without collision checks, no velocity limiting → full step passes through
-  EXPECT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 );
-}
-
 // ============================================================================
 // E-Stop Tests
 // ============================================================================
@@ -405,8 +381,10 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassServiceDisables )
 // NaN Handling
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, NaNReferenceSkipsWriting )
+TEST_F( SafetyPositionControllerTest, NaNReferenceHoldsAtCurrentPosition )
 {
+  // NaN references demand zero velocity: the controller holds the (rebased) commanded
+  // position instead of tracking anything — the joints must not move.
   initController();
   configureController();
   setupHardwareInterfaces();
@@ -414,24 +392,20 @@ TEST_F( SafetyPositionControllerTest, NaNReferenceSkipsWriting )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  setStateValue( "joint1", 0.4 );
+  setStateValue( "joint2", -0.2 );
+  setStateValue( "joint3", 0.1 );
 
   controller_->reference_interfaces_[0] = std::numeric_limits<double>::quiet_NaN();
   controller_->reference_interfaces_[1] = std::numeric_limits<double>::quiet_NaN();
   controller_->reference_interfaces_[2] = std::numeric_limits<double>::quiet_NaN();
 
-  // Set command values to known value to verify they don't change
-  hw_cmd_values_[0] = 99.0;
-  hw_cmd_values_[1] = 99.0;
-  hw_cmd_values_[2] = 99.0;
-
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
-
-  // Commands should NOT have been overwritten (NaN skip path)
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 99.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], 99.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 99.0 );
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], 0.4, 1e-6 );
+    EXPECT_NEAR( hw_cmd_values_[1], -0.2, 1e-6 );
+    EXPECT_NEAR( hw_cmd_values_[2], 0.1, 1e-6 );
+  }
 }
 
 // ============================================================================
@@ -725,7 +699,6 @@ public:
         rclcpp::Parameter( "unwrap_continuous_joints", true ),
         rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", true ),
-        rclcpp::Parameter( "block_velocity_scaling", 3.0 ), // max allowed scaling
         rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", false ),
         rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
@@ -842,7 +815,6 @@ TEST_F( SafetyPositionControllerCollisionTest, NoCollisionAllowsMovement )
   EXPECT_EQ( ret, controller_interface::return_type::OK );
 
   // Commands should be applied (possibly limited by block_if_too_far but non-zero)
-  // With high block_velocity_scaling=100, step limit is generous
   EXPECT_GT( std::abs( hw_cmd_values_[0] ), 0.0 );
 }
 
@@ -1002,287 +974,9 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointCollisionDetected 
 // Velocity Limiting & Distance-Based Scaling Tests (collision fixture)
 // ============================================================================
 
-TEST_F( SafetyPositionControllerCollisionTest, VelocityLimitingWithCollisionChecks )
-{
-  // Override block_velocity_scaling to a known low value
-  initWithCollisions( {}, "test_robot_collision.urdf",
-                      { rclcpp::Parameter( "block_velocity_scaling", 1.5 ) } );
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // First cycle: last_min_distance_ = max -> distance_scale = 1.0 (full speed)
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5; // large jump
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // max_step = velocity_limit / update_rate * block_velocity_scaling = 1.0/100 * 1.5 = 0.015
-  double max_step = 1.0 / kUpdateRate * 1.5;
-  EXPECT_NEAR( hw_cmd_values_[0], max_step, 1e-6 );
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DistanceBasedScalingReducesVelocity )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ to halfway in the safety zone
-  // collision_padding=0.0, collision_safety_zone=0.05
-  // d=0.025 -> scale = (0.025 - 0.0) / (0.05 - 0.0) = 0.5
-  controller_->last_min_distance_ = 0.025;
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5; // large jump
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // max_step = velocity_limit / update_rate * block_velocity_scaling * distance_scale
-  // = 1.0 / 100 * 3.0 * 0.5 = 0.015
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5;
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 );
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DistanceScaleZeroHoldsPosition )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ to exactly at collision_padding (0.0) -> scale = 0
-  controller_->last_min_distance_ = 0.0;
-
-  setStateValue( "joint1", 0.3 );
-  setStateValue( "joint2", 0.0 );
-  setStateValue( "joint3", 0.0 );
-
-  controller_->reference_interfaces_[0] = 0.5; // wants to move
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // With distance_scale=0, apply_velocity_limits should hold at current position.
-  // The collision check at the held position should be safe (straight chain at [0.3,0,0]).
-  // So the final written command should be the velocity-limited position (= current = 0.3).
-  EXPECT_NEAR( hw_cmd_values_[0], 0.3, 1e-6 );
-}
-
 // ============================================================================
 // Directional Collision Scaling Tests
 // ============================================================================
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_AwayNotScaled )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ halfway in safety zone -> distance_scale = 0.5
-  controller_->last_min_distance_ = 0.025;
-
-  // Create a fake safety zone pair with a gradient that says joint1 positive = moving away
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.025;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  // Gradient: positive for joint1's velocity index means positive motion increases distance
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  fake_pair.gradient[v_idx_j1] = 1.0; // moving joint1 positively moves AWAY
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  // Current position: all zero
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-
-  // Command positive joint1 motion (away from collision)
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Since motion is away from collision, effective_scale should be 1.0 (not 0.5)
-  // max_step = velocity_limit / update_rate * block_velocity_scaling * 1.0
-  // = 1.0 / 100 * 3.0 = 0.03
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  EXPECT_NEAR( hw_cmd_values_[0], full_max_step, 1e-6 )
-      << "Motion away from collision should not be scaled down";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_TowardIsScaled )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ halfway in safety zone -> distance_scale = 0.5
-  controller_->last_min_distance_ = 0.025;
-
-  // Create a fake safety zone pair: joint1 positive = moving TOWARD collision
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.025;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  fake_pair.gradient[v_idx_j1] = -1.0; // moving joint1 positively moves TOWARD collision
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5; // positive = toward collision
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Motion toward collision -> effective_scale = distance_scale = 0.5
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5;
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
-      << "Motion toward collision should be scaled down";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_AtPaddingCanEscape )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // At collision padding: distance_scale = 0.0
-  controller_->last_min_distance_ = 0.0;
-
-  // Create a safety zone pair: moving joint1 positive = AWAY from collision
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.0;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  fake_pair.gradient[v_idx_j1] = 1.0; // away
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  setStateValue( "joint1", 0.3 );
-  setStateValue( "joint2", 0.0 );
-  setStateValue( "joint3", 0.0 );
-
-  // Command motion away
-  controller_->reference_interfaces_[0] = 0.5; // away from collision
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Even though distance_scale=0, directional scaling overrides to 1.0
-  // because motion is away from collision
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_cmd = 0.3 + full_max_step; // current + max step
-  EXPECT_NEAR( hw_cmd_values_[0], expected_cmd, 1e-6 )
-      << "Robot should be able to escape when moving away from collision at padding boundary";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_TwoPairsOneWorsening )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  controller_->last_min_distance_ = 0.025;
-
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  int nv = controller_->collision_checker_->getNv();
-
-  // Pair 1: joint1 positive = AWAY
-  CollisionResult::PairInfo pair1;
-  pair1.pair_index = 0;
-  pair1.distance = 0.025;
-  pair1.gradient = Eigen::VectorXd::Zero( nv );
-  pair1.gradient[v_idx_j1] = 1.0; // away
-
-  // Pair 2: joint1 positive = TOWARD
-  CollisionResult::PairInfo pair2;
-  pair2.pair_index = 1;
-  pair2.distance = 0.03;
-  pair2.gradient = Eigen::VectorXd::Zero( nv );
-  pair2.gradient[v_idx_j1] = -0.5; // toward
-
-  controller_->last_safety_zone_pairs_ = { pair1, pair2 };
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // One pair says away, one says toward → worst case is toward → scaling applied
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5; // distance_scale = 0.5
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
-      << "With any pair worsening, motion should be scaled conservatively";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_DisabledByParam )
-{
-  initWithCollisions( {}, "test_robot_collision.urdf",
-                      { rclcpp::Parameter( "directional_collision_scaling", false ) } );
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  controller_->last_min_distance_ = 0.025;
-
-  // Even with gradient saying "away", scaling should still be applied (param disabled)
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.025;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  fake_pair.gradient[v_idx_j1] = 1.0; // away
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // With directional scaling disabled, should use distance_scale=0.5 even though moving away
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5;
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
-      << "With directional scaling disabled, should always use distance-based scale";
-}
 
 // ============================================================================
 // Current Limits Tests
@@ -1411,7 +1105,10 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
+  // Start close to the limit so per-cycle velocity stepping (active also during bypass)
+  // does not dominate the test: joint2 max step = 2.0/100 * 1.5 = 0.03.
   for ( auto &v : hw_state_values_ ) v = 0.0;
+  setStateValue( "joint2", 1.5 );
 
   // joint2 upper limit is 1.5, range = 3.0, tolerance = 3% -> 0.09 extra
   // Without bypass: command beyond 1.5 should clamp to 1.5
@@ -1431,11 +1128,20 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
 
   callUpdate();
 
-  // With bypass (tolerance = 3% of range 3.0 = 0.09), upper limit becomes 1.59
-  // 1.55 is within [1.5, 1.59] so it should pass through
+  // With bypass (tolerance = 3% of range 3.0 = 0.09), upper limit becomes 1.59.
+  // Bypass keeps velocity/acceleration limits active, so 1.55 is approached smoothly
+  // over multiple cycles rather than jumped to.
+  for ( int i = 0; i < 100 && hw_cmd_values_[1] <= 1.5; ++i ) {
+    setStateValue( "joint2", hw_cmd_values_[1] );
+    callUpdate();
+  }
   EXPECT_GT( hw_cmd_values_[1], 1.5 )
       << "With bypass, commands slightly beyond normal limits should be allowed";
-  EXPECT_NEAR( hw_cmd_values_[1], 1.55, 1e-6 );
+  for ( int i = 0; i < 100; ++i ) {
+    setStateValue( "joint2", hw_cmd_values_[1] );
+    callUpdate();
+  }
+  EXPECT_NEAR( hw_cmd_values_[1], 1.55, 1e-4 );
 }
 
 // ============================================================================
@@ -1584,32 +1290,223 @@ TEST_F( SafetyPositionControllerTest, EstopHoldsAcrossMultipleCycles )
 // Collision test: distance-based scaling status fields
 // ============================================================================
 
-TEST_F( SafetyPositionControllerCollisionTest, StatusReportsDistanceScalingFields )
+// ============================================================================
+// Safety QP behavior
+// ============================================================================
+
+namespace
 {
+// kUpdateRate = 100 → dt = 0.01. Defaults: acceleration limit 8 rad/s²,
+// deceleration_scale 3 → decel 24 rad/s². URDF velocity limits: joint1=1.0,
+// joint2=2.0, joint3=1.5.
+constexpr double kDt = 0.01;
+constexpr double kAccPerCycle = 8.0 * kDt;       // max speed-up per cycle
+constexpr double kDecPerCycle = 3.0 * 8.0 * kDt; // max brake per cycle
+} // namespace
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeRampsAndReachesTarget )
+{
+  // End-to-end regression for the jump bug: a far target is approached with bounded
+  // velocity AND bounded acceleration, and is still reached (later).
   initWithCollisions();
   configureWithSrdf();
   setupHardwareInterfaces();
   findMocks();
-
-  SafetyPositionControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  // Set last_min_distance_ halfway in safety zone
-  controller_->last_min_distance_ = 0.025;
-
   for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.01;
+
+  // joint1 rotates the whole chain about z → no collision along the way
+  controller_->reference_interfaces_[0] = 0.5;
   controller_->reference_interfaces_[1] = 0.0;
   controller_->reference_interfaces_[2] = 0.0;
 
-  callUpdate();
-  controller_->publish_status();
+  double prev_cmd = 0.0, prev_v = 0.0, max_dv = 0.0, max_v = 0.0;
+  int reached_at = -1;
+  for ( int cycle = 0; cycle < 300; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    const double cmd = hw_cmd_values_[0];
+    const double v = ( cmd - prev_cmd ) / kDt;
+    max_dv = std::max( max_dv, std::abs( v - prev_v ) );
+    max_v = std::max( max_v, std::abs( v ) );
+    prev_cmd = cmd;
+    prev_v = v;
+    // hardware follows the command
+    setStateValue( "joint1", cmd );
+    if ( reached_at < 0 && std::abs( cmd - 0.5 ) < 1e-4 ) {
+      reached_at = cycle;
+    }
+  }
 
-  EXPECT_TRUE( captured.collision_check_enabled );
-  EXPECT_NEAR( captured.distance_scale, 0.5, 1e-6 );
+  EXPECT_GE( reached_at, 50 ) << "cannot be faster than the velocity limit";
+  EXPECT_GT( reached_at, 0 ) << "target never reached";
+  EXPECT_LE( max_v, 1.0 + 1e-6 ) << "velocity limit violated";
+  EXPECT_LE( max_dv, kDecPerCycle + 1e-6 ) << "acceleration limit violated";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeStopsAtCollisionAndReportsStall )
+{
+  // Command straight into a self-collision: the damper must stop the motion at the
+  // boundary (no penetration of the commanded configuration) and report 'stalled'.
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // joint2 = pi folds link4 into link1 → collision on the way
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = M_PI;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int cycle = 0; cycle < 500; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+    // The commanded configuration must never penetrate (padding = 0 in this fixture;
+    // small negative tolerance for the linearization sag on curved geometry)
+    ASSERT_GT( controller_->last_min_distance_, -5e-3 )
+        << "commanded configuration in collision at cycle " << cycle;
+  }
+
+  EXPECT_TRUE( controller_->stalled_ ) << "head-on block must be reported as stalled";
+  EXPECT_LT( hw_cmd_values_[1], M_PI - 0.1 ) << "should have stopped before the fold";
+  EXPECT_GT( hw_cmd_values_[1], 0.1 ) << "should have moved toward the target first";
+
+  // ---- Bypass: the fold must proceed, but still velocity/acceleration limited ----
+  controller_->safety_bypass_active_.store( true );
+
+  const double stalled_cmd = hw_cmd_values_[1];
+  double prev_cmd = stalled_cmd, prev_v = 0.0, max_dv = 0.0, max_v = 0.0;
+  for ( int cycle = 0; cycle < 500; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    const double cmd = hw_cmd_values_[1];
+    const double v = ( cmd - prev_cmd ) / kDt;
+    max_dv = std::max( max_dv, std::abs( v - prev_v ) );
+    max_v = std::max( max_v, std::abs( v ) );
+    prev_cmd = cmd;
+    prev_v = v;
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+
+  EXPECT_GT( hw_cmd_values_[1], stalled_cmd + 0.5 ) << "bypass should allow the fold to proceed";
+  EXPECT_LE( max_v, 2.0 + 1e-6 ) << "velocity limit must hold during bypass (joint2 limit 2.0)";
+  EXPECT_LE( max_dv, kDecPerCycle + 1e-6 )
+      << "acceleration limit must hold during bypass (the original jump bug)";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeParksAfterStallAndResumesOnNewReference )
+{
+  // A limb stalled past stall_park_timeout must abandon the stale reference and hold
+  // position (no delayed motion when the blockage clears), resuming only on a NEW
+  // command (reference change).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "stall_park_timeout", 2.0 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // joint2 = pi folds into a self-collision → the QP stalls at the boundary
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = M_PI;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int cycle = 0; cycle < 600 && !controller_->parked_; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+  ASSERT_TRUE( controller_->parked_ ) << "did not park within 600 cycles";
+  EXPECT_TRUE( controller_->stalled_ );
+
+  // While parked: tracking demand is zeroed even though the reference is still far away
+  // — the guarantee that clearing the blockage cannot cause delayed motion.
+  const double parked_cmd = hw_cmd_values_[1];
+  for ( int cycle = 0; cycle < 100; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+    EXPECT_LT( controller_->qp_input_.v_des.cwiseAbs().maxCoeff(), 1e-9 );
+  }
+  EXPECT_TRUE( controller_->parked_ );
+  EXPECT_NEAR( hw_cmd_values_[1], parked_cmd, 1e-6 ) << "parked limb must not creep";
+
+  // A NEW reference (retract away from the collision) releases the park and is tracked
+  controller_->reference_interfaces_[1] = 0.3;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->parked_ );
+
+  for ( int cycle = 0; cycle < 500; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+  EXPECT_NEAR( hw_cmd_values_[1], 0.3, 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeJointDeviationBoxWiring )
+{
+  // The per-joint deviation box must be centered on the LEASHED reference and widened
+  // to include the current command (one-sided: prevents drifting, never pulls).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "joint_deviation_limits.joint1.limit", 0.1 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5; // leash: v_max(1.0) * 0.3 s → leashed ref 0.3
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+
+  // joint1 (limit 0.1): box = [min(0.3-0.1, cmd~0), 0.3+0.1] = [0.0, 0.4]
+  EXPECT_NEAR( controller_->qp_input_.q_hi[0], 0.4, 1e-6 );
+  EXPECT_NEAR( controller_->qp_input_.q_lo[0], 0.0, 1e-6 );
+  // joint2 (default limit 0.25, ref 0): box = [-0.25, 0.25] within URDF [-pi, pi]
+  EXPECT_NEAR( controller_->qp_input_.q_hi[1], 0.25, 1e-6 );
+  EXPECT_NEAR( controller_->qp_input_.q_lo[1], -0.25, 1e-6 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeWorksWithoutCollisionChecker )
+{
+  // check_self_collisions=false: no collision constraints, but
+  // velocity/acceleration/position limits still apply (pure smoothing mode).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "check_self_collisions", false ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  EXPECT_TRUE( controller_->collision_checker_ == nullptr );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.3;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  double prev_cmd = 0.0, prev_v = 0.0, max_dv = 0.0;
+  for ( int cycle = 0; cycle < 200; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    const double cmd = hw_cmd_values_[0];
+    const double v = ( cmd - prev_cmd ) / kDt;
+    max_dv = std::max( max_dv, std::abs( v - prev_v ) );
+    prev_cmd = cmd;
+    prev_v = v;
+    setStateValue( "joint1", cmd );
+  }
+
+  EXPECT_NEAR( hw_cmd_values_[0], 0.3, 1e-4 );
+  EXPECT_LE( max_dv, kDecPerCycle + 1e-6 );
 }
 
 // ============================================================================

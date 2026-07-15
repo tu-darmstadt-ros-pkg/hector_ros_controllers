@@ -142,6 +142,19 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       [this]( const rclcpp::Parameter &p ) { update_debug_publishers( p.as_bool() ); },
       node->get_name() );
 
+  // QP debug introspection publisher (dynamically reconfigurable)
+  qp_debug_pub_ =
+      node->create_publisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>( "~/qp_debug", 10 );
+  qp_debug_enabled_.store( params_.publish_qp_debug, std::memory_order_relaxed );
+  cb_handle_qp_debug_ = param_subscriber_->add_parameter_callback(
+      "publish_qp_debug",
+      [this]( const rclcpp::Parameter &p ) {
+        qp_debug_enabled_.store( p.as_bool(), std::memory_order_relaxed );
+        RCLCPP_INFO( get_node()->get_logger(), "QP debug publishing %s",
+                     p.as_bool() ? "enabled" : "disabled" );
+      },
+      node->get_name() );
+
   // Non-chained command subscriber (RT buffer)
   joints_command_subscriber_ = node->create_subscription<CmdType>(
       "~/commands", rclcpp::SystemDefaultsQoS(),
@@ -216,10 +229,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   last_min_distance_ = std::numeric_limits<double>::max();
   last_safety_zone_pairs_.clear();
   was_in_collision_ = false;
-  logged_motion_stopped_pairs_.clear();
-  last_distance_scale_ = 1.0;
-  last_effective_scale_ = 1.0;
-  last_worst_directional_derivative_ = std::numeric_limits<double>::quiet_NaN();
 
   status_timer_.reset();
   if ( params_.status_publish_rate > 0.0 ) {
@@ -235,19 +244,16 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   RCLCPP_INFO( get_node()->get_logger(),
                "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
-               "padding=%.4f, safety_zone=%.4f, cache_eps=%.1e, directional=%s, debug_viz=%s, "
+               "padding=%.4f, safety_zone=%.4f, cache_eps=%.1e, debug_viz=%s, "
                "publish_distances=%s",
                params_.joints.size(), params_.check_self_collisions ? "ON" : "OFF",
                params_.use_broadphase ? "ON" : "OFF", params_.collision_padding,
                params_.collision_safety_zone, params_.collision_cache_epsilon,
-               params_.directional_collision_scaling ? "ON" : "OFF",
                params_.debug_visualize_collisions ? "ON" : "OFF",
                params_.publish_collision_distances ? "ON" : "OFF" );
 
-  // compute max allowed distance per cycle
-  for ( size_t n = 0; n < params_.joints.size(); ++n ) {
-    max_allowed_distance_per_cycle_[n] =
-        velocity_limits_[n] / get_update_rate() * params_.block_velocity_scaling;
+  if ( !setup_qp_on_activate() ) {
+    return controller_interface::CallbackReturn::ERROR;
   }
 
   // check order of command interfaces
@@ -412,153 +418,27 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 
   // If E-stop engaged → always hold recorded positions (no checks)
   if ( estop_engaged ) {
+    qp_state_valid_ = false; // rebase to the measured state on release
     success &= write_position_commands( hold_positions_ );
     return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
   }
 
-  bool nan_in_refs = std::any_of( reference_interfaces_.begin(), reference_interfaces_.end(),
-                                  []( double v ) { return std::isnan( v ); } );
-
-  if ( nan_in_refs ) {
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                          "NaN detected in reference interfaces. Not writing commands." );
-    return controller_interface::return_type::OK;
-  }
+  // NaN references need no special handling: per-joint NaN targets simply demand zero
+  // velocity, so the arm brakes to a smooth stop instead of freezing.
 
   // resolve continuous joints & enforce limits
   enforce_limits();
 
-  // ---- Distance-based velocity scaling ----
-  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
-  const bool collision_checks_active =
-      !bypass_active && params_.check_self_collisions && collision_checker_;
-
-  // Compute velocity scale factor from previous cycle's min distance
-  double distance_scale = 1.0;
-  if ( collision_checks_active ) {
-    const auto &d = last_min_distance_;
-    const auto &d_pad = params_.collision_padding;
-    const auto &d_zone = params_.collision_safety_zone;
-
-    if ( d <= d_pad ) {
-      distance_scale = 0.0;
-    } else if ( d < d_zone ) {
-      distance_scale = ( d - d_pad ) / ( d_zone - d_pad );
-    }
-    // else: distance_scale remains 1.0 (full speed)
-  }
-
-  // Always apply velocity-limited stepping when collision checks are active
-  double effective_scale = distance_scale;
-  double worst_directional_derivative = std::numeric_limits<double>::quiet_NaN();
-  if ( collision_checks_active ) {
-    // Directional scaling: only slow down if moving toward any collision in safety zone
-    if ( distance_scale < 1.0 && params_.directional_collision_scaling &&
-         !last_safety_zone_pairs_.empty() ) {
-      double worst = std::numeric_limits<double>::infinity();
-      for ( const auto &pair_info : last_safety_zone_pairs_ ) {
-        worst = std::min( worst, compute_directional_derivative( pair_info.gradient ) );
-      }
-      worst_directional_derivative = worst;
-      if ( worst >= 0.0 ) {
-        // ALL safety-zone pairs say motion moves away or is tangent → allow full speed
-        effective_scale = 1.0;
-      }
-    }
-    apply_velocity_limits( effective_scale );
-  }
-  last_distance_scale_ = distance_scale;
-  last_effective_scale_ = effective_scale;
-  last_worst_directional_derivative_ = worst_directional_derivative;
-
+  success &= update_qp_mode();
   if ( params_.set_current_limits ) {
     success &= write_current_limits();
   }
-
-  // ---- Collision check ----
-  if ( !collision_checks_active ) {
-    if ( bypass_active && params_.check_self_collisions && collision_checker_ ) {
-      RCLCPP_DEBUG_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                             throttle_logging_msg, "Safety bypass active: skipping collision check" );
-    }
-    // Collision state is no longer observed → reset so a collision after checks resume re-warns.
-    was_in_collision_ = false;
-    write_position_commands( cmd_positions_ );
-  } else {
-    // prepare collision checker input
-    bool success_cc_setup = true;
-    for ( size_t i = 0; i < all_joint_names_.size(); ++i ) {
-      const auto opt = state_interfaces_[i].get_optional();
-      if ( opt.has_value() ) {
-        cc_positions_[all_joint_names_[i]] = opt.value();
-      } else {
-        success_cc_setup = false;
-      }
-    }
-    for ( size_t i = 0; i < n; ++i ) { cc_positions_[params_.joints[i]] = cmd_positions_[i]; }
-
-    if ( success_cc_setup ) {
-      // Request gradient computation when inside safety zone (or when directional scaling is on)
-      const double gradient_threshold = ( params_.directional_collision_scaling &&
-                                          last_min_distance_ < params_.collision_safety_zone )
-                                            ? params_.collision_safety_zone
-                                            : 0.0;
-      collision_checker_->setSafetyZoneThreshold( gradient_threshold );
-      const auto cc_result = collision_checker_->checkCollision( cc_positions_ );
-      last_min_distance_ = cc_result.min_distance;
-      last_min_distance_pair_index_ = cc_result.min_distance_pair_index;
-      last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
-
-      // Provide directional derivative info to collision checker for visualization
-      if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
-        const std::size_t num_pairs = collision_checker_->getNumCollisionPairs();
-        std::vector<double> per_pair_dir_derivs( num_pairs, std::numeric_limits<double>::quiet_NaN() );
-        for ( const auto &pi : last_safety_zone_pairs_ ) {
-          if ( pi.pair_index < num_pairs ) {
-            per_pair_dir_derivs[pi.pair_index] = compute_directional_derivative( pi.gradient );
-          }
-        }
-        collision_checker_->setDirectionalInfo( per_pair_dir_derivs, params_.collision_safety_zone );
-      }
-
-      if ( !cc_result.in_collision ) {
-        was_in_collision_ = false; // collisions resolved → reset silently
-        write_position_commands( cmd_positions_ );
-      } else {
-        // Edge-triggered: warn once per entry into collision (not-in-collision → in-collision), so
-        // a steady collision is logged once instead of every cycle. Which pairs collide may change
-        // freely within an episode without re-logging.
-        if ( !was_in_collision_ ) {
-          const std::string pairs_str =
-              format_collision_pairs( cc_result.safety_zone_pairs, params_.collision_padding,
-                                      cc_result.min_distance_pair_index );
-          RCLCPP_WARN( get_node()->get_logger(),
-                       "Collision detected (min_dist=%.4f m). Pairs in collision: %s. "
-                       "Holding current positions.",
-                       cc_result.min_distance, pairs_str.c_str() );
-          was_in_collision_ = true;
-        }
-        write_position_commands( current_positions_ );
-      }
-    } else {
-      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                            throttle_logging_msg, "Failed to setup collision checking." );
-      // Collision state is no longer observed → reset so a collision after setup recovers re-warns.
-      was_in_collision_ = false;
-      write_position_commands( current_positions_ );
-    }
-  }
-
-  // Compute manipulability index if collision checker is available (FK already done)
+  // Manipulability at the last checked configuration (FK already done)
   if ( collision_checker_ && !params_.manipulability_ee_frame.empty() ) {
     last_manipulability_ =
         collision_checker_->computeManipulability( params_.manipulability_ee_frame );
   }
-
-  // Publish a snapshot of last_*_ to rt_status_buffer_ so publish_status() (called from
-  // the wall timer or from any other thread) reads a consistent view without locking.
   update_status_snapshot();
-
   return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
 }
 
@@ -624,89 +504,432 @@ void SafetyPositionController::enforce_limits()
   }
 }
 
-void SafetyPositionController::apply_velocity_limits( const double distance_scale )
+bool SafetyPositionController::setup_qp_on_activate()
 {
-  // distance_scale: 1.0 → full speed, 0.0 → stop; can be used to smoothly reduce speed when close to collisions
-  const double clamped_scale = std::clamp( distance_scale, 0.0, 1.0 );
-  const bool fully_stopped = ( clamped_scale <= 0.0 );
+  const size_t n = params_.joints.size();
+  const auto ni = static_cast<Eigen::Index>( n );
+  const double dt = 1.0 / get_update_rate();
 
-  // When scaling fully stops motion (proximity to collision), emit a single informative warning
-  // listing the safety-zone pairs instead of one per joint. Edge-triggered: warn only when the set
-  // of safety-zone pairs changes, so a steady stop (e.g. arm resting on the body while driving) is
-  // logged once instead of every throttle interval.
-  if ( fully_stopped && collision_checker_ ) {
-    std::set<std::size_t> current_pairs;
-    for ( const auto &pi : last_safety_zone_pairs_ ) {
-      if ( pi.distance <= params_.collision_safety_zone ) {
-        current_pairs.insert( pi.pair_index );
-      }
-    }
-    if ( current_pairs.empty() &&
-         last_min_distance_pair_index_ != std::numeric_limits<std::size_t>::max() ) {
-      current_pairs.insert( last_min_distance_pair_index_ );
-    }
+  SafetyQpParams qp_params;
+  qp_params.dt = dt;
+  qp_params.v_max.resize( ni );
+  qp_params.a_acc.resize( ni );
+  qp_params.a_dec.resize( ni );
+  for ( size_t i = 0; i < n; ++i ) {
+    const auto idx = static_cast<Eigen::Index>( i );
+    qp_params.v_max[idx] = velocity_limits_[i];
+    qp_params.a_acc[idx] = params_.acceleration_limits.joints_map[params_.joints[i]].limit;
+    qp_params.a_dec[idx] = qp_params.a_acc[idx] * params_.deceleration_scale;
+  }
+  qp_params.damper_xi = params_.qp_damper_xi;
+  qp_params.d_pad = params_.collision_padding;
+  qp_params.d_zone = params_.collision_safety_zone;
+  qp_params.max_repulsion_speed = params_.qp_max_repulsion_speed;
+  qp_params.contact_crawl_speed = params_.qp_contact_crawl_speed;
+  qp_params.max_collision_constraints = static_cast<std::size_t>( params_.qp_max_pair_constraints );
 
-    if ( current_pairs != logged_motion_stopped_pairs_ ) {
-      const std::string pairs_str = format_collision_pairs(
-          last_safety_zone_pairs_, params_.collision_safety_zone, last_min_distance_pair_index_ );
-      RCLCPP_WARN( get_node()->get_logger(),
-                   "Motion stopped: min_dist=%.4f m within safety zone "
-                   "(padding=%.4f, zone=%.4f). Pairs: %s. Holding positions.",
-                   last_min_distance_, params_.collision_padding, params_.collision_safety_zone,
-                   pairs_str.c_str() );
-      logged_motion_stopped_pairs_ = std::move( current_pairs );
-    }
-  } else {
-    logged_motion_stopped_pairs_.clear(); // motion resumed → reset silently
+  try {
+    qp_limiter_ = std::make_unique<SafetyQpLimiter>( n, qp_params );
+  } catch ( const std::invalid_argument &e ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Failed to construct safety QP: %s", e.what() );
+    return false;
   }
 
-  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    if ( !std::isnan( velocity_limits_[i] ) ) {
-      // shortest signed distance from current -> command
-      const double diff = ( kinds_[i] == JointType::CONTINUOUS )
-                              ? get_signed_distance( current_positions_[i], cmd_positions_[i] )
-                              : ( cmd_positions_[i] - current_positions_[i] );
-      const double max_step = max_allowed_distance_per_cycle_[i] * clamped_scale;
-
-      if ( std::abs( diff ) > max_step ) {
-        // Skip the per-joint warning when motion is fully stopped (already logged above).
-        if ( !fully_stopped ) {
-          RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                                throttle_logging_msg,
-                                "Joint '%s' step limited (|diff|=%.4f > allowed=%.4f, "
-                                "dist_scale=%.3f). [current=%.3f, cmd=%.3f]",
-                                params_.joints[i].c_str(), std::abs( diff ), max_step,
-                                clamped_scale, current_positions_[i], cmd_positions_[i] );
-        }
-
-        if ( max_step <= 0.0 ) {
-          cmd_positions_[i] = current_positions_[i]; // zero speed = hold
-        } else {
-          cmd_positions_[i] = current_positions_[i] + std::copysign( max_step, diff );
-        }
-      }
-    }
+  if ( collision_checker_ ) {
+    collision_checker_->setMaxSafetyZonePairs(
+        static_cast<std::size_t>( params_.qp_max_pair_constraints ) );
   }
+
+  // Tunneling check: one full-speed step must not cross the whole braking zone,
+  // otherwise the damper can be skipped over between two collision checks.
+  const double zone_width = params_.collision_safety_zone - params_.collision_padding;
+  const double max_step = qp_params.v_max.maxCoeff() * dt;
+  if ( params_.check_self_collisions && max_step >= zone_width ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "Max per-cycle step (%.4f) >= safety zone width (%.4f): fast joints could "
+                 "tunnel through the damper zone. Increase collision_safety_zone or the "
+                 "update rate.",
+                 max_step, zone_width );
+  }
+
+  qp_cmd_ = Eigen::VectorXd::Zero( ni );
+  qp_vel_ = Eigen::VectorXd::Zero( ni );
+  qp_ref_leashed_ = Eigen::VectorXd::Zero( ni );
+  qp_a_dec_ = qp_params.a_dec;
+  qp_cmd_std_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  qp_input_.v_des = Eigen::VectorXd::Zero( ni );
+  qp_input_.v_prev = Eigen::VectorXd::Zero( ni );
+  qp_input_.q = Eigen::VectorXd::Zero( ni );
+  qp_input_.q_lo = Eigen::VectorXd::Constant( ni, -std::numeric_limits<double>::infinity() );
+  qp_input_.q_hi = Eigen::VectorXd::Constant( ni, std::numeric_limits<double>::infinity() );
+  qp_input_.collisions.reserve( qp_params.max_collision_constraints );
+  qp_last_result_ = SafetyQpResult{};
+  qp_state_valid_ = false;
+  stall_time_ = 0.0;
+  stalled_ = false;
+  parked_ = false;
+  parked_reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  if ( params_.stall_park_timeout > 0.0 && params_.stall_park_timeout <= params_.qp_stall_timeout ) {
+    RCLCPP_WARN( get_node()->get_logger(),
+                 "stall_park_timeout (%.2f s) <= qp_stall_timeout (%.2f s): the limb will park "
+                 "as soon as the stall is reported.",
+                 params_.stall_park_timeout, params_.qp_stall_timeout );
+  }
+
+  RCLCPP_INFO( get_node()->get_logger(),
+               "Safety QP: joints=%zu, xi=%.2f, max_pairs=%ld, decel_scale=%.1f, "
+               "crawl=%.2f, leash(ref=%.2fs, track=%.2frad)",
+               n, params_.qp_damper_xi, params_.qp_max_pair_constraints, params_.deceleration_scale,
+               params_.qp_contact_crawl_speed, params_.reference_leash_time, params_.tracking_leash );
+  return true;
 }
 
-double SafetyPositionController::compute_directional_derivative( const Eigen::VectorXd &gradient ) const
+bool SafetyPositionController::update_qp_mode()
 {
-  double dot_product = 0.0;
-  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    if ( joint_v_index_[i] < 0 || joint_v_index_[i] >= gradient.size() )
-      continue;
+  const size_t n = params_.joints.size();
+  const double dt = 1.0 / get_update_rate();
 
-    // For continuous joints, use shortest-path angular distance
-    double delta_q_i;
-    if ( kinds_[i] == JointType::CONTINUOUS ) {
-      delta_q_i = get_signed_distance( current_positions_[i], cmd_positions_[i] );
+  if ( !qp_state_valid_ ) {
+    for ( size_t i = 0; i < n; ++i ) {
+      qp_cmd_[static_cast<Eigen::Index>( i )] = current_positions_[i];
+    }
+    qp_vel_.setZero();
+    stall_time_ = 0.0;
+    stalled_ = false;
+    qp_state_valid_ = true;
+  }
+
+  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+  const bool collision_checks_active =
+      !bypass_active && params_.check_self_collisions && collision_checker_;
+
+  // ---- Desired velocity toward the (leashed) reference ----
+  bool wants_motion = false;
+  for ( size_t i = 0; i < n; ++i ) {
+    const auto idx = static_cast<Eigen::Index>( i );
+    const double target = cmd_positions_[i];
+    double diff = 0.0;
+    if ( !std::isnan( target ) ) {
+      diff = ( kinds_[i] == JointType::CONTINUOUS ) ? get_signed_distance( qp_cmd_[idx], target )
+                                                    : ( target - qp_cmd_[idx] );
+      if ( params_.reference_leash_time > 0.0 ) {
+        const double leash = velocity_limits_[i] * params_.reference_leash_time;
+        diff = std::clamp( diff, -leash, leash );
+      }
+    }
+    qp_ref_leashed_[idx] = qp_cmd_[idx] + diff;
+    qp_input_.v_des[idx] =
+        SafetyQpLimiter::desiredVelocity( diff, velocity_limits_[i], qp_a_dec_[idx], dt );
+    wants_motion |= std::abs( qp_input_.v_des[idx] ) > params_.qp_stall_velocity_threshold;
+
+    // Position limits (damper handled inside the QP); bypass extends them like clamp()
+    if ( has_limits_[i] && kinds_[i] != JointType::CONTINUOUS ) {
+      const double tolerance = bypass_active ? ( upper_limits_[i] - lower_limits_[i] ) *
+                                                   params_.safety_bypass_joint_limit_tolerance
+                                             : 0.0;
+      qp_input_.q_lo[idx] = lower_limits_[i] - tolerance;
+      qp_input_.q_hi[idx] = upper_limits_[i] + tolerance;
     } else {
-      delta_q_i = cmd_positions_[i] - current_positions_[i];
+      qp_input_.q_lo[idx] = -std::numeric_limits<double>::infinity();
+      qp_input_.q_hi[idx] = std::numeric_limits<double>::infinity();
     }
 
-    dot_product += gradient[joint_v_index_[i]] * delta_q_i;
+    // Per-joint deviation box around the leashed reference: bounds how far every link
+    // may leave the upstream-validated path. One-sided (widened to include the current
+    // command): prevents drifting further, never demands catch-up.
+    const double dev_limit =
+        bypass_active ? 0.0 : params_.joint_deviation_limits.joints_map[params_.joints[i]].limit;
+    if ( dev_limit > 0.0 ) {
+      qp_input_.q_lo[idx] = std::max( qp_input_.q_lo[idx],
+                                      std::min( qp_ref_leashed_[idx] - dev_limit, qp_cmd_[idx] ) );
+      qp_input_.q_hi[idx] = std::min( qp_input_.q_hi[idx],
+                                      std::max( qp_ref_leashed_[idx] + dev_limit, qp_cmd_[idx] ) );
+    }
   }
-  return dot_product;
+  // ---- Parked: the latched reference is abandoned; hold until a NEW command ----
+  if ( parked_ ) {
+    bool new_command = false;
+    for ( size_t i = 0; i < n && !new_command; ++i ) {
+      const double ref = cmd_positions_[i];
+      if ( std::isnan( ref ) ) {
+        continue;
+      }
+      if ( std::isnan( parked_reference_[i] ) ) {
+        new_command = true;
+        break;
+      }
+      const double delta = ( kinds_[i] == JointType::CONTINUOUS )
+                               ? get_signed_distance( parked_reference_[i], ref )
+                               : ( ref - parked_reference_[i] );
+      new_command = std::abs( delta ) > params_.park_resume_reference_threshold;
+    }
+    if ( new_command ) {
+      parked_ = false;
+      stalled_ = false;
+      stall_time_ = 0.0;
+      RCLCPP_INFO( get_node()->get_logger(),
+                   "New reference received — resuming from parked state." );
+      publish_status();
+    } else {
+      qp_input_.v_des.setZero();
+      wants_motion = false;
+    }
+  }
+
+  qp_input_.v_prev = qp_vel_;
+  qp_input_.q = qp_cmd_;
+
+  // ---- Collision damper constraints (evaluated at the commanded configuration) ----
+  qp_input_.collisions.clear();
+  qp_constraint_pair_names_.clear();
+  bool collision_state_observed = false;
+  if ( collision_checks_active ) {
+    bool cc_setup_ok = true;
+    for ( size_t i = 0; i < all_joint_names_.size(); ++i ) {
+      const auto opt = state_interfaces_[i].get_optional();
+      if ( opt.has_value() ) {
+        cc_positions_[all_joint_names_[i]] = opt.value();
+      } else {
+        cc_setup_ok = false;
+      }
+    }
+    for ( size_t i = 0; i < n; ++i ) {
+      cc_positions_[params_.joints[i]] = qp_cmd_[static_cast<Eigen::Index>( i )];
+    }
+
+    if ( cc_setup_ok ) {
+      collision_state_observed = true;
+      // Always request gradients for the full zone: they ARE the constraints.
+      collision_checker_->setSafetyZoneThreshold( params_.collision_safety_zone );
+      const auto cc_result = collision_checker_->checkCollision( cc_positions_ );
+      last_min_distance_ = cc_result.min_distance;
+      last_min_distance_pair_index_ = cc_result.min_distance_pair_index;
+      last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
+
+      if ( cc_result.in_collision ) {
+        if ( !was_in_collision_ ) {
+          const std::string pairs_str =
+              format_collision_pairs( cc_result.safety_zone_pairs, params_.collision_padding,
+                                      cc_result.min_distance_pair_index );
+          RCLCPP_WARN( get_node()->get_logger(),
+                       "Collision detected (min_dist=%.4f m). Pairs in collision: %s. "
+                       "QP holding/pushing out.",
+                       cc_result.min_distance, pairs_str.c_str() );
+          was_in_collision_ = true;
+        }
+      } else {
+        was_in_collision_ = false;
+      }
+
+      for ( const auto &pair_info : cc_result.safety_zone_pairs ) {
+        QpCollisionConstraint c;
+        c.distance = pair_info.distance;
+        c.normal.resize( static_cast<Eigen::Index>( n ) );
+        for ( size_t i = 0; i < n; ++i ) {
+          const auto idx = static_cast<Eigen::Index>( i );
+          c.normal[idx] = ( joint_v_index_[i] >= 0 && joint_v_index_[i] < pair_info.gradient.size() )
+                              ? pair_info.gradient[joint_v_index_[i]]
+                              : 0.0;
+        }
+        // A pair the controlled joints cannot influence must not constrain (or even
+        // infeasible-block) the QP.
+        if ( c.normal.norm() > 1e-12 ) {
+          qp_input_.collisions.push_back( std::move( c ) );
+          const auto [name_a, name_b] = collision_checker_->getPairNames( pair_info.pair_index );
+          qp_constraint_pair_names_.push_back( name_a + "<->" + name_b );
+        }
+      }
+
+      if ( cc_result.in_collision && qp_input_.collisions.empty() ) {
+        // In collision but no usable constraints (e.g. NaN/Inf positions → blanket
+        // collision without pairs): state untrusted → stop demanding motion, QP brakes.
+        qp_input_.v_des.setZero();
+        wants_motion = false;
+      }
+    } else {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                            "Failed to setup collision checking. Braking to a stop." );
+      was_in_collision_ = false;
+      // Safety state unobservable → stop demanding motion; QP brakes smoothly.
+      qp_input_.v_des.setZero();
+      wants_motion = false;
+    }
+  } else {
+    was_in_collision_ = false;
+    last_min_distance_ = std::numeric_limits<double>::max();
+    last_safety_zone_pairs_.clear();
+  }
+
+  // ---- Solve, integrate, clamp ----
+  qp_last_result_ = qp_limiter_->solve( qp_input_ );
+  qp_vel_ = qp_last_result_.v;
+  qp_cmd_ += qp_vel_ * dt;
+
+  if ( params_.tracking_leash > 0.0 ) {
+    // Anti-windup: never run further ahead of the measured position than the leash
+    for ( size_t i = 0; i < n; ++i ) {
+      const auto idx = static_cast<Eigen::Index>( i );
+      const double ahead = qp_cmd_[idx] - current_positions_[i];
+      if ( std::abs( ahead ) > params_.tracking_leash ) {
+        qp_cmd_[idx] = current_positions_[i] + std::copysign( params_.tracking_leash, ahead );
+      }
+    }
+  }
+
+  // ---- Stall detection: reference demands motion but the QP output is ~zero ----
+  const bool moving = qp_vel_.cwiseAbs().maxCoeff() > params_.qp_stall_velocity_threshold;
+  if ( wants_motion && !moving ) {
+    stall_time_ += dt;
+    if ( !stalled_ && stall_time_ >= params_.qp_stall_timeout ) {
+      stalled_ = true;
+      const std::string blocked_str = format_blocked_directions();
+      RCLCPP_WARN( get_node()->get_logger(),
+                   "Motion stalled for %.1f s: no feasible direction toward the reference "
+                   "(min_dist=%.4f m).%s Upstream should replan.",
+                   stall_time_, last_min_distance_, blocked_str.c_str() );
+      publish_status();
+    }
+    if ( !parked_ && params_.stall_park_timeout > 0.0 && stall_time_ >= params_.stall_park_timeout ) {
+      parked_ = true;
+      parked_reference_ = cmd_positions_;
+      RCLCPP_WARN( get_node()->get_logger(),
+                   "Stalled for %.1f s — parking: the current reference is abandoned and the "
+                   "limb will hold position (even if the blockage clears) until a new command "
+                   "arrives.",
+                   stall_time_ );
+      publish_status();
+    }
+  } else if ( !parked_ ) { // while parked, wants_motion is forced false — keep stall state
+    if ( stalled_ ) {
+      RCLCPP_INFO( get_node()->get_logger(), "Motion resumed after stall." );
+      publish_status();
+    }
+    stall_time_ = 0.0;
+    stalled_ = false;
+  }
+
+  // ---- Write ----
+  for ( size_t i = 0; i < n; ++i ) { qp_cmd_std_[i] = qp_cmd_[static_cast<Eigen::Index>( i )]; }
+  const bool write_ok = write_position_commands( qp_cmd_std_ );
+
+  // Directional info for RViz distance-line coloring (green = moving away)
+  if ( collision_state_observed &&
+       ( params_.debug_visualize_collisions || params_.publish_collision_distances ) ) {
+    const std::size_t num_pairs = collision_checker_->getNumCollisionPairs();
+    std::vector<double> per_pair_dir( num_pairs, std::numeric_limits<double>::quiet_NaN() );
+    for ( const auto &pi : last_safety_zone_pairs_ ) {
+      if ( pi.pair_index < num_pairs ) {
+        double dot = 0.0;
+        for ( size_t i = 0; i < n; ++i ) {
+          if ( joint_v_index_[i] >= 0 && joint_v_index_[i] < pi.gradient.size() ) {
+            dot += pi.gradient[joint_v_index_[i]] * qp_vel_[static_cast<Eigen::Index>( i )];
+          }
+        }
+        per_pair_dir[pi.pair_index] = dot;
+      }
+    }
+    collision_checker_->setDirectionalInfo( per_pair_dir, params_.collision_safety_zone );
+  }
+
+  // Diagnostics consumed by update_status_snapshot()
+  if ( qp_debug_enabled_.load( std::memory_order_relaxed ) ) {
+    publish_qp_debug();
+  }
+
+  return write_ok;
+}
+
+void SafetyPositionController::publish_qp_debug()
+{
+  if ( !qp_debug_pub_ || !qp_limiter_ ) {
+    return;
+  }
+  const size_t n = params_.joints.size();
+
+  hector_ros_controllers_msgs::msg::SafetyQpDebug msg;
+  msg.header.stamp = get_node()->now();
+  msg.joint_names = params_.joints;
+  msg.v_des.resize( n );
+  msg.v_cmd.resize( n );
+  msg.box_lb.resize( n );
+  msg.box_ub.resize( n );
+  msg.q_cmd.resize( n );
+  msg.q_ref.resize( n );
+  for ( size_t i = 0; i < n; ++i ) {
+    const auto idx = static_cast<Eigen::Index>( i );
+    msg.v_des[i] = qp_input_.v_des[idx];
+    msg.v_cmd[i] = qp_vel_[idx];
+    msg.box_lb[i] = qp_limiter_->lastBoxLower()[idx];
+    msg.box_ub[i] = qp_limiter_->lastBoxUpper()[idx];
+    msg.q_cmd[i] = qp_cmd_[idx];
+    msg.q_ref[i] = cmd_positions_[i];
+  }
+
+  const auto num_cc = static_cast<size_t>( qp_last_result_.num_collision_constraints );
+  msg.pair_names.assign(
+      qp_constraint_pair_names_.begin(),
+      qp_constraint_pair_names_.begin() +
+          static_cast<std::ptrdiff_t>( std::min( num_cc, qp_constraint_pair_names_.size() ) ) );
+  msg.pair_distances.resize( msg.pair_names.size() );
+  msg.pair_rhs.resize( msg.pair_names.size() );
+  msg.pair_velocities.resize( msg.pair_names.size() );
+  for ( size_t k = 0; k < msg.pair_names.size(); ++k ) {
+    const auto idx = static_cast<Eigen::Index>( k );
+    msg.pair_distances[k] = qp_input_.collisions[k].distance;
+    msg.pair_rhs[k] = ( idx < qp_last_result_.collision_rhs.size() )
+                          ? qp_last_result_.collision_rhs[idx]
+                          : std::numeric_limits<double>::quiet_NaN();
+    msg.pair_velocities[k] = ( idx < qp_last_result_.collision_velocity.size() )
+                                 ? qp_last_result_.collision_velocity[idx]
+                                 : std::numeric_limits<double>::quiet_NaN();
+  }
+
+  msg.solved = qp_last_result_.solved;
+  msg.braking = qp_last_result_.braking;
+  msg.push_out_relaxed = qp_last_result_.push_out_relaxed;
+  msg.bounds_conflict = qp_last_result_.bounds_conflict;
+  msg.solve_time_us = qp_last_result_.solve_time_us;
+  msg.iterations = qp_last_result_.iterations;
+
+  qp_debug_pub_->publish( msg );
+}
+
+std::string SafetyPositionController::format_blocked_directions() const
+{
+  // For each joint the reference wants to move but that is not moving, name the
+  // constraint that most strongly opposes the desired direction (normal component
+  // against the motion). Gives an immediate answer to "why is joint X stuck".
+  std::ostringstream oss;
+  const double thr = params_.qp_stall_velocity_threshold;
+  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+    const auto idx = static_cast<Eigen::Index>( i );
+    const double v_des = qp_input_.v_des[idx];
+    if ( std::abs( v_des ) <= thr || std::abs( qp_vel_[idx] ) > thr ) {
+      continue;
+    }
+    const double dir = v_des > 0.0 ? 1.0 : -1.0;
+    // Most opposing constraint: largest -(normal_i * dir)
+    double worst_opposition = 0.0;
+    size_t worst_k = qp_input_.collisions.size();
+    for ( size_t k = 0; k < qp_input_.collisions.size(); ++k ) {
+      const double opposition = -qp_input_.collisions[k].normal[idx] * dir;
+      if ( opposition > worst_opposition ) {
+        worst_opposition = opposition;
+        worst_k = k;
+      }
+    }
+    oss << " " << params_.joints[i] << "[" << ( dir > 0.0 ? "+" : "-" ) << "]: ";
+    if ( worst_k < qp_input_.collisions.size() && worst_k < qp_constraint_pair_names_.size() ) {
+      oss << "blocked by '" << qp_constraint_pair_names_[worst_k] << "' (d=" << std::fixed
+          << std::setprecision( 4 ) << qp_input_.collisions[worst_k].distance
+          << " m, g_i=" << std::setprecision( 3 ) << -worst_opposition * dir << ");";
+    } else {
+      oss << "no opposing collision constraint (velocity/position bounds?);";
+    }
+  }
+  const std::string s = oss.str();
+  return s.empty() ? std::string( " No blocked joints identified." )
+                   : std::string( " Blocked directions:" ) + s;
 }
 
 std::string SafetyPositionController::format_collision_pairs(
@@ -825,7 +1048,6 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
   lower_limits_.assign( n, std::numeric_limits<double>::lowest() );
   upper_limits_.assign( n, std::numeric_limits<double>::max() );
   velocity_limits_.assign( n, std::numeric_limits<double>::max() );
-  max_allowed_distance_per_cycle_.assign( n, 0.0 );
 
   for ( size_t i = 0; i < n; ++i ) {
     const auto jn = params_.joints[i];
@@ -870,6 +1092,16 @@ bool SafetyPositionController::parse_urdf_and_fill_joint_info( const std::string
       RCLCPP_WARN( get_node()->get_logger(), "Joint '%s' has invalid limits [%.3f, %.3f]",
                    jn.c_str(), lower_limits_[i], upper_limits_[i] );
       has_limits_[i] = false;
+    }
+
+    // Fallback: joints without a usable URDF velocity limit would otherwise be stepped
+    // unbounded (max()) and could jump to a far-away target in a single cycle.
+    if ( !std::isfinite( velocity_limits_[i] ) || velocity_limits_[i] <= 0.0 ) {
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Joint '%s' has no usable URDF velocity limit; using default_velocity_limit=%.3f",
+          jn.c_str(), params_.default_velocity_limit );
+      velocity_limits_[i] = params_.default_velocity_limit;
     }
   }
 
@@ -967,11 +1199,16 @@ void SafetyPositionController::update_status_snapshot()
 {
   StatusSnapshot snap;
   snap.min_distance = last_min_distance_;
-  snap.distance_scale = last_distance_scale_;
-  snap.effective_scale = last_effective_scale_;
-  snap.worst_directional_derivative = last_worst_directional_derivative_;
   snap.manipulability = last_manipulability_;
   snap.num_pairs_in_safety_zone = static_cast<uint32_t>( last_safety_zone_pairs_.size() );
+  snap.qp_solved = qp_last_result_.solved;
+  snap.qp_braking = qp_last_result_.braking;
+  snap.qp_push_out_relaxed = qp_last_result_.push_out_relaxed;
+  snap.qp_num_collision_constraints =
+      static_cast<uint32_t>( qp_last_result_.num_collision_constraints );
+  snap.qp_solve_time_us = qp_last_result_.solve_time_us;
+  snap.stalled = stalled_;
+  snap.parked = parked_;
   rt_status_buffer_.writeFromNonRT( snap );
 }
 
@@ -990,11 +1227,15 @@ void SafetyPositionController::publish_status()
   msg.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
   msg.position_limits_enforced = params_.enforce_position_limits;
   msg.min_collision_distance = snap.min_distance;
-  msg.distance_scale = snap.distance_scale;
-  msg.effective_scale = snap.effective_scale;
-  msg.worst_directional_derivative = snap.worst_directional_derivative;
   msg.num_pairs_in_safety_zone = snap.num_pairs_in_safety_zone;
   msg.manipulability = snap.manipulability;
+  msg.qp_solved = snap.qp_solved;
+  msg.qp_braking = snap.qp_braking;
+  msg.qp_push_out_relaxed = snap.qp_push_out_relaxed;
+  msg.qp_num_collision_constraints = snap.qp_num_collision_constraints;
+  msg.qp_solve_time_us = snap.qp_solve_time_us;
+  msg.stalled = snap.stalled;
+  msg.parked = snap.parked;
 
   // Populate active current limits per joint (only meaningful when current_limits_enabled)
   if ( params_.set_current_limits ) {

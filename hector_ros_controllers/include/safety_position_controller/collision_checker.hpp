@@ -93,6 +93,23 @@ public:
   CollisionResult checkCollisionQ( const Eigen::VectorXd &q );
 
   /**
+   * @brief Cap the number of safety-zone pairs returned (and gradient computations).
+   * When > 0, checkCollision keeps only the @p max_pairs closest pairs (sorted by
+   * distance ascending); 0 = unlimited. Pairs are always sorted by distance ascending.
+   * @param max_pairs maximum number of pairs; 0 disables the cap
+   */
+  void setMaxSafetyZonePairs( std::size_t max_pairs );
+
+  /**
+   * @brief Build a full pinocchio configuration vector from a name→position map.
+   * Unknown joints are ignored (warn-throttled); unset joints keep their neutral value.
+   * Handles 1-DoF joints and continuous joints ([cos, sin]).
+   * @param joint_positions rad (revolute) / m (prismatic)
+   * @return q of size model_.nq
+   */
+  Eigen::VectorXd buildConfiguration( const std::unordered_map<std::string, double> &joint_positions );
+
+  /**
    * @brief Set the safety-zone threshold used by subsequent collision queries.
    * When > 0, the next query computes per-pair distance gradients (dd/dv) for all
    * pairs with distance < threshold; otherwise gradient computation is skipped.
@@ -223,7 +240,8 @@ private:
 
   double collision_padding_{ 0.0 };
   double collision_cache_epsilon_{ 1e-6 };
-  double safety_zone_threshold_{ 0.0 }; ///< 0 = no gradient computation
+  double safety_zone_threshold_{ 0.0 };    ///< 0 = no gradient computation
+  std::size_t max_safety_zone_pairs_{ 0 }; ///< cap on returned pairs; 0 = unlimited
   bool pub_debug_geometry_{ false };
   bool pub_collision_distances_{ false };
   std::shared_ptr<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>> rt_markers_pub_;

@@ -42,16 +42,6 @@ safety_position_controller:
       yielding a 3-5x speedup. Only relevant when 'check_self_collisions' is true.
     read_only: true
 
-  block_velocity_scaling:
-    type: double
-    default_value: 1.5
-    description: >
-      Scaling factor for velocity-limited stepping. The maximum per-cycle step is
-      velocity_limit / update_rate * block_velocity_scaling. Only active when
-      'check_self_collisions' is true.
-    validation:
-      bounds<>: [0.01, 15.0]
-
   collision_safety_zone:
     type: double
     default_value: 0.05
@@ -60,14 +50,150 @@ safety_position_controller:
       'collision_padding' and 'collision_safety_zone', joint velocities are linearly scaled
       down to zero. Must be strictly greater than 'collision_padding'.
 
-  directional_collision_scaling:
-    type: bool
-    default_value: true
+  acceleration_limits:
+    __map_joints:
+      limit:
+        type: double
+        default_value: 8.0
+        description: >
+          Per-joint acceleration limit (speed-up) in rad/s^2 (m/s^2 for prismatic).
+        validation:
+          bounds<>: [0.001, 10000.0]
+
+  deceleration_scale:
+    type: double
+    default_value: 3.0
     description: >
-      If true, velocity scaling near collisions is direction-aware: only motions
-      that decrease any collision distance in the safety zone are slowed down.
-      Motions moving away from all collisions proceed at full speed.
-      Requires 'check_self_collisions' to be true.
+      Deceleration limit = deceleration_scale * acceleration limit. Braking (for safety)
+      is allowed to be stronger than speed-up so collision stops stay snappy while
+      re-acceleration is smooth.
+    validation:
+      bounds<>: [1.0, 100.0]
+
+  qp_damper_xi:
+    type: double
+    default_value: 2.0
+    description: >
+      Collision velocity-damper gain in [1/s]: the allowed approach speed toward a
+      collision is qp_damper_xi * (distance - collision_padding) /
+      (collision_safety_zone - collision_padding).
+    validation:
+      bounds<>: [0.01, 100.0]
+
+  qp_max_pair_constraints:
+    type: int
+    default_value: 10
+    description: >
+      Maximum number of collision pairs used as QP constraints per cycle (the closest
+      pairs are kept). Bounds the QP size for real-time safety.
+    validation:
+      bounds<>: [1, 64]
+
+  qp_max_repulsion_speed:
+    type: double
+    default_value: 0.05
+    description: >
+      Cap in [m/s] on the active push-out speed the collision damper may request when a
+      pair is inside the collision padding.
+    validation:
+      bounds<>: [0.0, 10.0]
+
+  joint_deviation_limits:
+    __map_joints:
+      limit:
+        type: double
+        default_value: 0.25
+        description: >
+          Maximum allowed deviation in [rad] of the commanded joint position from the
+          (leashed) reference while flowing around collisions. Bounds how far EVERY link
+          may leave the upstream-validated path (per-joint box, one-sided: it never
+          demands catch-up, only prevents drifting further). 0 disables for that joint.
+        validation:
+          bounds<>: [0.0, 100.0]
+
+  qp_contact_crawl_speed:
+    type: double
+    default_value: 0.15
+    description: >
+      Velocity clamp in [rad/s] applied while any collision pair is inside the padding.
+      Tangential sliding on curved geometry sinks the true distance quadratically with
+      speed (linearization sag), so crawling near contact keeps the capped push-out
+      stronger than the sag. 0 disables.
+    validation:
+      bounds<>: [0.0, 100.0]
+
+  reference_leash_time:
+    type: double
+    default_value: 0.3
+    description: >
+      Bounds how far the reference may run ahead of the commanded position:
+      per cycle the tracked target is clamped to within velocity_limit *
+      reference_leash_time of the current command. This bounds the catch-up motion after
+      a blockage resolves regardless of upstream behavior. 0 disables.
+    validation:
+      bounds<>: [0.0, 60.0]
+
+  tracking_leash:
+    type: double
+    default_value: 0.5
+    description: >
+      Anti-windup bound in [rad] on |commanded - measured| position per joint. If the
+      hardware cannot follow (e.g. compliant mode), the command is clamped near the
+      measured position instead of running ahead and storing energy. 0 disables.
+    validation:
+      bounds<>: [0.0, 10.0]
+
+  qp_stall_timeout:
+    type: double
+    default_value: 1.0
+    description: >
+      Time in [s] after which 'stalled' is reported when the reference demands motion
+      but the QP output is (near) zero — e.g. blocked head-on by a collision constraint
+      so no flow-around direction exists. Upstream planners should treat this as a
+      request to replan.
+    validation:
+      bounds<>: [0.05, 600.0]
+
+  stall_park_timeout:
+    type: double
+    default_value: 5.0
+    description: >
+      If the commanded motion has been stalled for this long [s], the controller PARKS:
+      the current reference is considered abandoned and the limb holds position even if
+      the blocking obstacle later moves away (no unexpected delayed motion). Tracking
+      resumes only when the reference changes by more than
+      park_resume_reference_threshold on any joint, i.e. on a new command. Should be
+      larger than qp_stall_timeout. 0 disables parking.
+    validation:
+      bounds<>: [0.0, 3600.0]
+
+  park_resume_reference_threshold:
+    type: double
+    default_value: 0.01
+    description: >
+      Per-joint reference change in [rad] relative to the reference latched at park time
+      that counts as a new command and releases the parked state.
+    validation:
+      bounds<>: [0.0001, 10.0]
+
+  qp_stall_velocity_threshold:
+    type: double
+    default_value: 0.01
+    description: >
+      Velocity threshold in [rad/s] below which the commanded motion counts as stalled
+      (while the desired velocity is above it).
+    validation:
+      bounds<>: [0.0001, 10.0]
+
+  default_velocity_limit:
+    type: double
+    default_value: 1.5
+    description: >
+      Fallback velocity limit in [rad/s] (or [m/s] for prismatic joints) for joints whose
+      URDF does not specify a velocity limit. Without this, such joints would be stepped
+      without any per-cycle bound and could jump to a far-away target in one cycle.
+    validation:
+      bounds<>: [0.001, 100.0]
 
   debug_visualize_collisions:
     type: bool
@@ -83,6 +209,14 @@ safety_position_controller:
       'debug_visualize_collisions' as it skips geometry markers and safe-pair lines.
       Uses a realtime publisher for non-blocking operation. Ignored if
       'debug_visualize_collisions' is true.
+
+  publish_qp_debug:
+    type: bool
+    default_value: false
+    description: >
+      If true, publishes per-cycle QP introspection on ~/qp_debug (per-joint desired vs
+      commanded velocity and bounds, per-constraint distance/required/achieved approach
+      speed, solver state). For PlotJuggler/debugging; dynamically reconfigurable.
 
   publish_debug_joint_states:
     type: bool

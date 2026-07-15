@@ -16,15 +16,24 @@ bool estop_engaged
 # Position limit enforcement
 bool position_limits_enforced  # true if enforce_position_limits param is on
 
-# Directional collision scaling diagnostics
+# Collision diagnostics
 float64 min_collision_distance       # current minimum collision distance [m]
-float64 distance_scale               # raw distance-based velocity scale [0,1]
-float64 effective_scale              # after directional override [0,1]
-float64 worst_directional_derivative # min dot product across safety-zone pairs (positive = away, NaN = not evaluated)
 uint32 num_pairs_in_safety_zone      # number of collision pairs in the safety zone
 
 # Manipulability index (Yoshikawa w = sqrt(det(J*J^T)), 0 = singular)
 float64 manipulability
+
+# Safety QP diagnostics
+bool qp_solved                        # last QP converged (v = QP solution)
+bool qp_braking                       # fallback active: braking to zero at decel limit
+bool qp_push_out_relaxed              # wedged: opposing contacts, push-out demands relaxed
+                                      # to 'no-worsen'; escape motion still possible
+uint32 qp_num_collision_constraints   # collision damper rows in the last QP
+float64 qp_solve_time_us              # last QP solve time [us]
+bool stalled                          # reference demands motion but commanded motion is ~0
+                                      # (e.g. blocked head-on) -> upstream should replan
+bool parked                           # stalled past stall_park_timeout: reference abandoned,
+                                      # holding position until a NEW command arrives
 
 # Active current limits per joint (only meaningful when current_limits_enabled is true)
 string[] joint_names                 # joint names (same order as current_limits)

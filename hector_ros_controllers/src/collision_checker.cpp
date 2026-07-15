@@ -56,9 +56,14 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
     auto go1 = static_cast<Eigen::DenseIndex>( co1.geometryObjectIndex );
     auto go2 = static_cast<Eigen::DenseIndex>( co2.geometryObjectIndex );
 
-    // collisionPairMapping is upper triangular: needs go1 < go2
-    if ( go1 > go2 )
+    // collisionPairMapping is upper triangular: needs go1 < go2. The broadphase hands
+    // objects in TREE TRAVERSAL order, which for ~half the pairs is reversed relative to
+    // the stored collision pair (first, second).
+    bool swapped = false;
+    if ( go1 > go2 ) {
       std::swap( go1, go2 );
+      swapped = true;
+    }
 
     // Look up collision pair index (-1 if not a tracked pair)
     const int pair_index = geom_model_ptr->collisionPairMapping( go1, go2 );
@@ -78,6 +83,12 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
     dres.clear();
 
     coal::distance( o1, o2, dreq, dres );
+    if ( compute_nearest_points && swapped ) {
+      // Restore pair-canonical order: nearest_points[0] must belong to cp.first,
+      // otherwise gradients computed from the witness points are exactly negated.
+      std::swap( dres.nearest_points[0], dres.nearest_points[1] );
+      dres.normal = -dres.normal;
+    }
     const double d = dres.min_distance;
     if ( compute_nearest_points )
       visited_indices.push_back( k );
@@ -176,10 +187,13 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
     return;
   }
 
-  // Build the set of relevant joints: each controlled joint + all its ancestors up to root
-  std::unordered_set<pinocchio::JointIndex> relevant;
-  relevant.reserve( controlled_joints.size() * 4 );
-
+  // Keep a pair iff the tree path between its two parent joints crosses a controlled
+  // joint — only then can this controller change the pair's distance. Equivalent test
+  // (chains nest): the DEEPEST CONTROLLED ANCESTOR (0 = none) of the two joints differs.
+  // Keeps geometry behind passive joints on the controlled chain (gripper fingers ride
+  // on the arm); drops zero-gradient pairs (finger<->finger, chassis<->flipper).
+  std::unordered_set<pinocchio::JointIndex> controlled_ids;
+  controlled_ids.reserve( controlled_joints.size() );
   for ( const auto &name : controlled_joints ) {
     auto it = name_to_id_.find( name );
     if ( it == name_to_id_.end() ) {
@@ -188,26 +202,28 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
                    name.c_str() );
       continue;
     }
-    pinocchio::JointIndex j = it->second;
-    // climb to root (universe is 0)
-    while ( j != 0 ) {
-      if ( relevant.insert( j ).second == false )
-        break; // already inserted; ancestor chain above is already covered
-      j = model_.parents[j];
+    controlled_ids.insert( it->second );
+  }
+
+  // Deepest controlled ancestor per joint (0 = none / universe)
+  std::vector<pinocchio::JointIndex> deepest_controlled( model_.joints.size(), 0 );
+  for ( pinocchio::JointIndex jid = 1; jid < model_.joints.size(); ++jid ) {
+    for ( pinocchio::JointIndex j = jid; j != 0; j = model_.parents[j] ) {
+      if ( controlled_ids.count( j ) ) {
+        deepest_controlled[jid] = j;
+        break;
+      }
     }
   }
 
-  // Filter collision pairs: keep if either object's parentJoint is relevant
   const std::size_t before = geom_model_.collisionPairs.size();
   std::vector<pinocchio::CollisionPair> filtered;
   filtered.reserve( before );
 
   for ( const auto &cp : geom_model_.collisionPairs ) {
-    const auto &go1 = geom_model_.geometryObjects[cp.first];
-    const auto &go2 = geom_model_.geometryObjects[cp.second];
-    const pinocchio::JointIndex j1 = go1.parentJoint;
-    const pinocchio::JointIndex j2 = go2.parentJoint;
-    if ( relevant.count( j1 ) || relevant.count( j2 ) ) {
+    const pinocchio::JointIndex j1 = geom_model_.geometryObjects[cp.first].parentJoint;
+    const pinocchio::JointIndex j2 = geom_model_.geometryObjects[cp.second].parentJoint;
+    if ( deepest_controlled[j1] != deepest_controlled[j2] ) {
       filtered.push_back( cp );
     }
   }
@@ -228,8 +244,10 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
 
   const std::size_t after = geom_model_.collisionPairs.size();
   RCLCPP_INFO(
-      node_->get_logger(), "[CollisionChecker] Filtered collision pairs: %zu -> %zu (controlled=%zu, relevant joints=%zu)",
-      before, after, controlled_joints.size(), relevant.size() );
+      node_->get_logger(),
+      "[CollisionChecker] Filtered collision pairs: %zu -> %zu (kept = pairs whose distance the "
+      "%zu controlled joints can influence)",
+      before, after, controlled_joints.size() );
 }
 
 std::vector<std::string> CollisionChecker::getJointNames() const
@@ -265,6 +283,12 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
       return r;
     }
   }
+  return checkCollisionQ( buildConfiguration( joint_positions ) );
+}
+
+Eigen::VectorXd
+CollisionChecker::buildConfiguration( const std::unordered_map<std::string, double> &joint_positions )
+{
   // transforms the joint positions into the pinocchio format
   Eigen::VectorXd q = q_default_;
   for ( const auto &[name, position] : joint_positions ) {
@@ -294,8 +318,7 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
                             model_.names[jid].c_str(), nq_j, nv_j );
     }
   }
-
-  return checkCollisionQ( q );
+  return q;
 }
 CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
@@ -417,6 +440,77 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 
   // Compute per-pair distance gradients (lazy: only if pairs actually exist in safety zone)
   if ( has_safety_zone_pairs ) {
+    // Sort by distance ascending; cap to the closest max_safety_zone_pairs_ (0 = unlimited)
+    // so downstream constraint building and gradient computation stay bounded.
+    std::sort( safety_zone_indices.begin(), safety_zone_indices.end(),
+               [this]( const std::size_t a, const std::size_t b ) {
+                 return geom_data_.distanceResults[a].min_distance <
+                        geom_data_.distanceResults[b].min_distance;
+               } );
+    if ( max_safety_zone_pairs_ > 0 && safety_zone_indices.size() > max_safety_zone_pairs_ ) {
+      // Over budget: keep the closest pair of each DISTINCT link pair first, then refill
+      // with the closest duplicates — near-duplicates of one contact must not evict a
+      // different (e.g. approaching) contact.
+      std::vector<std::size_t> primaries, duplicates;
+      primaries.reserve( safety_zone_indices.size() );
+      std::vector<std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex>> seen_links;
+      seen_links.reserve( safety_zone_indices.size() );
+      for ( const std::size_t k : safety_zone_indices ) {
+        const auto &cp = geom_model_.collisionPairs[k];
+        const auto fa = geom_model_.geometryObjects[cp.first].parentFrame;
+        const auto fb = geom_model_.geometryObjects[cp.second].parentFrame;
+        const std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex> key{ std::min( fa, fb ),
+                                                                           std::max( fa, fb ) };
+        if ( std::find( seen_links.begin(), seen_links.end(), key ) == seen_links.end() ) {
+          seen_links.push_back( key );
+          primaries.push_back( k );
+        } else {
+          duplicates.push_back( k );
+        }
+      }
+      const std::size_t num_link_pairs = primaries.size();
+      for ( const std::size_t k : duplicates ) {
+        if ( primaries.size() >= max_safety_zone_pairs_ ) {
+          break;
+        }
+        primaries.push_back( k );
+      }
+      if ( primaries.size() > max_safety_zone_pairs_ ) {
+        primaries.resize( max_safety_zone_pairs_ );
+      }
+      // Restore the sorted-by-distance contract after the primary/duplicate split
+      std::sort( primaries.begin(), primaries.end(),
+                 [this]( const std::size_t a, const std::size_t b ) {
+                   return geom_data_.distanceResults[a].min_distance <
+                          geom_data_.distanceResults[b].min_distance;
+                 } );
+      RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 10000,
+                            "%zu pairs in safety zone (%zu distinct link pairs), keeping %zu.",
+                            safety_zone_indices.size(), num_link_pairs, primaries.size() );
+
+      // Dropped pairs are always farther than every kept pair; one inside the
+      // braking-critical band means the budget is genuinely too small — make it loud.
+      constexpr double kCriticalBand = 0.02; // [m] beyond the padding
+      const double critical_distance = collision_padding_ + kCriticalBand;
+      for ( const std::size_t k : safety_zone_indices ) {
+        const double d = geom_data_.distanceResults[k].min_distance;
+        if ( d >= critical_distance ) {
+          break; // sorted ascending — nothing critical beyond this point
+        }
+        if ( std::find( primaries.begin(), primaries.end(), k ) == primaries.end() ) {
+          const auto [name_a, name_b] = getPairNames( k );
+          RCLCPP_ERROR_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 5000,
+              "Collision pair budget too small: dropped pair '%s'<->'%s' at d=%.4f m is "
+              "inside the braking-critical band (< %.4f m). Increase the pair budget!",
+              name_a.c_str(), name_b.c_str(), d, critical_distance );
+          break;
+        }
+      }
+
+      safety_zone_indices = std::move( primaries );
+    }
+
     pinocchio::computeJointJacobians( model_, data_ );
 
 #ifdef SAFETY_CC_ENABLE_TIMING
@@ -513,6 +607,15 @@ void CollisionChecker::setSafetyZoneThreshold( double threshold )
 
 double CollisionChecker::getSafetyZoneThreshold() const { return safety_zone_threshold_; }
 
+void CollisionChecker::setMaxSafetyZonePairs( const std::size_t max_pairs )
+{
+  if ( max_pairs != max_safety_zone_pairs_ ) {
+    // Cached result was truncated with a different cap — invalidate it.
+    q_last_.resize( 0 );
+    max_safety_zone_pairs_ = max_pairs;
+  }
+}
+
 void CollisionChecker::setBroadphase( bool enable ) { use_broadphase_ = enable; }
 
 bool CollisionChecker::isBroadphaseEnabled() const { return use_broadphase_; }
@@ -576,12 +679,28 @@ void CollisionChecker::publishMinimalMarkers()
   visualization_msgs::msg::Marker lines_coll =
       make_line_marker( "distance_lines_collision", 0, 0.006 );
 
-  std_msgs::msg::ColorRGBA bright_red;
-  bright_red.r = 1.0f;
-  bright_red.g = 0.0f;
-  bright_red.b = 0.0f;
-  bright_red.a = 1.0f;
-  lines_coll.color = bright_red;
+  // Collision-category lines use per-vertex colors:
+  //   orange  = inside the padding but not touching (0 < d <= padding)
+  //   magenta = actually penetrating (d <= 0)
+  std_msgs::msg::ColorRGBA orange;
+  orange.r = 1.0f;
+  orange.g = 0.55f;
+  orange.b = 0.0f;
+  orange.a = 1.0f;
+  std_msgs::msg::ColorRGBA magenta;
+  magenta.r = 1.0f;
+  magenta.g = 0.0f;
+  magenta.b = 1.0f;
+  magenta.a = 1.0f;
+
+  auto push_collision_line = [&]( const geometry_msgs::msg::Point &pA,
+                                  const geometry_msgs::msg::Point &pB, const double distance ) {
+    const auto &color = ( distance <= 0.0 ) ? magenta : orange;
+    lines_coll.points.push_back( pA );
+    lines_coll.colors.push_back( color );
+    lines_coll.points.push_back( pB );
+    lines_coll.colors.push_back( color );
+  };
 
   // Fallback: when the controller did not request gradient computation (threshold=0),
   // safety_zone_pairs is empty even on collision. Draw the colliding pair from the
@@ -598,8 +717,7 @@ void CollisionChecker::publishMinimalMarkers()
       pB.x = dres.nearest_points[1][0];
       pB.y = dres.nearest_points[1][1];
       pB.z = dres.nearest_points[1][2];
-      lines_coll.points.push_back( pA );
-      lines_coll.points.push_back( pB );
+      push_collision_line( pA, pB, dres.min_distance );
     }
   }
 
@@ -618,12 +736,15 @@ void CollisionChecker::publishMinimalMarkers()
     pB.z = dres.nearest_points[1][2];
 
     if ( pair.distance <= collision_padding_ ) {
-      lines_coll.points.push_back( pA );
-      lines_coll.points.push_back( pB );
+      push_collision_line( pA, pB, pair.distance );
     } else {
       std_msgs::msg::ColorRGBA color;
-      if ( have_dir_info && !std::isnan( viz_directional_derivatives_[pair.pair_index] ) ) {
-        if ( viz_directional_derivatives_[pair.pair_index] >= 0.0 ) {
+      const double dir = viz_directional_derivatives_[pair.pair_index];
+      // Neutral band: |g^T v| below this is tangential motion / standstill — without it
+      // numerical noise around zero makes the color flicker red/green.
+      constexpr double kDirNeutralBand = 1e-3; // [m/s]
+      if ( have_dir_info && !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
+        if ( dir > 0.0 ) {
           color.r = 0.0f;
           color.g = 1.0f;
           color.b = 0.0f;
@@ -690,8 +811,11 @@ Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
   const Eigen::Vector3d r1 = p1 - data_.oMi[j1].translation();
   const Eigen::Vector3d r2 = p2 - data_.oMi[j2].translation();
 
-  // Direction vector: from p1 to p2 (positive distance direction)
-  const Eigen::Vector3d diff = p2 - p1;
+  // Direction vector: from p1 to p2 (positive distance direction).
+  // coal's witness points satisfy p2 - p1 = min_distance * normal, so for PENETRATING
+  // pairs (min_distance < 0) the vector p2 - p1 is ANTI-parallel to the separation
+  // normal and must be flipped, otherwise the gradient points into the collision.
+  const Eigen::Vector3d diff = ( dres.min_distance < 0.0 ) ? ( p1 - p2 ).eval() : ( p2 - p1 ).eval();
   const double dist_norm = diff.norm();
   if ( dist_norm < 1e-12 ) {
     return grad; // points coincide, gradient undefined
@@ -748,12 +872,13 @@ void CollisionChecker::publishMarkers() const
   arr.markers.reserve( geom_model_.geometryObjects.size() + geom_model_.collisionPairs.size() + 4 );
   const rclcpp::Time now = node_->now();
 
-  // Build a quick lookup of objects involved in "distance<=0" for coloring
-  std::vector<size_t> objects_in_collision;
-  auto add_unique = [&]( size_t idx ) {
-    if ( std::find( objects_in_collision.begin(), objects_in_collision.end(), idx ) ==
-         objects_in_collision.end() )
-      objects_in_collision.push_back( idx );
+  // Build lookups for geometry coloring: penetrating (d <= 0) and inside padding
+  // (0 < d <= padding).
+  std::vector<size_t> objects_penetrating;
+  std::vector<size_t> objects_in_padding;
+  auto add_unique = [&]( std::vector<size_t> &vec, size_t idx ) {
+    if ( std::find( vec.begin(), vec.end(), idx ) == vec.end() )
+      vec.push_back( idx );
   };
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
     if ( !nearest_points_fresh_[k] )
@@ -761,8 +886,11 @@ void CollisionChecker::publishMarkers() const
     const auto &cp = geom_model_.collisionPairs[k];
     const auto &dres = geom_data_.distanceResults[k];
     if ( dres.min_distance <= 0.0 ) {
-      add_unique( cp.first );
-      add_unique( cp.second );
+      add_unique( objects_penetrating, cp.first );
+      add_unique( objects_penetrating, cp.second );
+    } else if ( dres.min_distance <= collision_padding_ ) {
+      add_unique( objects_in_padding, cp.first );
+      add_unique( objects_in_padding, cp.second );
     }
   }
 
@@ -817,13 +945,20 @@ void CollisionChecker::publishMarkers() const
       }
     }
 
-    const bool coll = std::find( objects_in_collision.begin(), objects_in_collision.end(), i ) !=
-                      objects_in_collision.end();
-    if ( coll ) {
+    if ( std::find( objects_penetrating.begin(), objects_penetrating.end(), i ) !=
+         objects_penetrating.end() ) {
+      // Penetrating: red
       m.color.r = 1.0f;
       m.color.g = 0.0f;
       m.color.b = 0.0f;
       m.color.a = 1.0f;
+    } else if ( std::find( objects_in_padding.begin(), objects_in_padding.end(), i ) !=
+                objects_in_padding.end() ) {
+      // Inside the padding (counts as collision for the controller, but not touching): orange
+      m.color.r = 1.0f;
+      m.color.g = 0.55f;
+      m.color.b = 0.0f;
+      m.color.a = 0.9f;
     } else {
       m.color.r = 0.7f;
       m.color.g = 0.7f;
@@ -895,14 +1030,21 @@ void CollisionChecker::publishMarkers() const
   gray.g = 0.5f;
   gray.b = 0.5f;
   gray.a = 0.5f;
-  std_msgs::msg::ColorRGBA bright_red;
-  bright_red.r = 1.0f;
-  bright_red.g = 0.0f;
-  bright_red.b = 0.0f;
-  bright_red.a = 1.0f;
+  // Collision-category lines use per-vertex colors:
+  //   orange  = inside the padding but not touching (0 < d <= padding)
+  //   magenta = actually penetrating (d <= 0)
+  std_msgs::msg::ColorRGBA orange;
+  orange.r = 1.0f;
+  orange.g = 0.55f;
+  orange.b = 0.0f;
+  orange.a = 1.0f;
+  std_msgs::msg::ColorRGBA magenta;
+  magenta.r = 1.0f;
+  magenta.g = 0.0f;
+  magenta.b = 1.0f;
+  magenta.a = 1.0f;
 
   lines_safe.color = gray;
-  lines_coll.color = bright_red;
 
   for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
     // Skip stale (pruned) pairs; their nearest points are from an earlier cycle.
@@ -916,14 +1058,20 @@ void CollisionChecker::publishMarkers() const
     auto [pA, pB] = make_line_points( dres );
 
     if ( dres.min_distance <= collision_padding_ ) {
-      // Collision pair
+      // Collision pair (per-vertex color: magenta = penetrating, orange = in padding)
+      const auto &color = ( dres.min_distance <= 0.0 ) ? magenta : orange;
       lines_coll.points.push_back( pA );
+      lines_coll.colors.push_back( color );
       lines_coll.points.push_back( pB );
+      lines_coll.colors.push_back( color );
     } else if ( viz_safety_zone_threshold_ > 0.0 && dres.min_distance < viz_safety_zone_threshold_ ) {
-      // Safety zone pair — color by directional derivative
+      // Safety zone pair — color by directional derivative. Neutral band avoids
+      // red/green flicker from numerical noise around zero (standstill/tangential).
       std_msgs::msg::ColorRGBA color;
-      if ( have_dir_info && !std::isnan( viz_directional_derivatives_[k] ) ) {
-        if ( viz_directional_derivatives_[k] >= 0.0 ) {
+      const double dir = viz_directional_derivatives_[k];
+      constexpr double kDirNeutralBand = 1e-3; // [m/s]
+      if ( have_dir_info && !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
+        if ( dir > 0.0 ) {
           // Moving away: green
           color.r = 0.0f;
           color.g = 1.0f;
@@ -937,7 +1085,7 @@ void CollisionChecker::publishMarkers() const
           color.a = 1.0f;
         }
       } else {
-        // No directional info: yellow
+        // No directional info / neutral: yellow
         color.r = 1.0f;
         color.g = 0.8f;
         color.b = 0.0f;

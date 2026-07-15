@@ -28,6 +28,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     pluginlib
     coal
     pinocchio
+    proxsuite
     rclcpp
     rclcpp_action
     rclcpp_lifecycle
@@ -72,6 +73,7 @@ add_library(
   src/sync_group_velocity_to_position_controller_actions.cpp
   src/self_collision_avoidance_controller.cpp
   src/safety_position_controller.cpp
+  src/safety_qp_limiter.cpp
   src/gripper_position_effort_controller.cpp
   src/collision_checker.cpp)
 
@@ -85,6 +87,7 @@ target_link_libraries(
   controllers
   PUBLIC coal::coal
          pinocchio::pinocchio
+         proxsuite::proxsuite
          sync_group_velocity_to_position_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
@@ -180,7 +183,25 @@ if(BUILD_TESTING)
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_safety_position_controller PRIVATE ${DEFS})
 
+  # Pure unit test for the safety QP (no ROS runtime, no test doubles)
+  ament_add_gmock(test_safety_qp_limiter test/test_safety_qp_limiter.cpp
+                  src/safety_qp_limiter.cpp)
+  target_include_directories(test_safety_qp_limiter
+                             PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(test_safety_qp_limiter proxsuite::proxsuite)
+  target_compile_features(test_safety_qp_limiter PRIVATE cxx_std_17)
+
   find_package(ament_cmake_google_benchmark REQUIRED)
+  ament_add_google_benchmark(
+    benchmark_safety_qp_limiter test/benchmark_safety_qp_limiter.cpp
+    src/safety_qp_limiter.cpp)
+  if(TARGET benchmark_safety_qp_limiter)
+    target_include_directories(benchmark_safety_qp_limiter
+                               PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_link_libraries(benchmark_safety_qp_limiter proxsuite::proxsuite)
+    target_compile_features(benchmark_safety_qp_limiter PRIVATE cxx_std_17)
+  endif()
+
   ament_add_google_benchmark(benchmark_collision_checker
                              test/benchmark_collision_checker.cpp)
   if(TARGET benchmark_collision_checker)
