@@ -92,6 +92,8 @@ target_link_libraries(
          gripper_position_effort_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
+# Link fcl and its ccd backend explicitly
+target_link_libraries(controllers PUBLIC fcl ccd)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 target_compile_definitions(controllers PUBLIC ${DEFS})
