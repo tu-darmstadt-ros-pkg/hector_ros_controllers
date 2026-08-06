@@ -72,10 +72,14 @@ add_library(
   src/sync_group_velocity_to_position_controller.cpp
   src/sync_group_velocity_to_position_controller_actions.cpp
   src/self_collision_avoidance_controller.cpp
-  src/safety_position_controller.cpp
-  src/safety_qp_limiter.cpp
-  src/gripper_position_effort_controller.cpp
-  src/collision_checker.cpp)
+  src/safety_position_controller/safety_position_controller.cpp
+  src/safety_position_controller/safety_pipeline.cpp
+  src/safety_position_controller/safety_qp_limiter.cpp
+  src/safety_position_controller/joint_info.cpp
+  src/safety_position_controller/collision_observer.cpp
+  src/safety_position_controller/safety_diagnostics.cpp
+  src/safety_position_controller/collision_checker.cpp
+  src/gripper_position_effort_controller.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
 
@@ -95,6 +99,12 @@ target_link_libraries(
          gripper_position_effort_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
+
+# fcl-config.cmake only sets FCL_LIBRARIES (uppercase), so
+# ament_target_dependencies() cannot pick it up. Link the imported target
+# explicitly - it also pulls in ccd, without which dlopen() of this plugin fails
+# with "undefined symbol: ccd_points_on_sphere_len".
+target_link_libraries(controllers PUBLIC fcl)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 target_compile_definitions(controllers PUBLIC ${DEFS})
@@ -146,6 +156,7 @@ if(BUILD_TESTING)
     pluginlib::pluginlib
     ${srdfdom_TARGETS}
     coal::coal
+    fcl
     pinocchio::pinocchio
     ad_kinematics::ad_kinematics
     sync_group_velocity_to_position_controller_parameters
@@ -185,16 +196,26 @@ if(BUILD_TESTING)
 
   # Pure unit test for the safety QP (no ROS runtime, no test doubles)
   ament_add_gmock(test_safety_qp_limiter test/test_safety_qp_limiter.cpp
-                  src/safety_qp_limiter.cpp)
+                  src/safety_position_controller/safety_qp_limiter.cpp)
   target_include_directories(test_safety_qp_limiter
                              PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_link_libraries(test_safety_qp_limiter proxsuite::proxsuite)
   target_compile_features(test_safety_qp_limiter PRIVATE cxx_std_17)
 
+  # Pure unit test for the safety pipeline (no ROS runtime, no test doubles)
+  ament_add_gmock(
+    test_safety_pipeline test/test_safety_pipeline.cpp
+    src/safety_position_controller/safety_pipeline.cpp
+    src/safety_position_controller/safety_qp_limiter.cpp)
+  target_include_directories(test_safety_pipeline
+                             PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(test_safety_pipeline proxsuite::proxsuite)
+  target_compile_features(test_safety_pipeline PRIVATE cxx_std_17)
+
   find_package(ament_cmake_google_benchmark REQUIRED)
   ament_add_google_benchmark(
     benchmark_safety_qp_limiter test/benchmark_safety_qp_limiter.cpp
-    src/safety_qp_limiter.cpp)
+    src/safety_position_controller/safety_qp_limiter.cpp)
   if(TARGET benchmark_safety_qp_limiter)
     target_include_directories(benchmark_safety_qp_limiter
                                PRIVATE ${PROJECT_SOURCE_DIR}/include)

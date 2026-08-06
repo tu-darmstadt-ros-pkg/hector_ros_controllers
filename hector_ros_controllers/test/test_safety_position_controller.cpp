@@ -17,18 +17,18 @@ using SPC = safety_position_controller::SafetyPositionController;
 TEST( SafetyPositionControllerStatic, UnwrapToNearestBasic )
 {
   // Target near current - no wrapping needed
-  EXPECT_NEAR( SPC::unwrap_to_nearest( 0.0, 0.1 ), 0.1, 1e-9 );
-  EXPECT_NEAR( SPC::unwrap_to_nearest( 0.0, -0.1 ), -0.1, 1e-9 );
+  EXPECT_NEAR( safety_position_controller::unwrap_to_nearest( 0.0, 0.1 ), 0.1, 1e-9 );
+  EXPECT_NEAR( safety_position_controller::unwrap_to_nearest( 0.0, -0.1 ), -0.1, 1e-9 );
 
   // Wrapping: current=3.0, target=-3.0 -> should unwrap to near 3.0 (adding 2*pi)
-  double result = SPC::unwrap_to_nearest( 3.0, -3.0 );
+  double result = safety_position_controller::unwrap_to_nearest( 3.0, -3.0 );
   EXPECT_NEAR( result, -3.0 + 2 * M_PI, 1e-9 );
 }
 
 TEST( SafetyPositionControllerStatic, UnwrapToNearestMultiRevolutions )
 {
   // current at 10.0 rad, target at 0.1 -> should unwrap near 10.0
-  double result = SPC::unwrap_to_nearest( 10.0, 0.1 );
+  double result = safety_position_controller::unwrap_to_nearest( 10.0, 0.1 );
   double expected = 0.1 + std::round( ( 10.0 - 0.1 ) / ( 2 * M_PI ) ) * ( 2 * M_PI );
   EXPECT_NEAR( result, expected, 1e-9 );
   // Result should be within pi of the current position
@@ -38,28 +38,28 @@ TEST( SafetyPositionControllerStatic, UnwrapToNearestMultiRevolutions )
 TEST( SafetyPositionControllerStatic, UnwrapToNearestNegative )
 {
   // current at -10.0, target 0.0 -> should unwrap near -10.0
-  double result = SPC::unwrap_to_nearest( -10.0, 0.0 );
+  double result = safety_position_controller::unwrap_to_nearest( -10.0, 0.0 );
   double expected = 0.0 + std::round( ( -10.0 - 0.0 ) / ( 2 * M_PI ) ) * ( 2 * M_PI );
   EXPECT_NEAR( result, expected, 1e-9 );
 }
 
 TEST( SafetyPositionControllerStatic, GetSignedDistanceBasic )
 {
-  EXPECT_NEAR( SPC::get_signed_distance( 0.0, 0.0 ), 0.0, 1e-9 );
-  EXPECT_NEAR( SPC::get_signed_distance( 0.0, 1.0 ), 1.0, 1e-9 );
-  EXPECT_NEAR( SPC::get_signed_distance( 0.0, -1.0 ), -1.0, 1e-9 );
-  EXPECT_NEAR( SPC::get_signed_distance( 1.0, 2.0 ), 1.0, 1e-9 );
+  EXPECT_NEAR( safety_position_controller::get_signed_distance( 0.0, 0.0 ), 0.0, 1e-9 );
+  EXPECT_NEAR( safety_position_controller::get_signed_distance( 0.0, 1.0 ), 1.0, 1e-9 );
+  EXPECT_NEAR( safety_position_controller::get_signed_distance( 0.0, -1.0 ), -1.0, 1e-9 );
+  EXPECT_NEAR( safety_position_controller::get_signed_distance( 1.0, 2.0 ), 1.0, 1e-9 );
 }
 
 TEST( SafetyPositionControllerStatic, GetSignedDistanceWrapping )
 {
   // From 3.0 to -3.0: shortest path is positive ~0.28 rad
-  double dist = SPC::get_signed_distance( 3.0, -3.0 );
+  double dist = safety_position_controller::get_signed_distance( 3.0, -3.0 );
   EXPECT_NEAR( dist, 2 * M_PI - 6.0, 1e-9 );
   EXPECT_GT( dist, 0.0 );
 
   // From 0 to pi+0.1: shortest should be negative (wrap around)
-  dist = SPC::get_signed_distance( 0.0, M_PI + 0.1 );
+  dist = safety_position_controller::get_signed_distance( 0.0, M_PI + 0.1 );
   EXPECT_NEAR( dist, -( 2 * M_PI - M_PI - 0.1 ), 1e-9 );
   EXPECT_LT( dist, 0.0 );
 }
@@ -1368,11 +1368,11 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeStopsAtCollisionAndReportsS
     for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
     // The commanded configuration must never penetrate (padding = 0 in this fixture;
     // small negative tolerance for the linearization sag on curved geometry)
-    ASSERT_GT( controller_->last_min_distance_, -5e-3 )
+    ASSERT_GT( controller_->collision_observer_->lastMinDistance(), -5e-3 )
         << "commanded configuration in collision at cycle " << cycle;
   }
 
-  EXPECT_TRUE( controller_->stalled_ ) << "head-on block must be reported as stalled";
+  EXPECT_TRUE( controller_->pipeline_->stalled() ) << "head-on block must be reported as stalled";
   EXPECT_LT( hw_cmd_values_[1], M_PI - 0.1 ) << "should have stopped before the fold";
   EXPECT_GT( hw_cmd_values_[1], 0.1 ) << "should have moved toward the target first";
 
@@ -1418,12 +1418,12 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeParksAfterStallAndResumesOn
   controller_->reference_interfaces_[1] = M_PI;
   controller_->reference_interfaces_[2] = 0.0;
 
-  for ( int cycle = 0; cycle < 600 && !controller_->parked_; ++cycle ) {
+  for ( int cycle = 0; cycle < 600 && !controller_->pipeline_->parked(); ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
     for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
   }
-  ASSERT_TRUE( controller_->parked_ ) << "did not park within 600 cycles";
-  EXPECT_TRUE( controller_->stalled_ );
+  ASSERT_TRUE( controller_->pipeline_->parked() ) << "did not park within 600 cycles";
+  EXPECT_TRUE( controller_->pipeline_->stalled() );
 
   // While parked: tracking demand is zeroed even though the reference is still far away
   // — the guarantee that clearing the blockage cannot cause delayed motion.
@@ -1431,15 +1431,15 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeParksAfterStallAndResumesOn
   for ( int cycle = 0; cycle < 100; ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
     for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
-    EXPECT_LT( controller_->qp_input_.v_des.cwiseAbs().maxCoeff(), 1e-9 );
+    EXPECT_LT( controller_->pipeline_->qpInput().v_des.cwiseAbs().maxCoeff(), 1e-9 );
   }
-  EXPECT_TRUE( controller_->parked_ );
+  EXPECT_TRUE( controller_->pipeline_->parked() );
   EXPECT_NEAR( hw_cmd_values_[1], parked_cmd, 1e-6 ) << "parked limb must not creep";
 
   // A NEW reference (retract away from the collision) releases the park and is tracked
   controller_->reference_interfaces_[1] = 0.3;
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_FALSE( controller_->parked_ );
+  EXPECT_FALSE( controller_->pipeline_->parked() );
 
   for ( int cycle = 0; cycle < 500; ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -1468,11 +1468,11 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeJointDeviationBoxWiring )
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
 
   // joint1 (limit 0.1): box = [min(0.3-0.1, cmd~0), 0.3+0.1] = [0.0, 0.4]
-  EXPECT_NEAR( controller_->qp_input_.q_hi[0], 0.4, 1e-6 );
-  EXPECT_NEAR( controller_->qp_input_.q_lo[0], 0.0, 1e-6 );
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_hi[0], 0.4, 1e-6 );
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_lo[0], 0.0, 1e-6 );
   // joint2 (default limit 0.25, ref 0): box = [-0.25, 0.25] within URDF [-pi, pi]
-  EXPECT_NEAR( controller_->qp_input_.q_hi[1], 0.25, 1e-6 );
-  EXPECT_NEAR( controller_->qp_input_.q_lo[1], -0.25, 1e-6 );
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_hi[1], 0.25, 1e-6 );
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_lo[1], -0.25, 1e-6 );
 }
 
 TEST_F( SafetyPositionControllerCollisionTest, QpModeWorksWithoutCollisionChecker )

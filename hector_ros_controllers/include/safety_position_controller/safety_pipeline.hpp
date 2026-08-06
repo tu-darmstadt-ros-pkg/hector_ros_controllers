@@ -1,0 +1,146 @@
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include <vector>
+
+#include <Eigen/Core>
+
+#include <safety_position_controller/joint_info.hpp>
+#include <safety_position_controller/safety_qp_limiter.hpp>
+#include <safety_position_controller/stall_park_monitor.hpp>
+
+namespace safety_position_controller
+{
+
+/**
+ * @brief ROS-free per-cycle safety pipeline between the processed reference and the
+ * commanded positions.
+ *
+ * Owns the desired velocity + reference leash, position-limit and per-joint deviation
+ * boxes, collision damper constraint assembly, the QP solve (SafetyQpLimiter),
+ * integration, the tracking leash (anti-windup) and the stall/park state machine.
+ * Reports events instead of logging; the caller (controller) translates them.
+ *
+ * Per-cycle protocol (the collision check must run at the commanded configuration,
+ * which lives here — hence two phases):
+ *   1. prepare(reference, measured, bypass)  → rebase, v_des, boxes, park hold/resume
+ *   2. caller evaluates collisions at commandedPositions()
+ *   3. step(observation)                     → constraints, solve, integrate, stall/park
+ *
+ * Not thread-safe; call from the control thread only.
+ */
+class SafetyPipeline
+{
+public:
+  struct Config {
+    double dt{ 0.01 };
+    std::vector<JointInfo> joints; ///< per controlled joint, defines n
+    SafetyQpParams qp;             ///< v_max/a_acc/a_dec must be sized like joints
+    /// Per-joint max deviation [rad] of the command from the leashed reference while
+    /// flowing around collisions; 0 disables for that joint.
+    std::vector<double> deviation_limits;
+    /// Controlled joint index → collision-model velocity-space index (-1 if absent).
+    /// May be empty when no collision model is used.
+    std::vector<int> joint_v_index;
+    double reference_leash_time{ 0.3 };      ///< bounds reference run-ahead; 0 disables
+    double tracking_leash{ 0.5 };            ///< anti-windup vs measured [rad]; 0 disables
+    double bypass_limit_tolerance{ 0.0 };    ///< position-limit extension (fraction of range)
+    double stall_velocity_threshold{ 0.01 }; ///< |v| below this counts as not moving
+    double park_resume_threshold{ 0.01 };    ///< reference change that counts as new command
+    StallParkMonitor::Params stall_park;
+  };
+
+  /// One collision pair candidate: signed distance + distance gradient dd/dv in the
+  /// collision model's velocity space (projected onto the controlled joints via
+  /// joint_v_index). The gradient pointer must stay valid until step() returns.
+  struct PairCandidate {
+    double distance{ 0.0 };
+    const Eigen::VectorXd *gradient{ nullptr };
+    std::size_t pair_index{ 0 };
+  };
+
+  /// How the collision state was observed this cycle.
+  struct CollisionObservation {
+    bool checks_active{ false }; ///< collision checking ran this cycle (not bypassed/disabled)
+    bool state_valid{ true };    ///< joint state reads for the check succeeded; false → the
+                                 ///< safety state is unobservable and the demand is zeroed
+    bool in_collision{ false };
+    const std::vector<PairCandidate> *pairs{ nullptr }; ///< safety-zone pairs (may be null)
+  };
+
+  struct Events {
+    StallParkMonitor::Events stall;
+  };
+
+  /**
+   * @param config see Config; joints must be non-empty and sizes consistent
+   * @throws std::invalid_argument on inconsistent config (also from SafetyQpLimiter)
+   */
+  explicit SafetyPipeline( Config config );
+
+  /// Rebase to the measured state on the next prepare() (E-stop, state-read failures).
+  /// The parked state survives (a stale reference stays abandoned across an E-stop).
+  void invalidate() { state_valid_ = false; }
+
+  /**
+   * @brief Phase 1: rebase if invalidated, desired velocity toward the (leashed)
+   * reference, position-limit and deviation boxes, park hold/resume.
+   * @param reference processed reference per joint (NaN entries demand zero velocity)
+   * @param measured measured positions per joint
+   * @param bypass_active relaxes position limits and drops the deviation boxes
+   * @return true if a new reference released the parked state this cycle
+   */
+  bool prepare( const std::vector<double> &reference, const std::vector<double> &measured,
+                bool bypass_active );
+
+  /// Current commanded configuration: evaluate the collision check here after prepare();
+  /// after step() these are the positions to write to the hardware.
+  const Eigen::VectorXd &commandedPositions() const { return cmd_; }
+
+  /**
+   * @brief Phase 2: assemble collision damper constraints, solve, integrate, apply the
+   * tracking leash and update the stall/park state machine.
+   * @param obs collision observation for this cycle (see CollisionObservation)
+   * @return edge events of this cycle; results via the getters below
+   */
+  Events step( const CollisionObservation &obs );
+
+  // ---- Introspection (valid after step()) ----
+  const SafetyQpResult &lastResult() const { return result_; }
+  const SafetyQpInput &qpInput() const { return input_; }
+  const Eigen::VectorXd &velocity() const { return vel_; }
+  const Eigen::VectorXd &leashedReference() const { return ref_leashed_; }
+  /// Collision-pair indices of the constraints in qpInput().collisions (same order).
+  const std::vector<std::size_t> &constraintPairIndices() const { return constraint_pair_indices_; }
+  const SafetyQpLimiter &limiter() const { return *limiter_; }
+  bool stalled() const { return monitor_.stalled(); }
+  bool parked() const { return monitor_.parked(); }
+  double stallTime() const { return monitor_.stallTime(); }
+  bool wantsMotion() const { return wants_motion_; }
+  const Config &config() const { return config_; }
+
+private:
+  /// True if the reference differs from the one latched at park time (a new command).
+  bool isNewReference( const std::vector<double> &reference ) const;
+
+  Config config_;
+  std::unique_ptr<SafetyQpLimiter> limiter_;
+  StallParkMonitor monitor_;
+
+  /// false → cmd_/vel_ are rebased to the measured state on the next prepare()
+  bool state_valid_{ false };
+  bool wants_motion_{ false };
+  Eigen::VectorXd cmd_;         ///< commanded positions (integration state)
+  Eigen::VectorXd vel_;         ///< commanded velocities
+  Eigen::VectorXd ref_leashed_; ///< leashed reference targets (deviation is measured
+                                ///< against these, so lag cannot blow the budget)
+  SafetyQpInput input_;
+  SafetyQpResult result_;
+  std::vector<double> reference_;        ///< this cycle's reference (park latch source)
+  std::vector<double> measured_;         ///< this cycle's measured positions
+  std::vector<double> parked_reference_; ///< reference snapshot latched at park time
+  std::vector<std::size_t> constraint_pair_indices_;
+};
+
+} // namespace safety_position_controller
