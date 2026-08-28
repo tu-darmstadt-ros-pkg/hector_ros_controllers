@@ -52,3 +52,50 @@ release (the park latch survives).
 - **Which pairs constrain** (pair filtering, budget, gradients): `collision_checker.cpp`.
 - **New status/debug output**: `safety_diagnostics.cpp` + the msg definitions in `hector_ros_controllers_msgs`.
 - **Parameters**: `params/safety_position_controller_parameters.yaml` (generate_parameter_library), plumbed into `SafetyPipeline::Config` in `setup_pipeline_on_activate()`.
+
+## Reference input
+
+The controller accepts references from two sources and forwards the checked (and, where
+the safety pipeline had to intervene, modified) command to the hardware in both cases:
+
+- **Chained mode**: the exported reference interfaces (`<controller>/<joint>`), written by
+  the upstream controller.
+- **Non-chained mode**: the `~/commands` topic (`Float64MultiArray`, one entry per joint).
+
+A `NaN` reference (per joint) means "no target": it demands zero velocity, so the joint
+brakes to a smooth stop at the deceleration limit and holds. References are reset to NaN
+on activation and on an E-stop release, so a stale target can never be resumed.
+
+## Performance baseline
+
+Measured in a **Release** build (`-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON`) with
+`athena.urdf`, 999 collision pairs after filtering, 7 controlled joints:
+
+| Benchmark | Time |
+|---|---|
+| `BM_Broadphase_DistanceOnly` | 31 µs |
+| `BM_Broadphase_TwoPass_Folded` (gradients) | 55 µs |
+| `BM_Broadphase_TwoPass` (gradients) | 112 µs |
+| `BM_CollisionChecker_TwoPass` (brute force) | 458 µs |
+| `BM_SolveWarmStarted/7/0` (QP, no collision rows) | 11.2 µs |
+| `BM_SolveWarmStarted/7/10` (QP, 10 collision rows) | 11.6 µs |
+
+Run them with:
+
+```bash
+colcon build --packages-select hector_ros_controllers \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+./build/hector_ros_controllers/benchmark_collision_checker
+./build/hector_ros_controllers/benchmark_safety_qp_limiter
+```
+
+The default (Debug) build is roughly 40x slower for the QP and must not be used for
+timing claims. On the robot the arm cycle measured 57 µs mean / 194 µs max QP solve time
+at 2.3 solver iterations.
+
+## Coverage
+
+`./run_coverage.sh` (in `src/hector_ros_controllers/`) builds with coverage flags, runs
+the test suite and writes `coverage_report/index.html` plus a per-file summary. Coverage
+data comes from the rtest `controllers_test_doubles` target, not from `controllers` — see
+the comment at the top of the script before changing the capture.

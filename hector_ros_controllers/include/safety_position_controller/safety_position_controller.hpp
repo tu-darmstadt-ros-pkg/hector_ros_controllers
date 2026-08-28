@@ -25,11 +25,19 @@ namespace safety_position_controller
 {
 using CmdType = std_msgs::msg::Float64MultiArray;
 /**
- * @brief Chained-only safety controller.
+ * @brief Chainable safety controller between a position reference and the hardware.
  *
  * ROS-facing shell around the ROS-free SafetyPipeline (velocity/acceleration limits,
  * collision damper QP, deviation boxes, stall/park). Collision observation lives in
  * CollisionObserver, status/debug publishing in SafetyDiagnostics.
+ *
+ * References come from either source; in both cases the checked (and, where the safety
+ * pipeline had to intervene, modified) command is forwarded to the hardware:
+ * - chained mode: the exported reference interfaces, written by the upstream controller.
+ * - non-chained mode: the "~/commands" topic (Float64MultiArray, one entry per joint).
+ * A per-joint NaN reference means "no target": it demands zero velocity, so the joint
+ * brakes to a smooth stop and holds.
+ *
  * - Enforces joint limits (pos/vel), optional unwrapping for continuous joints.
  * - Optional self-collision check via CollisionChecker (URDF + SRDF).
  * - Optional current-limit control (stiff/compliant) toggled by service.
@@ -39,7 +47,7 @@ using CmdType = std_msgs::msg::Float64MultiArray;
 class SafetyPositionController final : public controller_interface::ChainableControllerInterface
 {
 public:
-  /// @brief Ctor; controller is chainable-only by design.
+  /// @brief Ctor.
   SafetyPositionController();
 
   /**
@@ -93,7 +101,9 @@ public:
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
 
   /**
-   * @brief Chained-only: no direct subscribers, just return OK.
+   * @brief Fill the reference interfaces when NOT in chained mode.
+   * Reads the latest "~/commands" message from the realtime buffer; in chained mode the
+   * references are written by the upstream controller and this is a no-op.
    */
   controller_interface::return_type
   update_reference_from_subscribers( const rclcpp::Time &time,
@@ -109,7 +119,9 @@ public:
 
   /**
    * @brief Enable/disable chained mode.
-   * @note Controller is intended to run chained; non-chained falls back to hold.
+   * @note Both modes are supported; the references are simply sourced from the upstream
+   * controller (chained) or from the "~/commands" topic (non-chained). Switching
+   * invalidates the current references so no stale target is resumed.
    */
   bool on_set_chained_mode( bool chained_mode ) override;
 
@@ -129,6 +141,8 @@ private:
 
   /**
    * @brief Apply unwrap/clamp rules to references → fill processed_reference_.
+   * NaN references are propagated as NaN (the pipeline turns them into a zero velocity
+   * demand); keeping the previous value would resume a stale target.
    */
   void enforce_limits();
 
@@ -180,7 +194,7 @@ private:
   bool run_safety_pipeline();
 
   // ---- Configuration / mode ----
-  bool is_chained_ = true;                       ///< chained-only controller (hold if false)
+  bool is_chained_ = true;                       ///< references from upstream (true) or ~/commands
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
 
   // ---- E-stop ----

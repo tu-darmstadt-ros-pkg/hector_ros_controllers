@@ -408,6 +408,100 @@ TEST_F( SafetyPositionControllerTest, NaNReferenceHoldsAtCurrentPosition )
   }
 }
 
+TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
+{
+  // A reference that becomes NaN means "no target" and must make the joint brake to a
+  // stop and hold. It must NOT keep tracking the target that was valid before: the
+  // reference interfaces are reset to NaN on an E-stop release and on activation, and
+  // resuming the old target there would be unexpected delayed motion.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  // Move toward the target for a while; the mock hardware follows the command exactly.
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
+      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
+    }
+  }
+  const double cmd_when_invalidated = hw_cmd_values_[0];
+  ASSERT_GT( cmd_when_invalidated, 0.0 ) << "should have started moving toward the target";
+  ASSERT_LT( cmd_when_invalidated, 1.0 ) << "should not have arrived yet";
+
+  // Upstream stops commanding: all references become NaN.
+  for ( auto &ref : controller_->reference_interfaces_ ) {
+    ref = std::numeric_limits<double>::quiet_NaN();
+  }
+
+  for ( int i = 0; i < 100; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
+      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
+    }
+  }
+
+  // joint1: v_max = 1.0 rad/s, a_dec = deceleration_scale(3) * 8 rad/s^2 = 24 rad/s^2.
+  // Braking distance is at most v^2 / (2 * a_dec) ~= 0.021 rad; allow a few cycles slack.
+  constexpr double kBrakingDistance = 1.0 / ( 2.0 * 24.0 ) + 0.03;
+  EXPECT_NEAR( hw_cmd_values_[0], cmd_when_invalidated, kBrakingDistance )
+      << "NaN reference must brake and hold instead of tracking the stale target";
+  EXPECT_LT( hw_cmd_values_[0], 0.9 ) << "the abandoned target must never be reached";
+}
+
+TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
+{
+  // After a deactivate/activate cycle the references are NaN again. The processed
+  // reference derived from them must be invalidated too, otherwise the controller keeps
+  // driving toward the target from before the deactivation.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
+      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
+    }
+  }
+
+  deactivateController();
+  activateController();
+
+  // Fresh activation: references are NaN and nothing new is commanded.
+  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+    ASSERT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) );
+  }
+  const double position_at_activation = hw_state_values_[0];
+
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
+      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
+    }
+    EXPECT_NEAR( hw_cmd_values_[0], position_at_activation, 1e-6 )
+        << "reactivated controller must hold, not resume the pre-deactivation target "
+           "(cycle "
+        << i << ")";
+  }
+}
+
 // ============================================================================
 // Status Publishing
 // ============================================================================

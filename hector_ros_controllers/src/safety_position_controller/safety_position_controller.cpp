@@ -197,8 +197,11 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
-  // reset reference interfaces
+  // reset reference interfaces and the processed references derived from them: a target
+  // from before the deactivation must never be resumed on activation.
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
+  std::fill( processed_reference_.begin(), processed_reference_.end(),
+             std::numeric_limits<double>::quiet_NaN() );
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
@@ -407,8 +410,9 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
   }
 
-  // NaN references need no special handling: per-joint NaN targets simply demand zero
-  // velocity, so the arm brakes to a smooth stop instead of freezing.
+  // Per-joint NaN references are propagated by enforce_limits() and turned into a zero
+  // velocity demand by the pipeline, so the arm brakes to a smooth stop instead of
+  // freezing or resuming a stale target.
 
   // resolve continuous joints & enforce limits
   enforce_limits();
@@ -471,6 +475,12 @@ void SafetyPositionController::enforce_limits()
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     const double target_wrapped = reference_interfaces_[i];
     if ( std::isnan( target_wrapped ) ) {
+      // A NaN reference means "no target". It MUST be propagated: keeping the previous
+      // processed reference would make the pipeline continue tracking a stale target
+      // (e.g. after a reactivation or an E-stop release, which both reset the reference
+      // interfaces to NaN). The pipeline turns NaN into a zero velocity demand, so the
+      // joint brakes to a smooth stop and holds.
+      processed_reference_[i] = std::numeric_limits<double>::quiet_NaN();
       continue;
     }
 
