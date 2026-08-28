@@ -101,10 +101,10 @@ target_link_libraries(
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 
 # fcl-config.cmake only sets FCL_LIBRARIES (uppercase), so
-# ament_target_dependencies() cannot pick it up. Link the imported target
-# explicitly - it also pulls in ccd, without which dlopen() of this plugin fails
-# with "undefined symbol: ccd_points_on_sphere_len".
-target_link_libraries(controllers PUBLIC fcl)
+# ament_target_dependencies() cannot pick it up. Link the imported targets
+# explicitly - without ccd, dlopen() of this plugin fails with "undefined
+# symbol: ccd_points_on_sphere_len".
+target_link_libraries(controllers PUBLIC fcl ccd)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 target_compile_definitions(controllers PUBLIC ${DEFS})
