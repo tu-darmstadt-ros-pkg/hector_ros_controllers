@@ -194,6 +194,15 @@ if(BUILD_TESTING)
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_safety_position_controller PRIVATE ${DEFS})
 
+  # Pure unit test for the URDF joint-info parsing (no ROS runtime, no test
+  # doubles)
+  ament_add_gmock(test_joint_info test/test_joint_info.cpp
+                  src/safety_position_controller/joint_info.cpp)
+  target_include_directories(test_joint_info
+                             PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(test_joint_info ${srdfdom_TARGETS})
+  target_compile_features(test_joint_info PRIVATE cxx_std_17)
+
   # Pure unit test for the safety QP (no ROS runtime, no test doubles)
   ament_add_gmock(test_safety_qp_limiter test/test_safety_qp_limiter.cpp
                   src/safety_position_controller/safety_qp_limiter.cpp)

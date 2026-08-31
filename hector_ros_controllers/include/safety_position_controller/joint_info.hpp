@@ -17,7 +17,7 @@ struct JointInfo {
   bool has_position_limits{ false };
   double lower_limit{ std::numeric_limits<double>::lowest() };
   double upper_limit{ std::numeric_limits<double>::max() };
-  double velocity_limit{ std::numeric_limits<double>::max() };
+  double velocity_limit{ std::numeric_limits<double>::infinity() };
 };
 
 /// Result of parse_joint_infos(). Warnings are returned instead of logged (pure function).
