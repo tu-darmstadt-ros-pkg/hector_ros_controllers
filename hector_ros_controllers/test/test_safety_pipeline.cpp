@@ -124,6 +124,49 @@ TEST( SafetyPipeline, InvalidateRebasesAndParksUntilNewReference )
   EXPECT_NEAR( measured[0], 0.6, 1e-3 );
 }
 
+TEST( SafetyPipeline, TrackingLeashFollowsContinuousJointsAcrossTheWrap )
+{
+  // The hardware may report wrapped angles while cmd_ integrates freely. At the wrap the
+  // raw difference is ~2*pi, which must not be mistaken for tracking lag: rebasing onto
+  // the measured frame there would step the command by almost a full turn in one cycle,
+  // past every velocity and acceleration bound.
+  auto cfg = makeConfig( 1 );
+  cfg.joints[0].type = spc::JointType::CONTINUOUS;
+  cfg.tracking_leash = 0.5;
+  Pipeline pipeline( cfg );
+
+  const auto wrap = []( const double angle ) { return spc::get_signed_distance( 0.0, angle ); };
+
+  std::vector<double> measured{ 3.0 }; // just below +pi
+  double previous = 3.0;
+  for ( int i = 0; i < 100; ++i ) {
+    const double reference = wrap( pipeline.commandedPositions()[0] + 0.3 );
+    pipeline.prepare( { reference }, measured, false );
+    pipeline.step( {} );
+    const double cmd = pipeline.commandedPositions()[0];
+    ASSERT_LE( std::abs( cmd - previous ), kVMax * kDt + 1e-9 ) << "command jumped in cycle " << i;
+    previous = cmd;
+    measured[0] = wrap( cmd ); // hardware follows, reporting in [-pi, pi]
+  }
+  EXPECT_GT( pipeline.commandedPositions()[0], M_PI ) << "should have rotated past the wrap";
+}
+
+TEST( SafetyPipeline, TrackingLeashStillBoundsContinuousJointLag )
+{
+  auto cfg = makeConfig( 1 );
+  cfg.joints[0].type = spc::JointType::CONTINUOUS;
+  cfg.tracking_leash = 0.2;
+  Pipeline pipeline( cfg );
+
+  // Hardware stuck at 0 while the reference pulls away: the command must not wind up.
+  std::vector<double> measured{ 0.0 };
+  for ( int i = 0; i < 100; ++i ) {
+    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.step( {} );
+  }
+  EXPECT_NEAR( pipeline.commandedPositions()[0], 0.2, 1e-6 );
+}
+
 TEST( SafetyPipeline, DeviationBoxAroundLeashedReferenceDroppedDuringBypass )
 {
   auto cfg = makeConfig();

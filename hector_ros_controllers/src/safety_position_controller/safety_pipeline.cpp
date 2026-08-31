@@ -169,12 +169,17 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
   cmd_ += vel_ * config_.dt;
 
   if ( config_.tracking_leash > 0.0 ) {
-    // Anti-windup: never run further ahead of the measured position than the leash
+    // Anti-windup: never run further ahead of the measured position than the leash.
+    // Continuous joints integrate cmd_ freely while the hardware may report wrapped
+    // angles, so the lag is the shortest angular distance and the correction is applied
+    // to cmd_ instead of rebasing it onto the measured frame.
     for ( std::size_t i = 0; i < n; ++i ) {
       const auto idx = static_cast<Eigen::Index>( i );
-      const double ahead = cmd_[idx] - measured_[i];
+      const double ahead = ( config_.joints[i].type == JointType::CONTINUOUS )
+                               ? get_signed_distance( measured_[i], cmd_[idx] )
+                               : ( cmd_[idx] - measured_[i] );
       if ( std::abs( ahead ) > config_.tracking_leash ) {
-        cmd_[idx] = measured_[i] + std::copysign( config_.tracking_leash, ahead );
+        cmd_[idx] += std::copysign( config_.tracking_leash, ahead ) - ahead;
       }
     }
   }
