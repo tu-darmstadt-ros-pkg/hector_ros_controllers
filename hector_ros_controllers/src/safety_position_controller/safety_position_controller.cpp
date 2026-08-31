@@ -245,6 +245,12 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     return controller_interface::CallbackReturn::ERROR;
   }
 
+  if ( state_interfaces_.size() != all_joint_names_.size() ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Expected %zu state interfaces, got %zu.",
+                  all_joint_names_.size(), state_interfaces_.size() );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
   // check order of command interfaces
   // TODO: if this fails use command interface reordering function or indexing as for state interfaces
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
@@ -348,9 +354,10 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const rclcpp::Duration & )
 {
-  bool success = read_current_positions();
-  if ( !success ) {
-    return controller_interface::return_type::ERROR;
+  if ( !read_current_positions() ) {
+    // A handle is locked by another thread (async hardware). Skipping the cycle leaves
+    // the previous position command in place, which is what re-writing it would do.
+    return controller_interface::return_type::OK;
   }
 
   const size_t n = params_.joints.size();
@@ -385,13 +392,13 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     if ( pipeline_ ) {
       pipeline_->invalidate();
     }
-    success &= write_position_commands( hold_positions_ );
-    return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+    write_position_commands( hold_positions_ );
+    return controller_interface::return_type::OK;
   }
 
-  success &= run_safety_pipeline();
+  run_safety_pipeline();
   if ( params_.set_current_limits ) {
-    success &= write_current_limits();
+    write_current_limits();
   }
   // Manipulability at the last checked configuration (FK already done)
   if ( collision_checker_ && !params_.manipulability_ee_frame.empty() ) {
@@ -401,7 +408,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
   diagnostics_->updateSnapshot( pipeline_.get(), collision_observer_->lastMinDistance(),
                                 collision_observer_->lastSafetyZonePairs().size(),
                                 last_manipulability_ );
-  return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+  return controller_interface::return_type::OK;
 }
 
 // ===== Helpers =====
@@ -409,34 +416,28 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 bool SafetyPositionController::read_current_positions()
 {
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    if ( joint_index_[i] < 0 || static_cast<size_t>( joint_index_[i] ) >= state_interfaces_.size() ) {
-      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                             "Invalid joint index for joint '%s' (%d) but should be in [0, %zu)",
-                             params_.joints[i].c_str(), joint_index_[i], state_interfaces_.size() );
+    const auto opt = state_interfaces_[static_cast<size_t>( joint_index_[i] )].get_optional();
+    if ( !opt.has_value() ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                            throttle_logging_msg, "Joint state of '%s' is busy; skipping cycle.",
+                            params_.joints[i].c_str() );
       return false;
     }
-    const auto &opt = state_interfaces_[static_cast<size_t>( joint_index_[i] )].get_optional();
-    if ( opt.has_value() ) {
-      current_positions_[i] = opt.value();
-    } else {
-      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                             "Cannot get joint state for joint '%s'", params_.joints[i].c_str() );
-      return false;
-    }
+    current_positions_[i] = opt.value();
   }
   return true;
 }
 
-bool SafetyPositionController::write_position_commands( const std::vector<double> &commands )
+void SafetyPositionController::write_position_commands( const std::vector<double> &commands )
 {
-  bool success = true;
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    if ( !std::isnan( commands[i] ) ) {
-      success &= command_interfaces_[i].set_value( commands[i] );
+    if ( !std::isnan( commands[i] ) && !command_interfaces_[i].set_value( commands[i] ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                            "Position command interface of '%s' is busy; command not written.",
+                            params_.joints[i].c_str() );
     }
   }
   diagnostics_->publishJointStateOut( commands );
-  return success;
 }
 
 bool SafetyPositionController::setup_pipeline_on_activate()
@@ -515,7 +516,7 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   return true;
 }
 
-bool SafetyPositionController::run_safety_pipeline()
+void SafetyPositionController::run_safety_pipeline()
 {
   const size_t n = params_.joints.size();
   const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
@@ -572,7 +573,7 @@ bool SafetyPositionController::run_safety_pipeline()
   // ---- Write ----
   const auto &qp_cmd = pipeline_->commandedPositions();
   for ( size_t i = 0; i < n; ++i ) { qp_cmd_std_[i] = qp_cmd[static_cast<Eigen::Index>( i )]; }
-  const bool write_ok = write_position_commands( qp_cmd_std_ );
+  write_position_commands( qp_cmd_std_ );
 
   // Directional info for RViz distance-line coloring (green = moving away)
   if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
@@ -581,23 +582,23 @@ bool SafetyPositionController::run_safety_pipeline()
   }
 
   diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );
-
-  return write_ok;
 }
 
-bool SafetyPositionController::write_current_limits()
+void SafetyPositionController::write_current_limits()
 {
-  bool success = true;
+  if ( command_interfaces_.size() <= params_.joints.size() ) {
+    return;
+  }
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    // set current limit if enabled and command interfaces are requested
-    if ( params_.set_current_limits && command_interfaces_.size() > params_.joints.size() ) {
-      const auto &limit = in_compliant_mode_
-                              ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
-                              : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
-      success &= command_interfaces_[i + params_.joints.size()].set_value( limit );
+    const auto &limit = in_compliant_mode_
+                            ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
+                            : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
+    if ( !command_interfaces_[i + params_.joints.size()].set_value( limit ) ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                            "Current limit interface of '%s' is busy; limit not written.",
+                            params_.joints[i].c_str() );
     }
   }
-  return success;
 }
 
 bool SafetyPositionController::gather_joint_indices()

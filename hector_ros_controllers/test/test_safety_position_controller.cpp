@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <shared_mutex>
+
 // __gcov_dump is only available when compiled with --coverage.
 // Use a weak symbol so the call is a no-op in normal (non-coverage) builds.
 #if defined( __GNUC__ )
@@ -742,6 +744,61 @@ TEST_F( SafetyPositionControllerTest, EstopSurvivesReactivation )
   EXPECT_TRUE( controller_->estop_engaged_.load() )
       << "a still-active E-stop must re-engage instead of resuming motion";
   EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
+}
+
+TEST_F( SafetyPositionControllerTest, BusyStateHandleSkipsTheCycleWithoutFailing )
+{
+  // An async hardware component can hold a handle's lock while the controller reads it.
+  // A missed try_lock is contention, not a fault: returning ERROR makes the controller
+  // manager deactivate this controller and every controller in its chain.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  {
+    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+    EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+        << "a busy state handle must not fail the update";
+    EXPECT_DOUBLE_EQ( hw_cmd_values_[0], cmd_before ) << "the cycle is skipped, not guessed";
+  }
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_GT( hw_cmd_values_[0], cmd_before ) << "tracking resumes once the handle is free";
+}
+
+TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  std::unique_lock<std::shared_mutex> busy( cmd_ifaces_[0]->get_mutex() );
+  EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+      << "a busy command handle must not fail the update";
 }
 
 // ============================================================================

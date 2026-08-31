@@ -113,7 +113,10 @@ public:
   /**
    * @brief Main step: read states → safety pipeline (QP)
    * → (optional) set current limits → write commands.
-   * @return OK on success; ERROR if read/write failed
+   * @return always OK. A handle locked by another thread (async hardware components)
+   * only skips that cycle: ERROR would make the controller manager deactivate this
+   * controller together with its whole chain. Configuration faults are caught in
+   * on_configure/on_activate instead.
    */
   controller_interface::return_type
   update_and_write_commands( const rclcpp::Time &time, const rclcpp::Duration &period ) override;
@@ -130,22 +133,20 @@ public:
 private:
   /**
    * @brief Read current joint positions for configured joints.
-   * @return true if all reads succeeded
+   * @return false if a state handle was locked by another thread (skip the cycle)
    */
   bool read_current_positions();
 
   /**
    * @brief Write per-joint position commands (NaN entries are skipped).
+   * A handle locked by another thread is logged and left unwritten: the hardware then
+   * keeps the previous command.
    * @param commands commanded positions (size == params_.joints.size())
-   * @return true if all writes succeeded (for non-NaN entries)
    */
-  bool write_position_commands( const std::vector<double> &commands );
+  void write_position_commands( const std::vector<double> &commands );
 
-  /**
-   * @brief Write current-limit commands (stiff/compliant) if enabled.
-   * @return true if all writes succeed
-   */
-  bool write_current_limits();
+  /// Write current-limit commands (stiff/compliant) if the interfaces were claimed.
+  void write_current_limits();
 
   /**
    * @brief Map params_.joints to all_joint_names_ indices for state interface reads.
@@ -174,9 +175,8 @@ private:
    * @brief Safety pipeline cycle: prepare (desired velocity, boxes, park), collision
    * observation at the commanded configuration, step (solve, integrate, stall/park),
    * write. Translates pipeline/observer events into logs/status.
-   * @return true if all interface writes succeeded
    */
-  bool run_safety_pipeline();
+  void run_safety_pipeline();
 
   // ---- Configuration / mode ----
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
