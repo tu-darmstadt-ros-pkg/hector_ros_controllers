@@ -74,7 +74,8 @@ public:
   on_activate( const rclcpp_lifecycle::State &previous_state ) override;
 
   /**
-   * @brief Deactivate controller (no special action).
+   * @brief Deactivate controller; stops the status timer and clears the engaged E-stop.
+   * The subscriptions live for the whole controller lifetime.
    * @param previous_state lifecycle state (unused)
    * @return SUCCESS
    */
@@ -120,8 +121,9 @@ public:
   /**
    * @brief Enable/disable chained mode.
    * @note Both modes are supported; the references are simply sourced from the upstream
-   * controller (chained) or from the "~/commands" topic (non-chained). Switching
-   * invalidates the current references so no stale target is resumed.
+   * controller (chained) or from the "~/commands" topic (non-chained), selected by
+   * is_in_chained_mode(). Switching invalidates the current references so no stale
+   * target is resumed.
    */
   bool on_set_chained_mode( bool chained_mode ) override;
 
@@ -194,11 +196,12 @@ private:
   bool run_safety_pipeline();
 
   // ---- Configuration / mode ----
-  bool is_chained_ = true;                       ///< references from upstream (true) or ~/commands
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
 
   // ---- E-stop ----
-  std::atomic<bool> estop_active_{ false };  ///< last requested E-stop state
+  /// Last requested E-stop state. Tracks the external safety signal and therefore
+  /// survives deactivation; estop_engaged_ is what the update loop acts on.
+  std::atomic<bool> estop_active_{ false };
   std::atomic<bool> estop_engaged_{ false }; ///< actually engaged in update loop
 
   // ---- Safety bypass (for folded arm positions etc.) ----

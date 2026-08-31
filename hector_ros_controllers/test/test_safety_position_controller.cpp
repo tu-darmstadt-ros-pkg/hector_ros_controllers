@@ -723,11 +723,10 @@ TEST_F( SafetyPositionControllerTest, RepeatedActivateDeactivateCycles )
 
     deactivateController();
 
-    // Verify state is reset after deactivation
-    EXPECT_FALSE( controller_->estop_active_.load() );
+    // The engaged E-stop is cleared; the subscriptions outlive the activation
     EXPECT_FALSE( controller_->estop_engaged_.load() );
-    EXPECT_TRUE( controller_->estop_subscriber_ == nullptr );
-    EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
+    EXPECT_TRUE( controller_->estop_subscriber_ != nullptr );
+    EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
   }
 }
 
@@ -751,12 +750,10 @@ TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
   EXPECT_TRUE( controller_->estop_engaged_.load() );
 
   deactivateController();
-  // After deactivation, estop should be cleared
-  EXPECT_FALSE( controller_->estop_active_.load() );
   EXPECT_FALSE( controller_->estop_engaged_.load() );
 
+  sendEstop( false );
   activateController();
-  // Controller should be in clean state
   EXPECT_FALSE( controller_->estop_engaged_.load() );
 
   // References should be NaN (fresh activation)
@@ -774,11 +771,41 @@ TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
   EXPECT_GT( std::abs( hw_cmd_values_[0] ), 0.0 );
 }
 
+TEST_F( SafetyPositionControllerTest, EstopSurvivesReactivation )
+{
+  // estop_active_ tracks the external safety signal, so restarting the controller must
+  // not silently release it: the first cycle after activation re-engages the hold.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  setStateValue( "joint1", 0.5 );
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  sendEstop( true );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  ASSERT_TRUE( controller_->estop_engaged_.load() );
+
+  deactivateController();
+  EXPECT_TRUE( controller_->estop_active_.load() ) << "the E-stop request must survive";
+
+  activateController();
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->estop_engaged_.load() )
+      << "a still-active E-stop must re-engage instead of resuming motion";
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
+}
+
 // ============================================================================
 // Chained Mode Tests
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, ChainedModeInvalidatesReferences )
+TEST_F( SafetyPositionControllerTest, SwitchingChainedModeInvalidatesReferences )
 {
   initController();
   configureController();
@@ -787,46 +814,47 @@ TEST_F( SafetyPositionControllerTest, ChainedModeInvalidatesReferences )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  // Set valid references
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 2.0;
-  controller_->reference_interfaces_[2] = 3.0;
+  for ( const bool chained : { true, false } ) {
+    controller_->reference_interfaces_[0] = 1.0;
+    controller_->reference_interfaces_[1] = 2.0;
+    controller_->reference_interfaces_[2] = 3.0;
 
-  // Switching to chained mode should invalidate all references
-  controller_->on_set_chained_mode( true );
-  EXPECT_TRUE( controller_->is_chained_ );
+    controller_->on_set_chained_mode( chained );
 
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
-        << "reference_interfaces_[" << i << "] should be NaN after switching to chained mode";
+    for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+      EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
+          << "reference_interfaces_[" << i << "] must be NaN after switching to "
+          << ( chained ? "chained" : "unchained" ) << " mode";
+    }
   }
 }
 
-TEST_F( SafetyPositionControllerTest, UnchainedModeInvalidatesReferences )
+TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
 {
+  // Both reference inputs live for the whole controller lifetime. Re-creating them per
+  // activation left "~/commands" without a subscription after the first deactivation.
   initController();
   configureController();
   setupHardwareInterfaces();
   findMocks();
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
+  deactivateController();
+  activateController();
 
-  // Start in chained mode
-  controller_->on_set_chained_mode( true );
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  EXPECT_TRUE( rtest::findSubscription<safety_position_controller::CmdType>(
+      node_name, node_name + "/commands" ) );
+  EXPECT_TRUE(
+      rtest::findSubscription<std_msgs::msg::Bool>( node_name, node_name + "/safety_estop" ) );
 
-  // Set valid references
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 2.0;
-  controller_->reference_interfaces_[2] = 3.0;
-
-  // Switching to unchained mode should also invalidate references
-  controller_->on_set_chained_mode( false );
-  EXPECT_FALSE( controller_->is_chained_ );
-
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
-        << "reference_interfaces_[" << i << "] should be NaN after switching to unchained mode";
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 0.5, 0.0, 0.0 } );
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
   }
+  EXPECT_GT( hw_cmd_values_[0], 0.0 ) << "the command topic must still reach the hardware";
 }
 
 // ============================================================================

@@ -18,10 +18,9 @@ SafetyPositionController::SafetyPositionController()
 {
 }
 
-bool SafetyPositionController::on_set_chained_mode( const bool chained_mode )
+bool SafetyPositionController::on_set_chained_mode( const bool )
 {
-  is_chained_ = chained_mode;
-  // invalidate reference interfaces
+  // switching the reference source must not resume a stale target
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
   return true;
 }
@@ -138,6 +137,15 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
   joints_command_subscriber_ = node->create_subscription<CmdType>(
       "~/commands", rclcpp::SystemDefaultsQoS(),
       [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
+
+  estop_subscriber_ = node->create_subscription<std_msgs::msg::Bool>(
+      "~/safety_estop", rclcpp::SystemDefaultsQoS(),
+      [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
+        const bool prev = estop_active_.exchange( msg->data, std::memory_order_relaxed );
+        if ( msg->data != prev ) {
+          RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s", msg->data ? "ENGAGED" : "DISENGAGED" );
+        }
+      } );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -256,28 +264,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     }
   }
 
-  // E-stop subscription
-  estop_subscriber_ = get_node()->create_subscription<std_msgs::msg::Bool>(
-      "~/safety_estop", rclcpp::SystemDefaultsQoS(),
-      [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
-        const bool prev = estop_active_.load( std::memory_order_relaxed );
-        estop_active_.store( msg->data, std::memory_order_relaxed );
-        if ( msg->data != prev ) {
-          RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s", msg->data ? "ENGAGED" : "DISENGAGED" );
-        }
-      } );
-
-  if ( !is_chained_ ) {
-    // Non-chained mode: re-create command subscriber (destroyed in on_deactivate)
-    joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
-        "~/commands", rclcpp::SystemDefaultsQoS(),
-        [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
-  }
-
-  // reset RT buffer
+  // drop commands received while inactive
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
-
-  estop_engaged_.store( false, std::memory_order_relaxed );
 
   publish_status();
 
@@ -287,11 +275,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
-  estop_subscriber_.reset();
-  joints_command_subscriber_.reset();
   status_timer_.reset();
-
-  estop_active_.store( false, std::memory_order_relaxed );
   estop_engaged_.store( false, std::memory_order_relaxed );
 
   return controller_interface::CallbackReturn::SUCCESS;
