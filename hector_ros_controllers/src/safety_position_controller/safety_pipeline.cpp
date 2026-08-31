@@ -66,9 +66,25 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
   for ( std::size_t i = 0; i < n; ++i ) {
     const auto idx = static_cast<Eigen::Index>( i );
     const JointInfo &joint = config_.joints[i];
-    const double target = reference[i];
+
+    // Position limits (damper handled inside the QP); bypass extends them
+    if ( joint.has_position_limits && joint.type != JointType::CONTINUOUS ) {
+      const double tolerance =
+          bypass_active ? ( joint.upper_limit - joint.lower_limit ) * config_.bypass_limit_tolerance
+                        : 0.0;
+      input_.q_lo[idx] = joint.lower_limit - tolerance;
+      input_.q_hi[idx] = joint.upper_limit + tolerance;
+    } else {
+      input_.q_lo[idx] = -std::numeric_limits<double>::infinity();
+      input_.q_hi[idx] = std::numeric_limits<double>::infinity();
+    }
+
     double diff = 0.0;
-    if ( !std::isnan( target ) ) {
+    if ( !std::isnan( reference[i] ) ) {
+      // Keep the tracked target reachable. Widened to include the current command so a
+      // joint resting outside its limits is held rather than asked to move further.
+      const double target = std::clamp( reference[i], std::min( input_.q_lo[idx], cmd_[idx] ),
+                                        std::max( input_.q_hi[idx], cmd_[idx] ) );
       diff = ( joint.type == JointType::CONTINUOUS ) ? get_signed_distance( cmd_[idx], target )
                                                      : ( target - cmd_[idx] );
       if ( config_.reference_leash_time > 0.0 ) {
@@ -80,19 +96,6 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     input_.v_des[idx] = SafetyQpLimiter::desiredVelocity( diff, config_.qp.v_max[idx],
                                                           config_.qp.a_dec[idx], config_.dt );
     wants_motion_ |= std::abs( input_.v_des[idx] ) > config_.stall_velocity_threshold;
-
-    // Position limits (damper handled inside the QP); bypass extends them like the
-    // reference clamp does
-    if ( joint.has_position_limits && joint.type != JointType::CONTINUOUS ) {
-      const double tolerance =
-          bypass_active ? ( joint.upper_limit - joint.lower_limit ) * config_.bypass_limit_tolerance
-                        : 0.0;
-      input_.q_lo[idx] = joint.lower_limit - tolerance;
-      input_.q_hi[idx] = joint.upper_limit + tolerance;
-    } else {
-      input_.q_lo[idx] = -std::numeric_limits<double>::infinity();
-      input_.q_hi[idx] = std::numeric_limits<double>::infinity();
-    }
 
     // Per-joint deviation box around the leashed reference: bounds how far every link
     // may leave the upstream-validated path. One-sided (widened to include the current

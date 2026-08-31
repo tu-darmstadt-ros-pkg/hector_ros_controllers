@@ -14,7 +14,6 @@ bool collision_check_enabled   # true if check_self_collisions param is on
 bool estop_engaged
 
 # Position limit enforcement
-bool position_limits_enforced  # true if enforce_position_limits param is on
 
 # Collision diagnostics
 float64 min_collision_distance       # current minimum collision distance [m]

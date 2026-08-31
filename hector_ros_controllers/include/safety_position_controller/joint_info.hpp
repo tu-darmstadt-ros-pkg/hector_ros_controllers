@@ -42,18 +42,6 @@ JointInfoParseResult parse_joint_infos( const std::string &urdf_xml,
                                         double default_velocity_limit );
 
 /**
- * @brief Unwrap target angle to the nearest equivalent around current.
- * @param current current angle [rad]
- * @param target target angle (wrapped) [rad]
- * @return unwrapped target near current
- */
-inline double unwrap_to_nearest( const double current, const double target )
-{
-  const double k = std::round( ( current - target ) / ( 2.0 * M_PI ) );
-  return target + k * ( 2.0 * M_PI );
-}
-
-/**
  * Compute the signed shortest distance between two revolute joint angles.
  *
  * @param value_a  Start angle (rad)

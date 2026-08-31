@@ -89,9 +89,11 @@ public:
   }
 
   /**
-   * @brief Phase 1: rebase if invalidated, desired velocity toward the (leashed)
-   * reference, position-limit and deviation boxes, park hold/resume.
-   * @param reference processed reference per joint (NaN entries demand zero velocity)
+   * @brief Phase 1: rebase if invalidated, clamp the reference to the position limits,
+   * desired velocity toward the (leashed) reference, position-limit and deviation boxes,
+   * park hold/resume.
+   * @param reference raw reference per joint (NaN entries demand zero velocity); for
+   * continuous joints the shortest path to the target is taken
    * @param measured measured positions per joint
    * @param bypass_active relaxes position limits and drops the deviation boxes
    * @return true if a new reference released the parked state this cycle

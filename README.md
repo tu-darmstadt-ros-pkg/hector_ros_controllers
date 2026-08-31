@@ -66,8 +66,6 @@ A **safety layer for joint position commands**, usable both
 | Parameter                          | Type       | Default | Description                                                                                                         |
 | ---------------------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
 | `joints`                           | `string[]` | `[]`    | Names of joints controlled. Must match URDF. *(effectively read-only; set via params at startup)*                   |
-| `unwrap_continuous_joints`         | `bool`     | `true`  | If `true`, continuous joints are unwrapped to stay close to the current angle.                                      |
-| `enforce_position_limits`          | `bool`     | `true`  | If `true`, clamps joint commands to URDF position limits.                                                           |
 | `check_self_collisions`            | `bool`     | `true`  | If `true`, performs self-collision checks and enables distance-based velocity scaling. *(read-only)*                 |
 | `collision_padding`                | `double`   | `0.01`  | Minimum allowed link-to-link distance [m]; distances ≤ padding are treated as collision. Bounds: [0.0, 1.0].       |
 | `collision_safety_zone`            | `double`   | `0.05`  | Outer safety zone distance [m]. Between `collision_padding` and this value, velocity is linearly scaled down. Must be > `collision_padding`. |
@@ -321,8 +319,6 @@ A **safety layer for joint position commands**, usable both
 | Parameter                          | Type       | Default | Description                                                                                                         |
 | ---------------------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
 | `joints`                           | `string[]` | `[]`    | Names of joints controlled. Must match URDF. *(effectively read-only; set via params at startup)*                   |
-| `unwrap_continuous_joints`         | `bool`     | `true`  | If `true`, continuous joints are unwrapped to stay close to the current angle.                                      |
-| `enforce_position_limits`          | `bool`     | `true`  | If `true`, clamps joint commands to URDF position limits.                                                           |
 | `check_self_collisions`            | `bool`     | `true`  | If `true`, performs a self-collision check on the **target** pose before sending commands.                          |
 | `collision_padding`                | `double`   | `0.0`   | Minimum allowed link-to-link distance [m]; distances ≤ padding are treated as collision.                            |
 | `collision_cache_epsilon`          | `double`   | `1e-6`  | Threshold for reusing the previous collision result (skip recomputation if the pose change is below this value).    |
@@ -510,8 +506,6 @@ ros2 topic echo /gripper_controller/is_grasped
   arm_safety_position_controller:
     ros__parameters:
       joints: [ arm_joint_1, arm_joint_2, arm_joint_3, arm_joint_4, arm_joint_5, arm_joint_6, arm_joint_7 ]
-      unwrap_continuous_joints: true
-      enforce_position_limits: true
       check_self_collisions: true
       collision_padding: 0.01
       collision_safety_zone: 0.05

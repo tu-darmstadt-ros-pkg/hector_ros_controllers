@@ -133,6 +133,26 @@ TEST( ParseJointInfos, UnparsableUrdfFails )
   EXPECT_FALSE( result.ok );
 }
 
+TEST( GetSignedDistance, ReturnsPlainDifferenceWithinHalfATurn )
+{
+  EXPECT_NEAR( spc::get_signed_distance( 0.0, 0.0 ), 0.0, 1e-9 );
+  EXPECT_NEAR( spc::get_signed_distance( 0.0, 1.0 ), 1.0, 1e-9 );
+  EXPECT_NEAR( spc::get_signed_distance( 0.0, -1.0 ), -1.0, 1e-9 );
+  EXPECT_NEAR( spc::get_signed_distance( 1.0, 2.0 ), 1.0, 1e-9 );
+}
+
+TEST( GetSignedDistance, TakesTheShortWayAroundTheWrap )
+{
+  // From 3.0 to -3.0 the short way is positive (~0.28 rad), not -6.0
+  const double forward = spc::get_signed_distance( 3.0, -3.0 );
+  EXPECT_NEAR( forward, 2 * M_PI - 6.0, 1e-9 );
+  EXPECT_GT( forward, 0.0 );
+
+  const double backward = spc::get_signed_distance( 0.0, M_PI + 0.1 );
+  EXPECT_NEAR( backward, -( M_PI - 0.1 ), 1e-9 );
+  EXPECT_LT( backward, 0.0 );
+}
+
 int main( int argc, char **argv )
 {
   ::testing::InitGoogleMock( &argc, argv );

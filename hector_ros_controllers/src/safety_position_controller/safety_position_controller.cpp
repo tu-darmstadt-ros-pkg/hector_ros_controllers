@@ -186,7 +186,6 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   const size_t n = params_.joints.size();
   reference_interfaces_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   joint_index_.assign( n, -1 );
-  processed_reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   hold_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
 
@@ -205,11 +204,8 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
-  // reset reference interfaces and the processed references derived from them: a target
-  // from before the deactivation must never be resumed on activation.
+  // a target from before the deactivation must never be resumed on activation
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
-  std::fill( processed_reference_.begin(), processed_reference_.end(),
-             std::numeric_limits<double>::quiet_NaN() );
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
@@ -393,9 +389,6 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
     return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
   }
 
-  // resolve continuous joints & enforce limits
-  enforce_limits();
-
   success &= run_safety_pipeline();
   if ( params_.set_current_limits ) {
     success &= write_current_limits();
@@ -444,38 +437,6 @@ bool SafetyPositionController::write_position_commands( const std::vector<double
   }
   diagnostics_->publishJointStateOut( commands );
   return success;
-}
-
-void SafetyPositionController::enforce_limits()
-{
-  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
-
-  // enforce limits and write updated commands into processed_reference_
-  for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    const double target_wrapped = reference_interfaces_[i];
-    if ( std::isnan( target_wrapped ) ) {
-      // A NaN reference means "no target" and MUST be propagated: keeping the previous
-      // processed reference would keep tracking a target the upstream controller has
-      // stopped commanding. The pipeline turns NaN into a zero velocity demand, so the
-      // joint brakes to a smooth stop and holds.
-      processed_reference_[i] = std::numeric_limits<double>::quiet_NaN();
-      continue;
-    }
-
-    double commanded = target_wrapped;
-    if ( joint_infos_[i].type == JointType::CONTINUOUS ) {
-      // Joint wrapping is ALWAYS active, even during bypass
-      if ( params_.unwrap_continuous_joints ) {
-        commanded = unwrap_to_nearest( current_positions_[i], target_wrapped );
-      }
-    } else {
-      if ( params_.enforce_position_limits ) {
-        commanded = clamp( i, commanded, bypass_active ); // checks if the joint has limits
-      }
-    }
-
-    processed_reference_[i] = commanded;
-  }
 }
 
 bool SafetyPositionController::setup_pipeline_on_activate()
@@ -561,7 +522,7 @@ bool SafetyPositionController::run_safety_pipeline()
   const bool collision_checks_active =
       !bypass_active && params_.check_self_collisions && collision_checker_ != nullptr;
 
-  if ( pipeline_->prepare( processed_reference_, current_positions_, bypass_active ) ) {
+  if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active ) ) {
     RCLCPP_INFO( get_node()->get_logger(), "New reference received — resuming from parked state." );
     publish_status();
   }
@@ -619,7 +580,7 @@ bool SafetyPositionController::run_safety_pipeline()
                                                  params_.collision_safety_zone );
   }
 
-  diagnostics_->maybePublishQpDebug( *pipeline_, processed_reference_ );
+  diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );
 
   return write_ok;
 }
@@ -637,36 +598,6 @@ bool SafetyPositionController::write_current_limits()
     }
   }
   return success;
-}
-
-double SafetyPositionController::clamp( const size_t i, const double value,
-                                        const bool bypass_active ) const
-{
-  const JointInfo &joint = joint_infos_[i];
-  if ( !joint.has_position_limits ) {
-    return value;
-  }
-
-  // Calculate tolerance: when bypass is active, extend limits by the configured tolerance factor
-  const double range = joint.upper_limit - joint.lower_limit;
-  const double tolerance =
-      bypass_active ? ( range * params_.safety_bypass_joint_limit_tolerance ) : 0.0;
-
-  const double lo = std::min( joint.lower_limit - tolerance, current_positions_[i] );
-  const double hi = std::max( joint.upper_limit + tolerance, current_positions_[i] );
-  if ( value < lo ) {
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                          "Clamping joint '%s' to lower limit %.3f%s", params_.joints[i].c_str(),
-                          lo, bypass_active ? " (bypass active, tolerance applied)" : "" );
-    return lo;
-  }
-  if ( value > hi ) {
-    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                          "Clamping joint '%s' to upper limit %.3f%s", params_.joints[i].c_str(),
-                          hi, bypass_active ? " (bypass active, tolerance applied)" : "" );
-    return hi;
-  }
-  return value;
 }
 
 bool SafetyPositionController::gather_joint_indices()

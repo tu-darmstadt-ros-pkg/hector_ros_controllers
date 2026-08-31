@@ -11,60 +11,6 @@ using SafetyPositionControllerStatus =
 using SPC = safety_position_controller::SafetyPositionController;
 
 // ============================================================================
-// Static method tests (no fixture needed)
-// ============================================================================
-
-TEST( SafetyPositionControllerStatic, UnwrapToNearestBasic )
-{
-  // Target near current - no wrapping needed
-  EXPECT_NEAR( safety_position_controller::unwrap_to_nearest( 0.0, 0.1 ), 0.1, 1e-9 );
-  EXPECT_NEAR( safety_position_controller::unwrap_to_nearest( 0.0, -0.1 ), -0.1, 1e-9 );
-
-  // Wrapping: current=3.0, target=-3.0 -> should unwrap to near 3.0 (adding 2*pi)
-  double result = safety_position_controller::unwrap_to_nearest( 3.0, -3.0 );
-  EXPECT_NEAR( result, -3.0 + 2 * M_PI, 1e-9 );
-}
-
-TEST( SafetyPositionControllerStatic, UnwrapToNearestMultiRevolutions )
-{
-  // current at 10.0 rad, target at 0.1 -> should unwrap near 10.0
-  double result = safety_position_controller::unwrap_to_nearest( 10.0, 0.1 );
-  double expected = 0.1 + std::round( ( 10.0 - 0.1 ) / ( 2 * M_PI ) ) * ( 2 * M_PI );
-  EXPECT_NEAR( result, expected, 1e-9 );
-  // Result should be within pi of the current position
-  EXPECT_LT( std::abs( result - 10.0 ), M_PI );
-}
-
-TEST( SafetyPositionControllerStatic, UnwrapToNearestNegative )
-{
-  // current at -10.0, target 0.0 -> should unwrap near -10.0
-  double result = safety_position_controller::unwrap_to_nearest( -10.0, 0.0 );
-  double expected = 0.0 + std::round( ( -10.0 - 0.0 ) / ( 2 * M_PI ) ) * ( 2 * M_PI );
-  EXPECT_NEAR( result, expected, 1e-9 );
-}
-
-TEST( SafetyPositionControllerStatic, GetSignedDistanceBasic )
-{
-  EXPECT_NEAR( safety_position_controller::get_signed_distance( 0.0, 0.0 ), 0.0, 1e-9 );
-  EXPECT_NEAR( safety_position_controller::get_signed_distance( 0.0, 1.0 ), 1.0, 1e-9 );
-  EXPECT_NEAR( safety_position_controller::get_signed_distance( 0.0, -1.0 ), -1.0, 1e-9 );
-  EXPECT_NEAR( safety_position_controller::get_signed_distance( 1.0, 2.0 ), 1.0, 1e-9 );
-}
-
-TEST( SafetyPositionControllerStatic, GetSignedDistanceWrapping )
-{
-  // From 3.0 to -3.0: shortest path is positive ~0.28 rad
-  double dist = safety_position_controller::get_signed_distance( 3.0, -3.0 );
-  EXPECT_NEAR( dist, 2 * M_PI - 6.0, 1e-9 );
-  EXPECT_GT( dist, 0.0 );
-
-  // From 0 to pi+0.1: shortest should be negative (wrap around)
-  dist = safety_position_controller::get_signed_distance( 0.0, M_PI + 0.1 );
-  EXPECT_NEAR( dist, -( 2 * M_PI - M_PI - 0.1 ), 1e-9 );
-  EXPECT_LT( dist, 0.0 );
-}
-
-// ============================================================================
 // Fixture for full controller tests
 // ============================================================================
 
@@ -110,8 +56,6 @@ public:
     rclcpp::NodeOptions opts;
     std::vector<rclcpp::Parameter> overrides = {
         rclcpp::Parameter( "joints", j ),
-        rclcpp::Parameter( "unwrap_continuous_joints", true ),
-        rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", check_self_collisions ),
         rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", set_current_limits ),
@@ -227,7 +171,7 @@ TEST_F( SafetyPositionControllerTest, OnInitSucceeds )
 // Enforce Limits Tests
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevolute )
+TEST_F( SafetyPositionControllerTest, ReferenceAbovePositionLimitIsClamped )
 {
   initController();
   configureController();
@@ -248,7 +192,7 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevolute )
   EXPECT_LE( hw_cmd_values_[1], 1.5 );
 }
 
-TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevoluteLower )
+TEST_F( SafetyPositionControllerTest, ReferenceBelowPositionLimitIsClamped )
 {
   initController();
   configureController();
@@ -268,7 +212,7 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevoluteLower )
   EXPECT_GE( hw_cmd_values_[1], -1.5 );
 }
 
-TEST_F( SafetyPositionControllerTest, EnforceLimitsUnwrapsContinuous )
+TEST_F( SafetyPositionControllerTest, ContinuousJointTakesShortestPath )
 {
   // Use joints including joint4 (continuous)
   std::vector<std::string> j = { "joint1", "joint4" };
@@ -284,11 +228,11 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsUnwrapsContinuous )
   setStateValue( "joint1", 0.0 );
 
   controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.1; // will be unwrapped
+  controller_->reference_interfaces_[1] = 0.1; // equivalent to 0.1 + 4*pi
 
   callUpdate();
 
-  // After unwrap, cmd should be closer to 10.0 than to 0.1
+  // The shortest path stays near 10.0 instead of unwinding to 0.1
   EXPECT_GT( hw_cmd_values_[1], 5.0 );
 }
 
@@ -600,7 +544,6 @@ TEST_F( SafetyPositionControllerTest, StatusPublishesCorrectFields )
   EXPECT_FALSE( captured.current_limits_enabled );
   EXPECT_FALSE( captured.collision_check_enabled ); // disabled in params
   EXPECT_FALSE( captured.estop_engaged );
-  EXPECT_TRUE( captured.position_limits_enforced );
 }
 
 TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopEngage )
@@ -894,8 +837,6 @@ public:
 
     std::vector<rclcpp::Parameter> overrides = {
         rclcpp::Parameter( "joints", cj ),
-        rclcpp::Parameter( "unwrap_continuous_joints", true ),
-        rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", true ),
         rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", false ),
@@ -1434,7 +1375,7 @@ TEST_F( SafetyPositionControllerCollisionTest, InfInputDetectedAsCollision )
   controller_->reference_interfaces_[2] = 0.0;
 
   // First need to call update so collision checker sees the inf
-  // The inf will be clamped by enforce_limits (joint1 has limits [-pi, pi])
+  // The inf is clamped to the position limits (joint1 has limits [-pi, pi])
   // But the collision checker receives cc_positions which includes the clamped value
   // So this tests the controller's overall handling — commands should still be safe
   auto ret = callUpdate();

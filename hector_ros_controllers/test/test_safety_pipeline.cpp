@@ -167,6 +167,38 @@ TEST( SafetyPipeline, TrackingLeashStillBoundsContinuousJointLag )
   EXPECT_NEAR( pipeline.commandedPositions()[0], 0.2, 1e-6 );
 }
 
+TEST( SafetyPipeline, ReferenceOutsideThePositionLimitsHoldsWithoutStalling )
+{
+  // A joint resting beyond its limit (e.g. after a bypass expired at a fold position)
+  // must simply be held. The velocity box allows no outward motion there, so a demand
+  // toward the outside would never be met and would be reported as a stall, then park.
+  auto cfg = makeConfig( 1 );
+  cfg.joints[0].lower_limit = -1.0;
+  cfg.joints[0].upper_limit = 1.0;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 1.15 };
+  pipeline.prepare( { 1.15 }, measured, false ); // rebase the command outside the limit
+  pipeline.step( {} );
+  measured[0] = 1.2; // hardware sits slightly further out than the command
+
+  for ( int i = 0; i < 200; ++i ) {
+    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.step( {} );
+  }
+  EXPECT_NEAR( pipeline.commandedPositions()[0], 1.15, 1e-6 );
+  EXPECT_FALSE( pipeline.stalled() ) << "holding at a limit is not a blocked path";
+  EXPECT_FALSE( pipeline.parked() );
+
+  // A reference back inside the limits is still followed.
+  for ( int i = 0; i < 200; ++i ) {
+    pipeline.prepare( { 0.5 }, measured, false );
+    pipeline.step( {} );
+    measured[0] = pipeline.commandedPositions()[0];
+  }
+  EXPECT_NEAR( pipeline.commandedPositions()[0], 0.5, 1e-3 );
+}
+
 TEST( SafetyPipeline, DeviationBoxAroundLeashedReferenceDroppedDuringBypass )
 {
   auto cfg = makeConfig();

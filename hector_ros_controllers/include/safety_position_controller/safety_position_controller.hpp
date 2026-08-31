@@ -38,7 +38,7 @@ using CmdType = std_msgs::msg::Float64MultiArray;
  * A per-joint NaN reference means "no target": it demands zero velocity, so the joint
  * brakes to a smooth stop and holds.
  *
- * - Enforces joint limits (pos/vel), optional unwrapping for continuous joints.
+ * - Enforces joint position/velocity limits; continuous joints take the shortest path.
  * - Optional self-collision check via CollisionChecker (URDF + SRDF).
  * - Optional current-limit control (stiff/compliant) toggled by service.
  *   - Assumes actuator uses current values as limits in position control mode.
@@ -111,7 +111,7 @@ public:
                                      const rclcpp::Duration &period ) override;
 
   /**
-   * @brief Main step: read states → enforce limits → safety pipeline (QP)
+   * @brief Main step: read states → safety pipeline (QP)
    * → (optional) set current limits → write commands.
    * @return OK on success; ERROR if read/write failed
    */
@@ -142,26 +142,10 @@ private:
   bool write_position_commands( const std::vector<double> &commands );
 
   /**
-   * @brief Apply unwrap/clamp rules to references → fill processed_reference_.
-   * NaN references are propagated as NaN (the pipeline turns them into a zero velocity
-   * demand); keeping the previous value would resume a stale target.
-   */
-  void enforce_limits();
-
-  /**
    * @brief Write current-limit commands (stiff/compliant) if enabled.
    * @return true if all writes succeed
    */
   bool write_current_limits();
-
-  /**
-   * @brief Clamp value to [lower, upper] (with validity checks); logs on clamp.
-   * @param i joint index in params_.joints
-   * @param value requested value
-   * @param bypass_active if true, applies tolerance extension to limits
-   * @return clamped value
-   */
-  double clamp( size_t i, double value, bool bypass_active = false ) const;
 
   /**
    * @brief Map params_.joints to all_joint_names_ indices for state interface reads.
@@ -190,7 +174,6 @@ private:
    * @brief Safety pipeline cycle: prepare (desired velocity, boxes, park), collision
    * observation at the commanded configuration, step (solve, integrate, stall/park),
    * write. Translates pipeline/observer events into logs/status.
-   * Must be called after enforce_limits().
    * @return true if all interface writes succeeded
    */
   bool run_safety_pipeline();
@@ -227,9 +210,8 @@ private:
   double last_manipulability_{ 0.0 };        ///< latest Yoshikawa manipulability index
 
   // ---- Command/state buffers (aligned with params_.joints) ----
-  std::vector<double> processed_reference_; ///< references after unwrap/clamp (pipeline input)
-  std::vector<double> current_positions_;   ///< latest measured positions
-  std::vector<double> hold_positions_;      ///< positions to hold during E-stop
+  std::vector<double> current_positions_; ///< latest measured positions
+  std::vector<double> hold_positions_;    ///< positions to hold during E-stop
 
   // ---- Safety pipeline ----
   std::unique_ptr<SafetyPipeline> pipeline_; ///< ROS-free QP safety pipeline

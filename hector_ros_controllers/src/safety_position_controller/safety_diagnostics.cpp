@@ -73,7 +73,6 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
   msg.current_limits_enabled = params_.set_current_limits;
   msg.collision_check_enabled = params_.check_self_collisions;
   msg.estop_engaged = flags.estop_engaged;
-  msg.position_limits_enforced = params_.enforce_position_limits;
   msg.min_collision_distance = snap.min_distance;
   msg.num_pairs_in_safety_zone = snap.num_pairs_in_safety_zone;
   msg.manipulability = snap.manipulability;

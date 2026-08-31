@@ -28,8 +28,7 @@ pipeline — hence the two-phase `prepare()` / `step()` protocol:
 
 ```mermaid
 flowchart TB
-    REF[reference_interfaces] --> EL["enforce_limits()<br/>(unwrap / clamp)"]
-    EL -->|processed_reference| P1["SafetyPipeline::prepare()<br/>v_des + leash, position/deviation boxes,<br/>park hold/resume"]
+    REF[reference_interfaces] --> P1["SafetyPipeline::prepare()<br/>reference clamp, v_des + leash,<br/>position/deviation boxes, park hold/resume"]
     P1 -->|"commandedPositions()"| OBS["CollisionObserver::observe()"]
     CC[CollisionChecker] --> OBS
     OBS -->|"CollisionObservation<br/>(pairs, in_collision, state_valid)"| P2["SafetyPipeline::step()<br/>project gradients → damper rows,<br/>QP solve, integrate, tracking leash"]
