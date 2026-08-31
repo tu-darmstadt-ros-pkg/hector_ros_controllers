@@ -42,8 +42,9 @@ flowchart TB
 ```
 
 The E-stop path bypasses all of this: the controller holds the latched positions and
-calls `pipeline->invalidate()`, so the pipeline rebases to the measured state on
-release (the park latch survives).
+calls `pipeline->invalidate()`, so on release the pipeline rebases to the measured state
+and parks — the arm holds until the reference changes by more than
+`park_resume_reference_threshold`.
 
 ## Where to change what
 

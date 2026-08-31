@@ -79,9 +79,14 @@ public:
    */
   explicit SafetyPipeline( Config config );
 
-  /// Rebase to the measured state on the next prepare() (E-stop, state-read failures).
-  /// The parked state survives (a stale reference stays abandoned across an E-stop).
-  void invalidate() { state_valid_ = false; }
+  /// Rebase to the measured state and park on the next prepare() (E-stop, state-read
+  /// failures): the reference in effect at that moment is abandoned, so nothing moves
+  /// until a new one arrives.
+  void invalidate()
+  {
+    state_valid_ = false;
+    park_pending_ = true;
+  }
 
   /**
    * @brief Phase 1: rebase if invalidated, desired velocity toward the (leashed)
@@ -130,6 +135,10 @@ private:
 
   /// false → cmd_/vel_ are rebased to the measured state on the next prepare()
   bool state_valid_{ false };
+  /// true → the next prepare() parks and latches its reference as abandoned. Separate
+  /// from state_valid_: the rebase at construction/activation must not park, since the
+  /// reference the upstream controller is holding there is a live target.
+  bool park_pending_{ false };
   bool wants_motion_{ false };
   Eigen::VectorXd cmd_;         ///< commanded positions (integration state)
   Eigen::VectorXd vel_;         ///< commanded velocities

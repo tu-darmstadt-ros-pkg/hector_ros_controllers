@@ -185,6 +185,30 @@ public:
     }
     FAIL() << "Joint '" << joint << "' not found in all_joint_names_";
   }
+
+  // Mock hardware that follows the position command exactly.
+  void followCommands()
+  {
+    for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+      setStateValue( controlled_joints_[i], hw_cmd_values_[i] );
+    }
+  }
+
+  // Full chainable update. Unlike callUpdate() this also runs
+  // update_reference_from_subscribers(), i.e. the non-chained "~/commands" path.
+  controller_interface::return_type callFullUpdate()
+  {
+    rclcpp::Time now( 0, 0, RCL_ROS_TIME );
+    rclcpp::Duration period( std::chrono::milliseconds( 10 ) );
+    return controller_->update( now, period );
+  }
+
+  void sendCommand( const std::vector<double> &positions )
+  {
+    auto msg = std::make_shared<safety_position_controller::CmdType>();
+    msg->data = positions;
+    controller_->rt_command_ptr_.writeFromNonRT( msg );
+  }
 };
 
 // ============================================================================
@@ -306,8 +330,10 @@ TEST_F( SafetyPositionControllerTest, EstopEngageHoldsPositions )
   EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
 }
 
-TEST_F( SafetyPositionControllerTest, EstopReleaseInvalidatesReferences )
+TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
 {
+  // An E-stop abandons whatever was being tracked. On release the arm must hold even
+  // though the upstream controller keeps writing the pre-E-stop target every cycle.
   initController();
   configureController();
   setupHardwareInterfaces();
@@ -316,18 +342,76 @@ TEST_F( SafetyPositionControllerTest, EstopReleaseInvalidatesReferences )
   activateController();
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
   controller_->reference_interfaces_[1] = 0.0;
   controller_->reference_interfaces_[2] = 0.0;
 
-  sendEstop( true );
-  callUpdate();
-  sendEstop( false );
-  callUpdate();
-
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) );
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
   }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
+
+  sendEstop( true );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  const double position_at_estop = hw_cmd_values_[0];
+
+  sendEstop( false );
+  for ( int i = 0; i < 50; ++i ) {
+    controller_->reference_interfaces_[0] = 1.0; // upstream keeps commanding it
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
+        << "the pre-E-stop target must stay abandoned (cycle " << i << ")";
+  }
+
+  // A changed reference is a new command and releases the hold.
+  for ( int i = 0; i < 20; ++i ) {
+    controller_->reference_interfaces_[0] = 1.1;
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewCommandOnCommandTopic )
+{
+  // Same contract in non-chained mode. The "~/commands" message stays in the realtime
+  // buffer and is re-read every cycle, so the hold cannot rely on clearing references.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_FALSE( controller_->is_in_chained_mode() );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 1.0, 0.0, 0.0 } );
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the command";
+
+  sendEstop( true );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  const double position_at_estop = hw_cmd_values_[0];
+
+  sendEstop( false );
+  for ( int i = 0; i < 50; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
+        << "the buffered command must stay abandoned (cycle " << i << ")";
+  }
+
+  sendCommand( { 1.1, 0.0, 0.0 } );
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
 }
 
 // ============================================================================
@@ -429,9 +513,7 @@ TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
   // Move toward the target for a while; the mock hardware follows the command exactly.
   for ( int i = 0; i < 10; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
-      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
-    }
+    followCommands();
   }
   const double cmd_when_invalidated = hw_cmd_values_[0];
   ASSERT_GT( cmd_when_invalidated, 0.0 ) << "should have started moving toward the target";
@@ -444,9 +526,7 @@ TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
 
   for ( int i = 0; i < 100; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
-      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
-    }
+    followCommands();
   }
 
   // joint1: v_max = 1.0 rad/s, a_dec = deceleration_scale(3) * 8 rad/s^2 = 24 rad/s^2.
@@ -476,9 +556,7 @@ TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
 
   for ( int i = 0; i < 10; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
-      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
-    }
+    followCommands();
   }
 
   deactivateController();
@@ -492,9 +570,7 @@ TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
 
   for ( int i = 0; i < 20; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    for ( size_t j = 0; j < controlled_joints_.size(); ++j ) {
-      setStateValue( controlled_joints_[j], hw_cmd_values_[j] );
-    }
+    followCommands();
     EXPECT_NEAR( hw_cmd_values_[0], position_at_activation, 1e-6 )
         << "reactivated controller must hold, not resume the pre-deactivation target "
            "(cycle "

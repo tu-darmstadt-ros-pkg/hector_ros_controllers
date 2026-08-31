@@ -97,7 +97,7 @@ TEST( SafetyPipeline, NaNReferenceHoldsPosition )
   EXPECT_FALSE( pipeline.wantsMotion() );
 }
 
-TEST( SafetyPipeline, InvalidateRebasesToMeasuredState )
+TEST( SafetyPipeline, InvalidateRebasesAndParksUntilNewReference )
 {
   Pipeline pipeline( makeConfig() );
   std::vector<double> measured{ 0.0, 0.0 };
@@ -107,10 +107,21 @@ TEST( SafetyPipeline, InvalidateRebasesToMeasuredState )
   // E-stop style: state invalidated, robot ends up somewhere else
   pipeline.invalidate();
   measured = { 1.0, -0.5 };
-  cycle( pipeline, { kNaN, kNaN }, measured );
+  cycle( pipeline, { 0.5, 0.0 }, measured );
   EXPECT_NEAR( measured[0], 1.0, 1e-9 );
   EXPECT_NEAR( measured[1], -0.5, 1e-9 );
   EXPECT_NEAR( pipeline.velocity().cwiseAbs().maxCoeff(), 0.0, 1e-9 );
+  EXPECT_TRUE( pipeline.parked() );
+
+  // The reference that was in effect at the invalidation is abandoned: the unchanged
+  // reference must not pull the arm back, no matter how long it keeps being commanded.
+  for ( int i = 0; i < 50; ++i ) { cycle( pipeline, { 0.5, 0.0 }, measured ); }
+  EXPECT_NEAR( measured[0], 1.0, 1e-9 );
+
+  // A changed reference is a new command and releases the park.
+  for ( int i = 0; i < 80; ++i ) { cycle( pipeline, { 0.6, 0.0 }, measured ); }
+  EXPECT_FALSE( pipeline.parked() );
+  EXPECT_NEAR( measured[0], 0.6, 1e-3 );
 }
 
 TEST( SafetyPipeline, DeviationBoxAroundLeashedReferenceDroppedDuringBypass )

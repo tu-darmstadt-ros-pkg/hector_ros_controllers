@@ -41,6 +41,13 @@ public:
     stalled_ = false;
   }
 
+  /// Abandon the current reference: hold until releasePark().
+  void park()
+  {
+    parked_ = true;
+    resetStall();
+  }
+
   /// A new reference releases the parked state (and clears the stall).
   void releasePark()
   {

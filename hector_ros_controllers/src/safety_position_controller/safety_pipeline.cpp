@@ -55,6 +55,11 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     monitor_.resetStall();
     state_valid_ = true;
   }
+  if ( park_pending_ ) {
+    monitor_.park();
+    parked_reference_ = reference_;
+    park_pending_ = false;
+  }
 
   // ---- Desired velocity toward the (leashed) reference ----
   wants_motion_ = false;

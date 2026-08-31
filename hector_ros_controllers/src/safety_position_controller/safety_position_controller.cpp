@@ -391,28 +391,23 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints", n );
       publish_status();
     } else {
-      // release E-stop
+      // release E-stop; the pipeline is parked, so the arm holds until a new reference
       estop_engaged_.store( false, std::memory_order_relaxed );
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming normal commands" );
+      estop_engaged = false;
+      RCLCPP_WARN( get_node()->get_logger(),
+                   "E-STOP released: holding until a new reference arrives" );
       publish_status();
-      // on release, invalidate old commands once
-      for ( auto &ref : reference_interfaces_ ) ref = std::numeric_limits<double>::quiet_NaN();
-      return controller_interface::return_type::OK;
     }
   }
 
   // If E-stop engaged → always hold recorded positions (no checks)
   if ( estop_engaged ) {
     if ( pipeline_ ) {
-      pipeline_->invalidate(); // rebase to the measured state on release
+      pipeline_->invalidate();
     }
     success &= write_position_commands( hold_positions_ );
     return success ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
   }
-
-  // Per-joint NaN references are propagated by enforce_limits() and turned into a zero
-  // velocity demand by the pipeline, so the arm brakes to a smooth stop instead of
-  // freezing or resuming a stale target.
 
   // resolve continuous joints & enforce limits
   enforce_limits();
@@ -475,10 +470,9 @@ void SafetyPositionController::enforce_limits()
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     const double target_wrapped = reference_interfaces_[i];
     if ( std::isnan( target_wrapped ) ) {
-      // A NaN reference means "no target". It MUST be propagated: keeping the previous
-      // processed reference would make the pipeline continue tracking a stale target
-      // (e.g. after a reactivation or an E-stop release, which both reset the reference
-      // interfaces to NaN). The pipeline turns NaN into a zero velocity demand, so the
+      // A NaN reference means "no target" and MUST be propagated: keeping the previous
+      // processed reference would keep tracking a target the upstream controller has
+      // stopped commanding. The pipeline turns NaN into a zero velocity demand, so the
       // joint brakes to a smooth stop and holds.
       processed_reference_[i] = std::numeric_limits<double>::quiet_NaN();
       continue;
