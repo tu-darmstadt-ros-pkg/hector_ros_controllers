@@ -89,8 +89,8 @@ struct SafetyQpResult {
  * constraints ("flow around"). If the QP is infeasible or the solver fails, the result
  * falls back to braking to zero at the deceleration limit.
  *
- * Not thread-safe; call solve() from a single (control) thread. All memory is allocated
- * in the constructor; solve() is allocation-free except inside the first proxqp setup.
+ * Not thread-safe; call solve() from a single (control) thread. The QP matrices are
+ * allocated in the constructor; solve() still allocates its result vectors.
  */
 class SafetyQpLimiter
 {

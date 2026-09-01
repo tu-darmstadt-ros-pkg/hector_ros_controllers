@@ -80,7 +80,7 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     }
 
     double diff = 0.0;
-    if ( !std::isnan( reference[i] ) ) {
+    if ( std::isfinite( reference[i] ) ) {
       // Keep the tracked target reachable. Widened to include the current command so a
       // joint resting outside its limits is held rather than asked to move further.
       const double target = std::clamp( reference[i], std::min( input_.q_lo[idx], cmd_[idx] ),

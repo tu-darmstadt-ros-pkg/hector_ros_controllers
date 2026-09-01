@@ -97,6 +97,24 @@ TEST( SafetyPipeline, NaNReferenceHoldsPosition )
   EXPECT_FALSE( pipeline.wantsMotion() );
 }
 
+TEST( SafetyPipeline, NonFiniteReferenceIsTreatedAsNoTarget )
+{
+  // A continuous joint has no position limits to clamp an infinity against, so it used
+  // to reach get_signed_distance() and turn the whole desired velocity into NaN, which
+  // the solver could only answer by failing over to braking.
+  auto cfg = makeConfig( 1 );
+  cfg.joints[0].type = spc::JointType::CONTINUOUS;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.5 };
+  for ( int i = 0; i < 20; ++i ) {
+    cycle( pipeline, { std::numeric_limits<double>::infinity() }, measured );
+    ASSERT_TRUE( pipeline.lastResult().solved ) << "the QP must never be fed a NaN demand";
+  }
+  EXPECT_NEAR( measured[0], 0.5, 1e-6 );
+  EXPECT_FALSE( pipeline.wantsMotion() );
+}
+
 TEST( SafetyPipeline, InvalidateRebasesAndParksUntilNewReference )
 {
   Pipeline pipeline( makeConfig() );
