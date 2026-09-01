@@ -423,6 +423,12 @@ bool SafetyPositionController::read_current_positions()
                             params_.joints[i].c_str() );
       return false;
     }
+    if ( !std::isfinite( opt.value() ) ) {
+      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                             throttle_logging_msg, "Joint state of '%s' is %f; holding position.",
+                             params_.joints[i].c_str(), opt.value() );
+      return false;
+    }
     current_positions_[i] = opt.value();
   }
   return true;
@@ -431,7 +437,7 @@ bool SafetyPositionController::read_current_positions()
 void SafetyPositionController::write_position_commands( const std::vector<double> &commands )
 {
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    if ( !std::isnan( commands[i] ) && !command_interfaces_[i].set_value( commands[i] ) ) {
+    if ( std::isfinite( commands[i] ) && !command_interfaces_[i].set_value( commands[i] ) ) {
       RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                             "Position command interface of '%s' is busy; command not written.",
                             params_.joints[i].c_str() );

@@ -782,6 +782,46 @@ TEST_F( SafetyPositionControllerTest, BusyStateHandleSkipsTheCycleWithoutFailing
   EXPECT_GT( hw_cmd_values_[0], cmd_before ) << "tracking resumes once the handle is free";
 }
 
+TEST_F( SafetyPositionControllerTest, NonFiniteJointStateHoldsPositionAndIsNeverCommanded )
+{
+  // A broken encoder must never become a command. The pipeline seeds its integration
+  // state from the measured position and the tracking leash pulls the command toward it,
+  // while only NaN was filtered on the way out - so an infinity reached the hardware.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  for ( const double bad :
+        { std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+          std::numeric_limits<double>::quiet_NaN() } ) {
+    setStateValue( "joint1", bad );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    ASSERT_TRUE( std::isfinite( hw_cmd_values_[0] ) )
+        << "non-finite feedback must never be commanded";
+    ASSERT_DOUBLE_EQ( hw_cmd_values_[0], cmd_before )
+        << "the cycle is skipped: no motion without valid feedback";
+  }
+
+  setStateValue( "joint1", cmd_before );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_GT( hw_cmd_values_[0], cmd_before ) << "tracking resumes once feedback is valid again";
+}
+
 TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
 {
   initController();

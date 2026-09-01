@@ -133,12 +133,13 @@ public:
 private:
   /**
    * @brief Read current joint positions for configured joints.
-   * @return false if a state handle was locked by another thread (skip the cycle)
+   * @return false if a state handle was locked by another thread or reported a
+   * non-finite position (skip the cycle and hold)
    */
   bool read_current_positions();
 
   /**
-   * @brief Write per-joint position commands (NaN entries are skipped).
+   * @brief Write per-joint position commands (non-finite entries are skipped).
    * A handle locked by another thread is logged and left unwritten: the hardware then
    * keeps the previous command.
    * @param commands commanded positions (size == params_.joints.size())
