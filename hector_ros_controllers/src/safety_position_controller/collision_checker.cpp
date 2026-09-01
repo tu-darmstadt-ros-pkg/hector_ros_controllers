@@ -259,28 +259,28 @@ std::vector<std::string> CollisionChecker::getJointNames() const
   return out;
 }
 
-CollisionResult
+const CollisionResult &CollisionChecker::unsafeResult()
+{
+  last_collision_result_ = CollisionResult{};
+  last_collision_result_.in_collision = true;
+  last_collision_result_.min_distance = 0.0;
+  return last_collision_result_;
+}
+
+const CollisionResult &
 CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
 {
-
   if ( model_.nq == 0 ) {
     RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
-    CollisionResult r;
-    r.in_collision = true;
-    r.min_distance = 0.0;
-    return r;
+    return unsafeResult();
   }
-  // return collision if any position is Nan or Inf
   for ( const auto &[name, position] : joint_positions ) {
-    if ( std::isnan( position ) || std::isinf( position ) ) {
-      RCLCPP_ERROR(
-          node_->get_logger(),
-          "Joint position for joint '%s' is NaN or Inf (%.3f). Assuming the robot is in collision.",
-          name.c_str(), position );
-      CollisionResult r;
-      r.in_collision = true;
-      r.min_distance = 0.0;
-      return r;
+    if ( !std::isfinite( position ) ) {
+      RCLCPP_ERROR( node_->get_logger(),
+                    "Joint position for joint '%s' is not finite (%.3f). Assuming the robot is "
+                    "in collision.",
+                    name.c_str(), position );
+      return unsafeResult();
     }
   }
   return checkCollisionQ( buildConfiguration( joint_positions ) );
@@ -320,7 +320,7 @@ CollisionChecker::buildConfiguration( const std::unordered_map<std::string, doub
   }
   return q;
 }
-CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
+const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
   const double safety_zone_threshold = safety_zone_threshold_;
 #ifdef SAFETY_CC_ENABLE_TIMING
@@ -330,10 +330,7 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 
   if ( q.size() != model_.nq ) {
     RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
-    CollisionResult r;
-    r.in_collision = true;
-    r.min_distance = 0.0;
-    return r;
+    return unsafeResult();
   }
 
   // check if robot moved since the last check
@@ -569,12 +566,12 @@ CollisionResult CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
       static_cast<double>( timing_stats_.num_safety_zone_pairs ) / timing_stats_.count );
 #endif
 
-  last_collision_result_ = result;
+  last_collision_result_ = std::move( result );
   if ( pub_debug_geometry_ )
     publishMarkers();
   else if ( pub_collision_distances_ )
     publishMinimalMarkers();
-  return result;
+  return last_collision_result_;
 }
 
 void CollisionChecker::updateDoDebugVisualization( const bool pub_debug_geometry )

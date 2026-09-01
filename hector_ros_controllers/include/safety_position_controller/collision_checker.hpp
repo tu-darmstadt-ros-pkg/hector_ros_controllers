@@ -80,17 +80,20 @@ public:
    * @brief Collision check from name→position map.
    * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
    * @param joint_positions rad (rev) / m (prismatic)
-   * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
+   * @return the latched result (collision flag, minimum clearance, optional per-pair
+   * gradients); valid until the next collision query
    */
-  CollisionResult checkCollision( const std::unordered_map<std::string, double> &joint_positions );
+  const CollisionResult &
+  checkCollision( const std::unordered_map<std::string, double> &joint_positions );
 
   /**
    * @brief Collision check for full q.
    * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
    * @param q size == model_.nq
-   * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
+   * @return the latched result (collision flag, minimum clearance, optional per-pair
+   * gradients); valid until the next collision query
    */
-  CollisionResult checkCollisionQ( const Eigen::VectorXd &q );
+  const CollisionResult &checkCollisionQ( const Eigen::VectorXd &q );
 
   /**
    * @brief Cap the number of safety-zone pairs returned (and gradient computations).
@@ -216,6 +219,9 @@ public:
   double computeManipulability( const std::string &ee_frame_name );
 
 private:
+  /// Latch a "assume in collision" result for unusable input and return it.
+  const CollisionResult &unsafeResult();
+
   /**
    * @brief Compute the distance gradient for a single collision pair.
    * Requires FK + computeJointJacobians to have been called already.

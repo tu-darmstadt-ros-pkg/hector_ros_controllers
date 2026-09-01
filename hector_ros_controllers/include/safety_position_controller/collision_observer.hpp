@@ -66,10 +66,9 @@ public:
 
   double lastMinDistance() const { return last_min_distance_; }
   std::size_t lastMinDistancePairIndex() const { return last_min_distance_pair_index_; }
-  const std::vector<CollisionResult::PairInfo> &lastSafetyZonePairs() const
-  {
-    return last_safety_zone_pairs_;
-  }
+  /// Safety-zone pairs of the last observation, empty when there were none. Points into
+  /// the checker's latched result and stays valid until the next observe().
+  const std::vector<CollisionResult::PairInfo> &lastSafetyZonePairs() const;
 
 private:
   CollisionChecker *checker_; ///< non-owning
@@ -79,7 +78,7 @@ private:
 
   std::unordered_map<std::string, double> cc_positions_; ///< name→position map for the check
   std::vector<SafetyPipeline::PairCandidate> pair_candidates_;
-  std::vector<CollisionResult::PairInfo> last_safety_zone_pairs_;
+  const std::vector<CollisionResult::PairInfo> *last_safety_zone_pairs_{ nullptr };
   double last_min_distance_{ std::numeric_limits<double>::max() };
   std::size_t last_min_distance_pair_index_{ std::numeric_limits<std::size_t>::max() };
   bool was_in_collision_{ false };

@@ -13,11 +13,17 @@ CollisionObserver::CollisionObserver( CollisionChecker *checker,
 {
 }
 
+const std::vector<CollisionResult::PairInfo> &CollisionObserver::lastSafetyZonePairs() const
+{
+  static const std::vector<CollisionResult::PairInfo> kNone;
+  return last_safety_zone_pairs_ ? *last_safety_zone_pairs_ : kNone;
+}
+
 void CollisionObserver::reset()
 {
   last_min_distance_ = std::numeric_limits<double>::max();
   last_min_distance_pair_index_ = std::numeric_limits<std::size_t>::max();
-  last_safety_zone_pairs_.clear();
+  last_safety_zone_pairs_ = nullptr;
   pair_candidates_.clear();
   was_in_collision_ = false;
   observed_ = false;
@@ -37,7 +43,7 @@ CollisionObserver::observe( const bool checks_active,
   if ( !snapshot.observation.checks_active ) {
     was_in_collision_ = false;
     last_min_distance_ = std::numeric_limits<double>::max();
-    last_safety_zone_pairs_.clear();
+    last_safety_zone_pairs_ = nullptr;
     return snapshot;
   }
 
@@ -63,10 +69,10 @@ CollisionObserver::observe( const bool checks_active,
   observed_ = true;
   // Always request gradients for the full zone: they ARE the constraints.
   checker_->setSafetyZoneThreshold( safety_zone_threshold );
-  const auto cc_result = checker_->checkCollision( cc_positions_ );
+  const auto &cc_result = checker_->checkCollision( cc_positions_ );
   last_min_distance_ = cc_result.min_distance;
   last_min_distance_pair_index_ = cc_result.min_distance_pair_index;
-  last_safety_zone_pairs_ = cc_result.safety_zone_pairs;
+  last_safety_zone_pairs_ = &cc_result.safety_zone_pairs;
   snapshot.observation.in_collision = cc_result.in_collision;
 
   if ( cc_result.in_collision ) {
@@ -76,8 +82,8 @@ CollisionObserver::observe( const bool checks_active,
     was_in_collision_ = false;
   }
 
-  pair_candidates_.reserve( last_safety_zone_pairs_.size() );
-  for ( const auto &pair_info : last_safety_zone_pairs_ ) {
+  pair_candidates_.reserve( cc_result.safety_zone_pairs.size() );
+  for ( const auto &pair_info : cc_result.safety_zone_pairs ) {
     pair_candidates_.push_back( { pair_info.distance, &pair_info.gradient, pair_info.pair_index } );
   }
   snapshot.observation.pairs = &pair_candidates_;
@@ -92,7 +98,7 @@ void CollisionObserver::publishDirectionalInfo( const Eigen::VectorXd &velocity,
   }
   const std::size_t num_pairs = checker_->getNumCollisionPairs();
   std::vector<double> per_pair_dir( num_pairs, std::numeric_limits<double>::quiet_NaN() );
-  for ( const auto &pi : last_safety_zone_pairs_ ) {
+  for ( const auto &pi : lastSafetyZonePairs() ) {
     if ( pi.pair_index < num_pairs ) {
       double dot = 0.0;
       for ( size_t i = 0; i < joint_v_index_.size(); ++i ) {
