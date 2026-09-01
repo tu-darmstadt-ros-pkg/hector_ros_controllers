@@ -175,9 +175,10 @@ private:
   /**
    * @brief Safety pipeline cycle: prepare (desired velocity, boxes, park), collision
    * observation at the commanded configuration, step (solve, integrate, stall/park),
-   * write. Translates pipeline/observer events into logs/status.
+   * write. Translates pipeline/observer events into logs.
+   * @return true if an event occurred that the caller should publish a status for
    */
-  void run_safety_pipeline();
+  bool run_safety_pipeline();
 
   // ---- Configuration / mode ----
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits

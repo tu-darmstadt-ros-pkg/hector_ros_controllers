@@ -369,6 +369,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
   const bool estop_active = estop_active_.load( std::memory_order_relaxed );
   bool estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
 
+  bool status_event = false;
   if ( estop_active != estop_engaged ) {
     if ( estop_active ) {
       // engage E-stop: record hold positions
@@ -376,38 +377,40 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       estop_engaged_.store( true, std::memory_order_relaxed );
       estop_engaged = true;
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints", n );
-      publish_status();
     } else {
       // release E-stop; the pipeline is parked, so the arm holds until a new reference
       estop_engaged_.store( false, std::memory_order_relaxed );
       estop_engaged = false;
       RCLCPP_WARN( get_node()->get_logger(),
                    "E-STOP released: holding until a new reference arrives" );
-      publish_status();
     }
+    status_event = true;
   }
 
-  // If E-stop engaged → always hold recorded positions (no checks)
   if ( estop_engaged ) {
-    if ( pipeline_ ) {
-      pipeline_->invalidate();
-    }
+    // hold the recorded positions (no checks)
+    pipeline_->invalidate();
     write_position_commands( hold_positions_ );
-    return controller_interface::return_type::OK;
+  } else {
+    status_event |= run_safety_pipeline();
+    if ( params_.set_current_limits ) {
+      write_current_limits();
+    }
+    // Manipulability at the last checked configuration (FK already done)
+    if ( collision_checker_ && !params_.manipulability_ee_frame.empty() ) {
+      last_manipulability_ =
+          collision_checker_->computeManipulability( params_.manipulability_ee_frame );
+    }
   }
 
-  run_safety_pipeline();
-  if ( params_.set_current_limits ) {
-    write_current_limits();
-  }
-  // Manipulability at the last checked configuration (FK already done)
-  if ( collision_checker_ && !params_.manipulability_ee_frame.empty() ) {
-    last_manipulability_ =
-        collision_checker_->computeManipulability( params_.manipulability_ee_frame );
-  }
+  // Events are published only once the snapshot has caught up with this cycle, otherwise
+  // the message still reports the previous cycle's stall/park state.
   diagnostics_->updateSnapshot( pipeline_.get(), collision_observer_->lastMinDistance(),
                                 collision_observer_->lastSafetyZonePairs().size(),
                                 last_manipulability_ );
+  if ( status_event ) {
+    publish_status();
+  }
   return controller_interface::return_type::OK;
 }
 
@@ -522,16 +525,17 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   return true;
 }
 
-void SafetyPositionController::run_safety_pipeline()
+bool SafetyPositionController::run_safety_pipeline()
 {
   const size_t n = params_.joints.size();
   const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
   const bool collision_checks_active =
       !bypass_active && params_.check_self_collisions && collision_checker_ != nullptr;
 
+  bool status_event = false;
   if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active ) ) {
     RCLCPP_INFO( get_node()->get_logger(), "New reference received — resuming from parked state." );
-    publish_status();
+    status_event = true;
   }
 
   // ---- Collision observation at the commanded configuration ----
@@ -561,7 +565,7 @@ void SafetyPositionController::run_safety_pipeline()
                  "(min_dist=%.4f m).%s Upstream should replan.",
                  pipeline_->stallTime(), collision_observer_->lastMinDistance(),
                  blocked_str.c_str() );
-    publish_status();
+    status_event = true;
   }
   if ( events.stall.parked ) {
     RCLCPP_WARN( get_node()->get_logger(),
@@ -569,11 +573,11 @@ void SafetyPositionController::run_safety_pipeline()
                  "limb will hold position (even if the blockage clears) until a new command "
                  "arrives.",
                  pipeline_->stallTime() );
-    publish_status();
+    status_event = true;
   }
   if ( events.stall.resumed ) {
     RCLCPP_INFO( get_node()->get_logger(), "Motion resumed after stall." );
-    publish_status();
+    status_event = true;
   }
 
   // ---- Write ----
@@ -588,6 +592,7 @@ void SafetyPositionController::run_safety_pipeline()
   }
 
   diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );
+  return status_event;
 }
 
 void SafetyPositionController::write_current_limits()

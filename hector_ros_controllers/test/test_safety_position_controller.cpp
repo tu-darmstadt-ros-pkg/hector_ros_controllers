@@ -675,6 +675,47 @@ TEST_F( SafetyPositionControllerTest, RepeatedActivateDeactivateCycles )
   }
 }
 
+TEST_F( SafetyPositionControllerTest, EventStatusReportsTheCurrentCycle )
+{
+  // The status timer never fires in these tests, which is exactly the documented
+  // status_publish_rate=0 mode: what an event publishes is all a consumer ever sees.
+  // An E-stop release parks the pipeline within the same cycle, so the message the
+  // release publishes must already report that.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+
+  SafetyPositionControllerStatus captured;
+  int publishes = 0;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).WillRepeatedly( [&]( const auto &msg ) {
+    captured = msg;
+    ++publishes;
+  } );
+
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+
+  sendEstop( true );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( captured.estop_engaged );
+
+  sendEstop( false );
+  const int publishes_before_release = publishes;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  ASSERT_GT( publishes, publishes_before_release ) << "the release must publish a status";
+  EXPECT_FALSE( captured.estop_engaged );
+  EXPECT_TRUE( captured.parked ) << "the release parks the pipeline in this very cycle";
+}
+
 TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
 {
   initController();
@@ -1682,6 +1723,36 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeParksAfterStallAndResumesOn
     for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
   }
   EXPECT_NEAR( hw_cmd_values_[1], 0.3, 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, ParkEventPublishesTheParkedState )
+{
+  // The park event is the only status publication in status_publish_rate=0 mode, so it
+  // has to carry this cycle's state and not the snapshot from before the pipeline ran.
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "stall_park_timeout", 2.0 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+
+  SafetyPositionControllerStatus captured;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
+      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
+
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = M_PI; // folds into a self-collision
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int cycle = 0; cycle < 600 && !controller_->pipeline_->parked(); ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+  ASSERT_TRUE( controller_->pipeline_->parked() ) << "did not park within 600 cycles";
+  EXPECT_TRUE( captured.stalled );
+  EXPECT_TRUE( captured.parked ) << "the park event must publish parked=true";
 }
 
 TEST_F( SafetyPositionControllerCollisionTest, QpModeJointDeviationBoxWiring )
