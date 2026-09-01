@@ -211,12 +211,18 @@ public:
   bool isBroadphaseEnabled() const;
 
   /**
-   * @brief Compute the Yoshikawa manipulability index for a given end-effector frame.
-   * Evaluated at the configuration of the last collision check (q_last_).
-   * @param ee_frame_name name of the end-effector frame in the URDF
-   * @return w = sqrt(det(J * J^T)), 0 if singular or frame not found
+   * @brief Select the end-effector frame for computeManipulability().
+   * Resolves the frame once so the per-cycle call needs no name lookup.
+   * @param ee_frame_name frame in the URDF; empty disables manipulability
+   * @return false if the frame is not in the model
    */
-  double computeManipulability( const std::string &ee_frame_name );
+  bool setManipulabilityFrame( const std::string &ee_frame_name );
+
+  /**
+   * @brief Yoshikawa manipulability at the configuration of the last collision check.
+   * @return w = sqrt(det(J * J^T)); 0 if singular or no frame was selected
+   */
+  double computeManipulability();
 
 private:
   /// Latch a "assume in collision" result for unusable input and return it.
@@ -283,6 +289,10 @@ private:
   // Pre-allocated Jacobian workspace (sized in initFromXml)
   Eigen::MatrixXd J1_workspace_; ///< 6 × nv
   Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+
+  static constexpr pinocchio::FrameIndex kNoFrame = std::numeric_limits<pinocchio::FrameIndex>::max();
+  pinocchio::FrameIndex manipulability_frame_{ kNoFrame };
+  Eigen::MatrixXd manipulability_jacobian_; ///< 6 × nv workspace
 
   // Broadphase acceleration
   bool use_broadphase_{ true };

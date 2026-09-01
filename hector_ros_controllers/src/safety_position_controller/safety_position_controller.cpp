@@ -229,6 +229,22 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
     collision_checker_->updateDoDebugVisualization( params_.debug_visualize_collisions );
     collision_checker_->updatePublishCollisionDistances( params_.publish_collision_distances );
+    if ( !collision_checker_->setManipulabilityFrame( params_.manipulability_ee_frame ) ) {
+      RCLCPP_WARN( get_node()->get_logger(),
+                   "manipulability_ee_frame '%s' is not in the model; manipulability disabled.",
+                   params_.manipulability_ee_frame.c_str() );
+    }
+  }
+
+  // Resolve the per-joint current limits once; the update loop must not do map lookups.
+  if ( params_.set_current_limits ) {
+    stiff_current_limits_.resize( params_.joints.size() );
+    compliant_current_limits_.resize( params_.joints.size() );
+    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
+      const auto &limits = params_.current_limits.joints_map.at( params_.joints[i] );
+      stiff_current_limits_[i] = limits.stiff_limit;
+      compliant_current_limits_[i] = limits.compliant_limit;
+    }
   }
 
   RCLCPP_INFO( get_node()->get_logger(),
@@ -397,9 +413,8 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
       write_current_limits();
     }
     // Manipulability at the last checked configuration (FK already done)
-    if ( collision_checker_ && !params_.manipulability_ee_frame.empty() ) {
-      last_manipulability_ =
-          collision_checker_->computeManipulability( params_.manipulability_ee_frame );
+    if ( collision_checker_ ) {
+      last_manipulability_ = collision_checker_->computeManipulability();
     }
   }
 
@@ -600,11 +615,11 @@ void SafetyPositionController::write_current_limits()
   if ( command_interfaces_.size() <= params_.joints.size() ) {
     return;
   }
+  const auto &limits = in_compliant_mode_.load( std::memory_order_relaxed )
+                           ? compliant_current_limits_
+                           : stiff_current_limits_;
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    const auto &limit = in_compliant_mode_
-                            ? params_.current_limits.joints_map[params_.joints[i]].compliant_limit
-                            : params_.current_limits.joints_map[params_.joints[i]].stiff_limit;
-    if ( !command_interfaces_[i + params_.joints.size()].set_value( limit ) ) {
+    if ( !command_interfaces_[i + params_.joints.size()].set_value( limits[i] ) ) {
       RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                             "Current limit interface of '%s' is busy; limit not written.",
                             params_.joints[i].c_str() );

@@ -1191,6 +1191,23 @@ TEST_F( CollisionCheckerTest, PenetrationGradientPointsOutward )
 extern "C" void __gcov_dump() __attribute__( ( weak ) );
 #endif
 
+// ---- Manipulability ----
+
+TEST_F( CollisionCheckerTest, ManipulabilityFrameIsResolvedUpFront )
+{
+  auto checker = makeChecker( 0.0 );
+  EXPECT_TRUE( checker->setManipulabilityFrame( "" ) ) << "empty disables it without failing";
+  EXPECT_FALSE( checker->setManipulabilityFrame( "not_a_frame" ) );
+  EXPECT_TRUE( checker->setManipulabilityFrame( "link4" ) );
+  EXPECT_DOUBLE_EQ( checker->computeManipulability(), 0.0 ) << "no collision check has run yet";
+
+  // Yoshikawa's sqrt(det(J J^T)) is structurally zero while the model has fewer than six
+  // DoF, so this four-joint URDF can only pin the frame handling, not a non-zero index.
+  const std::unordered_map<std::string, double> positions{ { "joint1", 0.3 }, { "joint2", 0.4 } };
+  checker->checkCollision( positions );
+  EXPECT_DOUBLE_EQ( checker->computeManipulability(), 0.0 );
+}
+
 // ---- Marker coloring: directional info must never be indexed out of range ----
 
 TEST( CollisionCheckerPairDirection, ReturnsNaNUnlessTheInfoMatchesThePairSet )

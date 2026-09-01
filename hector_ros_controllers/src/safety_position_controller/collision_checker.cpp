@@ -1107,28 +1107,36 @@ void CollisionChecker::publishMarkers() const
   markers_pub_->publish( arr );
 }
 
-double CollisionChecker::computeManipulability( const std::string &ee_frame_name )
+bool CollisionChecker::setManipulabilityFrame( const std::string &ee_frame_name )
 {
+  manipulability_frame_ = kNoFrame;
+  if ( ee_frame_name.empty() ) {
+    return true;
+  }
   if ( !model_.existFrame( ee_frame_name ) ) {
-    return 0.0;
+    return false;
   }
-  if ( q_last_.size() != model_.nq ) {
-    return 0.0; // no collision check yet, cannot evaluate manipulability
+  manipulability_frame_ = model_.getFrameId( ee_frame_name );
+  manipulability_jacobian_.setZero( 6, model_.nv );
+  return true;
+}
+
+double CollisionChecker::computeManipulability()
+{
+  if ( manipulability_frame_ == kNoFrame || q_last_.size() != model_.nq ) {
+    return 0.0; // disabled, or no collision check has run yet
   }
-  const auto frame_id = model_.getFrameId( ee_frame_name );
 
   // computeFrameJacobian internally refreshes the kinematics it needs, so the result
   // is correct independent of which pinocchio passes ran during the previous collision
   // check (computeJointJacobians is only called when safety-zone pairs exist).
-  Eigen::MatrixXd J = Eigen::MatrixXd::Zero( 6, model_.nv );
-  pinocchio::computeFrameJacobian( model_, data_, q_last_, frame_id, pinocchio::LOCAL_WORLD_ALIGNED,
-                                   J );
+  manipulability_jacobian_.setZero();
+  pinocchio::computeFrameJacobian( model_, data_, q_last_, manipulability_frame_,
+                                   pinocchio::LOCAL_WORLD_ALIGNED, manipulability_jacobian_ );
 
-  // Yoshikawa manipulability: w = sqrt(det(J * J^T))
-  const Eigen::MatrixXd JJt = J * J.transpose(); // 6x6
-  const double det = JJt.determinant();
-  if ( det <= 0.0 ) {
-    return 0.0;
-  }
-  return std::sqrt( det );
+  // Yoshikawa manipulability: w = sqrt(det(J * J^T)); the 6x6 stays on the stack
+  const Eigen::Matrix<double, 6, 6> jjt =
+      manipulability_jacobian_ * manipulability_jacobian_.transpose();
+  const double det = jjt.determinant();
+  return det > 0.0 ? std::sqrt( det ) : 0.0;
 }

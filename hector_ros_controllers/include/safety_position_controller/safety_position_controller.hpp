@@ -211,6 +211,10 @@ private:
   std::atomic<bool> srdf_received_{ false }; ///< latched SRDF received
   double last_manipulability_{ 0.0 };        ///< latest Yoshikawa manipulability index
 
+  // ---- Current limits, resolved from parameters at activation ----
+  std::vector<double> stiff_current_limits_;
+  std::vector<double> compliant_current_limits_;
+
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> current_positions_; ///< latest measured positions
   std::vector<double> hold_positions_;    ///< positions to hold during E-stop
