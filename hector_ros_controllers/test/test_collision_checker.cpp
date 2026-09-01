@@ -1191,6 +1191,29 @@ TEST_F( CollisionCheckerTest, PenetrationGradientPointsOutward )
 extern "C" void __gcov_dump() __attribute__( ( weak ) );
 #endif
 
+// ---- Marker coloring: directional info must never be indexed out of range ----
+
+TEST( CollisionCheckerPairDirection, ReturnsNaNUnlessTheInfoMatchesThePairSet )
+{
+  // publishMinimalMarkers()/publishMarkers() run inside checkCollision(), which happens
+  // before the controller has ever pushed directional info, so the vector is empty there.
+  EXPECT_TRUE( std::isnan( CollisionChecker::pairDirection( std::vector<double>{}, 3, 0 ) ) );
+  EXPECT_TRUE( std::isnan( CollisionChecker::pairDirection( { 1.0 }, 3, 0 ) ) );
+  EXPECT_TRUE( std::isnan( CollisionChecker::pairDirection( { 1.0, 2.0, 3.0 }, 3, 3 ) ) );
+  EXPECT_DOUBLE_EQ( CollisionChecker::pairDirection( { 1.0, 2.0, 3.0 }, 3, 1 ), 2.0 );
+}
+
+TEST_F( CollisionCheckerTest, MinimalMarkersBeforeAnyDirectionalInfo )
+{
+  // Exercises that path end to end; the out-of-bounds read it used to do is only caught
+  // by a build with -D_GLIBCXX_ASSERTIONS or a sanitizer.
+  auto checker = makeChecker( 0.0 );
+  checker->updatePublishCollisionDistances( true );
+  checker->setSafetyZoneThreshold( 1.0 );
+  const auto result = checker->checkCollision( {} );
+  EXPECT_FALSE( result.safety_zone_pairs.empty() ) << "need a zone pair to reach the color branch";
+}
+
 int main( int argc, char **argv )
 {
   testing::InitGoogleTest( &argc, argv );

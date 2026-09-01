@@ -655,10 +655,6 @@ void CollisionChecker::publishMinimalMarkers()
     return;
   }
 
-  // Check if directional info is available
-  const bool have_dir_info = !viz_directional_derivatives_.empty() &&
-                             viz_directional_derivatives_.size() == geom_model_.collisionPairs.size();
-
   // Build LINE_LIST markers for safety zone and collision pairs
   auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
     visualization_msgs::msg::Marker m;
@@ -739,11 +735,12 @@ void CollisionChecker::publishMinimalMarkers()
       push_collision_line( pA, pB, pair.distance );
     } else {
       std_msgs::msg::ColorRGBA color;
-      const double dir = viz_directional_derivatives_[pair.pair_index];
+      const double dir = pairDirection( viz_directional_derivatives_,
+                                        geom_model_.collisionPairs.size(), pair.pair_index );
       // Neutral band: |g^T v| below this is tangential motion / standstill — without it
       // numerical noise around zero makes the color flicker red/green.
       constexpr double kDirNeutralBand = 1e-3; // [m/s]
-      if ( have_dir_info && !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
+      if ( !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
         if ( dir > 0.0 ) {
           color.r = 0.0f;
           color.g = 1.0f;
@@ -989,10 +986,6 @@ void CollisionChecker::publishMarkers() const
     return { pA, pB };
   };
 
-  // Check if directional info is available for a given pair
-  const bool have_dir_info = !viz_directional_derivatives_.empty() &&
-                             viz_directional_derivatives_.size() == geom_model_.collisionPairs.size();
-
   // 2) Distance lines — separated into namespaces by category
   // Initialize LINE_LIST markers for each category
   auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
@@ -1068,9 +1061,10 @@ void CollisionChecker::publishMarkers() const
       // Safety zone pair — color by directional derivative. Neutral band avoids
       // red/green flicker from numerical noise around zero (standstill/tangential).
       std_msgs::msg::ColorRGBA color;
-      const double dir = viz_directional_derivatives_[k];
+      const double dir =
+          pairDirection( viz_directional_derivatives_, geom_model_.collisionPairs.size(), k );
       constexpr double kDirNeutralBand = 1e-3; // [m/s]
-      if ( have_dir_info && !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
+      if ( !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
         if ( dir > 0.0 ) {
           // Moving away: green
           color.r = 0.0f;

@@ -166,6 +166,21 @@ public:
   void updateCollisionCacheEpsilon( double epsilon );
 
   /**
+   * @brief Directional derivative of one pair for marker coloring.
+   * @param derivatives per-pair values as set by setDirectionalInfo()
+   * @param num_pairs number of collision pairs the values must describe
+   * @param pair_index pair to look up
+   * @return the derivative, or NaN if @p derivatives does not describe the current pairs
+   */
+  static double pairDirection( const std::vector<double> &derivatives, std::size_t num_pairs,
+                               std::size_t pair_index )
+  {
+    return derivatives.size() == num_pairs && pair_index < derivatives.size()
+               ? derivatives[pair_index]
+               : std::numeric_limits<double>::quiet_NaN();
+  }
+
+  /**
    * @brief Set per-pair directional derivatives for visualization coloring.
    * Must be called before the next collision check if you want colors to reflect motion direction.
    * @param derivatives one value per collision pair; NaN = no info, >=0 = moving away, <0 = moving closer
