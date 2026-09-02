@@ -142,10 +142,13 @@ safety_position_controller:
     type: double
     default_value: 0.3
     description: >
-      Bounds how far the reference may run ahead of the commanded position:
-      per cycle the tracked target is clamped to within velocity_limit *
-      reference_leash_time of the current command. This bounds the catch-up motion after
-      a blockage resolves regardless of upstream behavior. 0 disables.
+      Per cycle the tracked target is clamped to within velocity_limit *
+      reference_leash_time of the current command. This does NOT bound the catch-up
+      SPEED: the desired velocity already saturates at the joint's velocity limit, and at
+      the default the braking term is far above it, so the clamp never lowers the
+      commanded speed. What it does is keep the leashed reference near the command, which
+      is what 'joint_deviation_limits' boxes are centred on. Set it to 0 only if those
+      boxes are 0 as well.
     validation:
       bounds<>: [0.0, 60.0]
 
@@ -284,12 +287,29 @@ safety_position_controller:
     __map_joints:
       compliant_limit:
         type: double
-        description: Current limits for each joint in the group in Ampere. 'set_current_limits' must be true.
+        description: >
+          Current limit in Ampere written to the joint while compliant mode is on.
+          'set_current_limits' must be true. Must be positive and must not exceed
+          'stiff_limit': compliant mode is the one that should yield. Activation is
+          refused otherwise, because these values go to the motors unchanged.
         default_value: 3.0
+        validation:
+          gt<>: [0.0]
+          lt<>: [30.0]
       stiff_limit:
         type: double
         default_value: 5.0
-        description: Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off.
+        description: >
+          Current limit in Ampere written to the joint while compliant mode is off. Set
+          it from the actuator's rating and never above it: a Dynamixel takes this in a
+          two-byte signed register of 0.001 A, so anything from 32.768 A up does not fit,
+          and the driver then keeps the last value that did - which before the first
+          write is zero, i.e. no torque at all. The upper bound here is the register's,
+          not any actuator's; the motor also rejects, silently over a sync write, a goal
+          above its own current limit.
+        validation:
+          gt<>: [0.0]
+          lt<>: [30.0]
 
   manipulability_ee_frame:
     type: string

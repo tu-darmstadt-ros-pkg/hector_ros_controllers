@@ -323,6 +323,71 @@ TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
   EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
 }
 
+TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
+{
+  // These go straight to the motors as an ampere ceiling. A compliant limit above the
+  // stiff one means the mode meant to make the arm yield pushes harder than the one
+  // meant to hold it, which is backwards exactly when a person is likely to be near it.
+  initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true, "test_robot.urdf",
+                  { rclcpp::Parameter( "current_limits.joint1.compliant_limit", 9.0 ),
+                    rclcpp::Parameter( "current_limits.joint1.stiff_limit", 3.0 ) } );
+  configureController();
+
+  auto cj = controlled_joints_;
+  hw_state_values_.assign( controller_->all_joint_names_.size(), 0.0 );
+  hw_cmd_values_.assign( cj.size() * 2, 0.0 );
+  cmd_ifaces_.clear();
+  state_ifaces_.clear();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "position", &hw_cmd_values_[i] ) );
+  }
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "current", &hw_cmd_values_[cj.size() + i] ) );
+  }
+  for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
+    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+        controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+  }
+#pragma GCC diagnostic pop
+  controller_->command_interfaces_.clear();
+  controller_->state_interfaces_.clear();
+  for ( auto &ci : cmd_ifaces_ ) {
+    controller_->command_interfaces_.emplace_back( ci, []() { } );
+  }
+  for ( auto &si : state_ifaces_ ) { controller_->state_interfaces_.emplace_back( si ); }
+
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR )
+      << "a compliant limit above the stiff one must not reach the motors";
+
+  // A limit of zero is no torque at all, and the parameter bound is exclusive, so the
+  // two agree rather than one advertising a value the other refuses.
+  controller_->params_.current_limits.joints_map.at( "joint1" ).compliant_limit = 0.0;
+  controller_->params_.current_limits.joints_map.at( "joint1" ).stiff_limit = 5.0;
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR )
+      << "a zero current ceiling would leave the joint limp";
+
+  controller_->params_.current_limits.joints_map.at( "joint1" ).compliant_limit =
+      std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR )
+      << "the parameter bound compares with < and > and so lets NaN through";
+
+  controller_->params_.current_limits.joints_map.at( "joint1" ).compliant_limit = 3.0;
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::SUCCESS )
+      << "a usable pair activates";
+  EXPECT_FALSE( controller_->in_compliant_mode_.load() )
+      << "compliant mode must not be inherited across an activation";
+}
+
 TEST_F( SafetyPositionControllerTest, BypassDoesNotSurviveALifecycleTransition )
 {
   // The bypass drops collision checking and widens the joint limits. It is a deliberate,

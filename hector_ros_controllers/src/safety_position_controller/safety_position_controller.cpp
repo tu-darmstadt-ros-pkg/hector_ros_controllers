@@ -219,6 +219,10 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   // Nobody is supervising a controller that is only now starting, so it starts guarded
   // whatever was in effect before. First, so no failing check below can skip it.
   clear_bypass();
+  // Compliant mode is granted the same way and must not be inherited either: a
+  // controller that comes back compliant holds with the lower current ceiling, which is
+  // how an arm sags or drops what it was carrying.
+  in_compliant_mode_.store( false, std::memory_order_relaxed );
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
@@ -260,6 +264,18 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     compliant_current_limits_.resize( params_.joints.size() );
     for ( size_t i = 0; i < params_.joints.size(); ++i ) {
       const auto &limits = params_.current_limits.joints_map.at( params_.joints[i] );
+      // These are written to the motors as an ampere ceiling, so a value that cannot be
+      // meant must not reach them. Compliant is the mode that should yield, so it may
+      // never be allowed to pull harder than the stiff one.
+      if ( !std::isfinite( limits.stiff_limit ) || !std::isfinite( limits.compliant_limit ) ||
+           limits.stiff_limit <= 0.0 || limits.compliant_limit <= 0.0 ||
+           limits.compliant_limit > limits.stiff_limit ) {
+        RCLCPP_ERROR( get_node()->get_logger(),
+                      "Current limits for '%s' are not usable: compliant %.3f A, stiff %.3f A. "
+                      "Both must be positive and finite, and compliant must not exceed stiff.",
+                      params_.joints[i].c_str(), limits.compliant_limit, limits.stiff_limit );
+        return controller_interface::CallbackReturn::ERROR;
+      }
       stiff_current_limits_[i] = limits.stiff_limit;
       compliant_current_limits_[i] = limits.compliant_limit;
     }
