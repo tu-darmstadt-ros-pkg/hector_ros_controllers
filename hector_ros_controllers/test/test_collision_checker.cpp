@@ -148,10 +148,9 @@ protected:
   void TearDown() override { node_.reset(); }
 
   /// Create a CollisionChecker and init with test URDF
-  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0,
-                                                 bool debug_viz = false )
+  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0 )
   {
-    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon, debug_viz );
+    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon );
     // Pass all joints as controlled so no filtering occurs (fair comparison with reference)
     std::vector<std::string> all_joints;
     for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
@@ -327,7 +326,7 @@ TEST_F( CollisionCheckerTest, NaNInputReturnsSafeResult )
 TEST_F( CollisionCheckerTest, PairFilteringPreserved )
 {
   // Create checker with only subset of joints
-  auto checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0, false );
+  auto checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
   std::vector<std::string> subset_joints = { "joint1", "joint2" };
   bool ok = checker->initFromXml( urdf_xml_, "", subset_joints );
   ASSERT_TRUE( ok );
@@ -362,6 +361,21 @@ TEST_F( CollisionCheckerTest, CollisionPaddingWorks )
   auto result_with_pad = checker_with_pad->checkCollision( positions );
   EXPECT_TRUE( result_with_pad.in_collision );
   EXPECT_NEAR( result_with_pad.min_distance, actual_dist, 1e-10 );
+}
+
+// ---- Test 9a: a non-finite configuration must fail SAFE, not open ----
+TEST_F( CollisionCheckerTest, NonFiniteConfigurationIsReportedAsCollision )
+{
+  auto checker = makeChecker( 0.0 );
+  Eigen::VectorXd q = Eigen::VectorXd::Zero( checker->neutralConfiguration().size() );
+  q[0] = std::numeric_limits<double>::quiet_NaN();
+
+  // Every "d < threshold" against NaN is false, so an unguarded check would answer
+  // "no collision, min_distance = DBL_MAX".
+  const auto &result = checker->checkCollisionQ( q );
+  EXPECT_TRUE( result.in_collision );
+  EXPECT_DOUBLE_EQ( result.min_distance, 0.0 );
+  EXPECT_TRUE( result.safety_zone_pairs.empty() );
 }
 
 // ---- Test 9b: an error result must not be served from the movement cache ----
@@ -704,10 +718,9 @@ TEST_F( CollisionCheckerTest, PerformanceBenchmark )
 class CollisionCheckerBroadphaseTest : public CollisionCheckerTest
 {
 protected:
-  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0,
-                                                 bool debug_viz = false )
+  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0 )
   {
-    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon, debug_viz );
+    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon );
     checker->setBroadphase( true );
     std::vector<std::string> all_joints;
     for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
@@ -826,7 +839,7 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForce )
   auto bf_checker = makeChecker();
   bf_checker->setBroadphase( false ); // force brute-force for comparison
   // Create broadphase checker
-  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0, false );
+  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
   bp_checker->setBroadphase( true );
   std::vector<std::string> all_joints;
   for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
@@ -903,11 +916,11 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForceAthena )
                                                 "arm_joint_4", "arm_joint_5", "arm_joint_6",
                                                 "arm_joint_7" };
 
-  auto bf_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0, false );
+  auto bf_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0 );
   bf_checker->setBroadphase( false ); // force brute-force for comparison
   ASSERT_TRUE( bf_checker->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
 
-  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0, false );
+  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0 );
   bp_checker->setBroadphase( true );
   ASSERT_TRUE( bp_checker->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
 
@@ -1137,48 +1150,45 @@ TEST_F( CollisionCheckerTest, PairCapPrefersDistinctLinkPairs )
   EXPECT_NEAR( refilled.safety_zone_pairs[3].distance, 0.40, 1e-6 );
 }
 
-TEST_F( CollisionCheckerTest, PairGradientsMatchFiniteDifferencesInBothVizModes )
+TEST_F( CollisionCheckerTest, EveryPairGradientMatchesFiniteDifferences )
 {
-  // debug_viz=true switches to SINGLE-PASS mode where the broadphase callback computes
-  // nearest points in tree-traversal order; unswapped witness points exactly negate the
-  // gradients. Validate every pair gradient against finite differences in both modes.
+  // The broadphase callback computes nearest points in tree-traversal order; witness
+  // points that are not swapped back into pair-canonical order exactly negate the
+  // gradients. Validate every pair gradient against finite differences.
   const std::unordered_map<std::string, double> positions = {
       { "joint1", 0.3 }, { "joint2", 0.7 }, { "joint3", -0.4 }, { "joint4", 0.2 } };
   const double h = 1e-6;
 
-  for ( const bool debug_viz : { false, true } ) {
-    auto checker = makeChecker( 0.0, 0.0, debug_viz );
-    checker->setSafetyZoneThreshold( 10.0 ); // all pairs in the zone → all gradients
-    const auto result = checker->checkCollision( positions );
-    ASSERT_GT( result.safety_zone_pairs.size(), 3u );
+  auto checker = makeChecker( 0.0, 0.0 );
+  checker->setSafetyZoneThreshold( 10.0 ); // all pairs in the zone → all gradients
+  const auto result = checker->checkCollision( positions );
+  ASSERT_GT( result.safety_zone_pairs.size(), 3u );
 
-    for ( const auto &pair : result.safety_zone_pairs ) {
-      for ( const auto &[joint_name, value] : positions ) {
-        const int v_idx = checker->getJointVelocityIndex( joint_name );
-        ASSERT_GE( v_idx, 0 );
+  for ( const auto &pair : result.safety_zone_pairs ) {
+    for ( const auto &[joint_name, value] : positions ) {
+      const int v_idx = checker->getJointVelocityIndex( joint_name );
+      ASSERT_GE( v_idx, 0 );
 
-        auto find_pair_distance = [&]( const CollisionResult &res ) {
-          for ( const auto &pi : res.safety_zone_pairs ) {
-            if ( pi.pair_index == pair.pair_index ) {
-              return pi.distance;
-            }
+      auto find_pair_distance = [&]( const CollisionResult &res ) {
+        for ( const auto &pi : res.safety_zone_pairs ) {
+          if ( pi.pair_index == pair.pair_index ) {
+            return pi.distance;
           }
-          return std::numeric_limits<double>::quiet_NaN();
-        };
+        }
+        return std::numeric_limits<double>::quiet_NaN();
+      };
 
-        auto plus = positions;
-        auto minus = positions;
-        plus[joint_name] = value + h;
-        minus[joint_name] = value - h;
-        const double d_plus = find_pair_distance( checker->checkCollision( plus ) );
-        const double d_minus = find_pair_distance( checker->checkCollision( minus ) );
-        ASSERT_FALSE( std::isnan( d_plus ) || std::isnan( d_minus ) );
+      auto plus = positions;
+      auto minus = positions;
+      plus[joint_name] = value + h;
+      minus[joint_name] = value - h;
+      const double d_plus = find_pair_distance( checker->checkCollision( plus ) );
+      const double d_minus = find_pair_distance( checker->checkCollision( minus ) );
+      ASSERT_FALSE( std::isnan( d_plus ) || std::isnan( d_minus ) );
 
-        const double fd = ( d_plus - d_minus ) / ( 2.0 * h );
-        EXPECT_NEAR( pair.gradient[v_idx], fd, 1e-4 )
-            << "gradient mismatch (debug_viz=" << debug_viz << ") pair " << pair.pair_index
-            << " joint " << joint_name;
-      }
+      const double fd = ( d_plus - d_minus ) / ( 2.0 * h );
+      EXPECT_NEAR( pair.gradient[v_idx], fd, 1e-4 )
+          << "gradient mismatch, pair " << pair.pair_index << " joint " << joint_name;
     }
   }
 }

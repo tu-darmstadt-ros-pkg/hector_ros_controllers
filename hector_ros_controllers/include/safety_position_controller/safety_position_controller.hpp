@@ -227,11 +227,14 @@ private:
   std::unique_ptr<CollisionObserver> collision_observer_; ///< per-cycle observation + edge state
   std::unique_ptr<CollisionVisualizer> collision_visualizer_; ///< RViz markers; null when disabled
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
-  /// SRDF XML (semantic). Written by the subscriber callback, read by on_configure —
-  /// safe only because the node runs on a single-threaded executor.
+  /// SRDF XML (semantic). Written by the subscriber callback before srdf_received_ is
+  /// set, and read by on_configure only after it observes that flag — the atomic is the
+  /// handshake that makes the cross-thread string write safe.
   std::string srdf_;
   std::atomic<bool> srdf_received_{ false }; ///< latched SRDF received
   double last_manipulability_{ 0.0 };        ///< latest Yoshikawa manipulability index
+  int manipulability_period_{ 1 };           ///< cycles between manipulability refreshes
+  int manipulability_countdown_{ 0 };        ///< cycles until the next refresh
 
   // ---- Current limits, resolved from parameters at activation ----
   std::vector<double> stiff_current_limits_;

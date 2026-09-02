@@ -64,8 +64,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
 
   if ( params_.check_self_collisions ) {
     collision_checker_ = std::make_unique<CollisionChecker>( node, params_.collision_padding,
-                                                             params_.collision_cache_epsilon,
-                                                             params_.debug_visualize_collisions );
+                                                             params_.collision_cache_epsilon );
   }
 
   auto parsed = parse_joint_infos( this->get_robot_description(), params_.joints,
@@ -224,9 +223,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   if ( collision_checker_ ) {
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
-    // Full visualization needs the nearest points of every pair, not just the
-    // safety-zone ones.
-    collision_checker_->setComputeAllNearestPoints( params_.debug_visualize_collisions );
     if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
       if ( !collision_visualizer_ ) {
         collision_visualizer_ = std::make_unique<CollisionVisualizer>( get_node() );
@@ -251,6 +247,13 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
       compliant_current_limits_[i] = limits.compliant_limit;
     }
   }
+  // Recompute manipulability once per status message; fall back to 1 Hz in event-only
+  // mode, where events force a refresh anyway.
+  const double status_rate = params_.status_publish_rate > 0.0 ? params_.status_publish_rate : 1.0;
+  manipulability_period_ =
+      std::max( 1, static_cast<int>( std::lround( get_update_rate() / status_rate ) ) );
+  manipulability_countdown_ = 0;
+
   // Hand the resolved values over BEFORE the status timer can fire: publishStatus()
   // reads them from executor threads, so they must not be written while it can run.
   diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_ );
@@ -433,9 +436,12 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
     if ( params_.set_current_limits ) {
       write_current_limits();
     }
-    // Manipulability at the last checked configuration (FK already done)
-    if ( collision_checker_ ) {
+    // Manipulability is only ever read by ~/status, so recompute it at that rate (and
+    // on any event that publishes) instead of every cycle. It describes the last
+    // checked configuration, so it goes stale while checks are bypassed.
+    if ( collision_checker_ && ( --manipulability_countdown_ <= 0 || status_event ) ) {
       last_manipulability_ = collision_checker_->computeManipulability();
+      manipulability_countdown_ = manipulability_period_;
     }
   }
 

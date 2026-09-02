@@ -47,12 +47,9 @@ public:
    * @param node lifecycle node (pub/log/time)
    * @param collision_padding min allowed distance [m]
    * @param collision_cache_epsilon cache threshold on max(q - q_last) [rad/m] -> reuse last distances
-   * @param compute_all_nearest_points compute nearest points for every pair, not just
-   * the safety-zone ones (needed to draw all distance lines)
    */
   explicit CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
-                             double collision_padding = 0.0, double collision_cache_epsilon = 1e-6,
-                             bool compute_all_nearest_points = false );
+                             double collision_padding = 0.0, double collision_cache_epsilon = 1e-6 );
 
   /**
    * @brief Init from URDF/SRDF XML.
@@ -166,10 +163,6 @@ public:
    */
   std::pair<std::string, std::string> getPairNames( std::size_t pair_index ) const;
 
-  /// Whether nearest points are computed for every pair (full marker visualization)
-  /// rather than only the safety-zone pairs.
-  void setComputeAllNearestPoints( bool enable ) { compute_all_nearest_points_ = enable; }
-
   // ---- Read-only views of the last check, for visualization ----
   const pinocchio::GeometryModel &geometryModel() const { return geom_model_; }
   const pinocchio::GeometryData &geometryData() const { return geom_data_; }
@@ -256,9 +249,6 @@ private:
   double collision_cache_epsilon_{ 1e-6 };
   double safety_zone_threshold_{ 0.0 };    ///< 0 = no gradient computation
   std::size_t max_safety_zone_pairs_{ 0 }; ///< cap on returned pairs; 0 = unlimited
-  /// Compute nearest points for EVERY pair (needed to draw all distance lines), not
-  /// just the safety-zone ones.
-  bool compute_all_nearest_points_{ false };
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;
 

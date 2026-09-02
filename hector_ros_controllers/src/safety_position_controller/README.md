@@ -75,18 +75,23 @@ Measured in a **Release** build (`-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON`
 
 | Benchmark | Time |
 |---|---|
-| `BM_Broadphase_DistanceOnly` | 31 µs |
-| `BM_Broadphase_TwoPass_Folded` (gradients) | 55 µs |
-| `BM_Broadphase_TwoPass` (gradients) | 112 µs |
-| `BM_CollisionChecker_TwoPass` (brute force) | 458 µs |
-| `BM_SolveWarmStarted/7/0` (QP, no collision rows) | 11.2 µs |
-| `BM_SolveWarmStarted/7/10` (QP, 10 collision rows) | 11.6 µs |
+| `BM_Broadphase_DistanceOnly` | 32 µs |
+| `BM_Broadphase_Folded` (gradients) | 43 µs |
+| `BM_Broadphase` (gradients) | 84 µs |
+| `BM_CollisionChecker` (brute force) | 437 µs |
+| `BM_SolveWarmStarted/7/0` (QP, no collision rows) | 11.3 µs |
+| `BM_SolveWarmStarted/7/10` (QP, 10 collision rows) | 11.8 µs |
+
+The narrow phase runs in a single pass: coal returns the witness points from the same
+query as the distance, so asking for them up front is cheaper than re-running the query
+for the safety-zone pairs (broadphase 116 µs → 84 µs, folded 56 µs → 43 µs).
 
 Run them with:
 
 ```bash
-colcon build --packages-select hector_ros_controllers \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+# cap the parallelism: a full-parallel build of this package exhausts RAM
+MAKEFLAGS=-j2 colcon build --packages-select hector_ros_controllers \
+  --parallel-workers 1 --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 ./build/hector_ros_controllers/benchmark_collision_checker
 ./build/hector_ros_controllers/benchmark_safety_qp_limiter
 ```

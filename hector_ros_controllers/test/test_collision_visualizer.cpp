@@ -43,7 +43,7 @@ protected:
   {
     node_ = std::make_shared<rclcpp_lifecycle::LifecycleNode>( "test_collision_visualizer",
                                                                rclcpp::NodeOptions() );
-    checker_ = std::make_unique<CollisionChecker>( node_, 0.0, 0.0, true );
+    checker_ = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
     ASSERT_TRUE( checker_->initFromXml( loadUrdfFile( "test_robot_collision.urdf" ), "", {} ) );
     checker_->setSafetyZoneThreshold( 1.0 ); // wide: every pair lands in the zone
     visualizer_ = std::make_unique<spc::CollisionVisualizer>( node_ );
