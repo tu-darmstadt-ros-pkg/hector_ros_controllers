@@ -124,6 +124,13 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
                                     bool free_flyer )
 {
   try {
+    // The parsers append to whatever the model already holds, so a second init (a
+    // reconfigure, or a retry after a failed activation) would duplicate every joint
+    // and leave the filter with no pairs it can influence — a check that silently
+    // passes everything.
+    model_ = pinocchio::Model();
+    geom_model_ = pinocchio::GeometryModel();
+
     if ( free_flyer )
       pinocchio::urdf::buildModelFromXML( urdf_xml, pinocchio::JointModelFreeFlyer(), model_ );
     else

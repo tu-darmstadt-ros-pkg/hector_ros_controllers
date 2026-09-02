@@ -344,6 +344,32 @@ TEST_F( CollisionCheckerTest, PairFilteringPreserved )
   EXPECT_FALSE( result.in_collision );
 }
 
+TEST_F( CollisionCheckerTest, ReinitializationRebuildsTheModel )
+{
+  // on_configure runs again after a cleanup or a failed activation, and re-initializes
+  // the same checker: the second parse must replace the model, not append to it.
+  auto checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
+  std::vector<std::string> all_joints;
+  for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
+    all_joints.push_back( ref_model_.names[jid] );
+  }
+  ASSERT_TRUE( checker->initFromXml( urdf_xml_, "", all_joints ) );
+
+  const int nv_first = checker->getNv();
+  const std::size_t pairs_first = checker->getNumCollisionPairs();
+  const std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+  const double distance_first = checker->checkCollision( positions ).min_distance;
+
+  ASSERT_TRUE( checker->initFromXml( urdf_xml_, "", all_joints ) );
+
+  EXPECT_EQ( checker->getNv(), nv_first );
+  EXPECT_EQ( checker->getNumCollisionPairs(), pairs_first );
+  const auto result = checker->checkCollision( positions );
+  EXPECT_FALSE( result.in_collision );
+  EXPECT_NEAR( result.min_distance, distance_first, 1e-10 );
+}
+
 // ---- Test 9: Collision with padding ----
 TEST_F( CollisionCheckerTest, CollisionPaddingWorks )
 {
