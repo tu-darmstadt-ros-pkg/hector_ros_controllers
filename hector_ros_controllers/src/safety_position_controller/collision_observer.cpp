@@ -45,6 +45,7 @@ CollisionObserver::observe( const bool checks_active,
   if ( !snapshot.observation.checks_active ) {
     was_in_collision_ = false;
     last_min_distance_ = std::numeric_limits<double>::max();
+    last_min_distance_pair_index_ = std::numeric_limits<std::size_t>::max();
     last_safety_zone_pairs_ = nullptr;
     return snapshot;
   }
@@ -66,7 +67,12 @@ CollisionObserver::observe( const bool checks_active,
 
   snapshot.observation.state_valid = state_valid;
   if ( !state_valid ) {
+    // Same as checks-inactive: nothing was observed this cycle, so the caches must not
+    // keep reporting the pre-fault distances as current.
     was_in_collision_ = false;
+    last_min_distance_ = std::numeric_limits<double>::max();
+    last_min_distance_pair_index_ = std::numeric_limits<std::size_t>::max();
+    last_safety_zone_pairs_ = nullptr;
     return snapshot;
   }
 
