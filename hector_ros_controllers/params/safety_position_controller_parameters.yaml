@@ -153,7 +153,8 @@ safety_position_controller:
       the blocking obstacle later moves away (no unexpected delayed motion). Tracking
       resumes only when the reference changes by more than
       park_resume_reference_threshold on any joint, i.e. on a new command. Should be
-      larger than qp_stall_timeout. 0 disables parking.
+      larger than qp_stall_timeout. 0 disables stall-parking; an E-stop release or a
+      state-read timeout still parks regardless.
     validation:
       bounds<>: [0.0, 3600.0]
 

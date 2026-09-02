@@ -219,11 +219,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     collision_observer_->reset();
   }
 
-  status_timer_.reset();
-  if ( params_.status_publish_rate > 0.0 ) {
-    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
-    status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
-  }
   if ( collision_checker_ ) {
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
@@ -246,7 +241,15 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
       compliant_current_limits_[i] = limits.compliant_limit;
     }
   }
+  // Hand the resolved values over BEFORE the status timer can fire: publishStatus()
+  // reads them from executor threads, so they must not be written while it can run.
   diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_ );
+
+  status_timer_.reset();
+  if ( params_.status_publish_rate > 0.0 ) {
+    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
+    status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
+  }
 
   RCLCPP_INFO( get_node()->get_logger(),
                "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
@@ -400,10 +403,10 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
   if ( estop_active ) {
     // Record the hold from the first read that succeeds — normally the engage cycle
     // itself; during a read outage (the engage must not wait for one) the first valid
-    // read after it.
-    if ( read_current_positions() &&
-         std::any_of( hold_positions_.begin(), hold_positions_.end(),
-                      []( const double p ) { return !std::isfinite( p ); } ) ) {
+    // read after it. Once recorded, no state read is needed to keep holding.
+    if ( std::any_of( hold_positions_.begin(), hold_positions_.end(),
+                      []( const double p ) { return !std::isfinite( p ); } ) &&
+         read_current_positions() ) {
       hold_positions_ = current_positions_;
     }
     pipeline_->invalidate();
@@ -411,28 +414,15 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
   } else if ( !read_current_positions() ) {
     // A handle is locked by another thread (async hardware). Skipping the cycle leaves
     // the previous position command in place, which is what re-writing it would do.
-    // Failing for longer than state_read_timeout is a fault, not contention: invalidate
-    // so recovery rebases to the measured state and parks, instead of resuming the
-    // pre-failure reference from a stale velocity state.
-    state_read_failure_time_ += period.seconds() > 0.0 ? period.seconds() : 1.0 / get_update_rate();
-    if ( state_read_failure_time_ >= params_.state_read_timeout ) {
-      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                             "No valid joint states for %.2f s; holding. The pipeline will "
-                             "rebase and park when they recover.",
-                             state_read_failure_time_ );
-      pipeline_->invalidate();
-    }
-    if ( status_event ) {
-      publish_status(); // an E-stop edge must be visible even during the outage
-    }
-    return controller_interface::return_type::OK;
+    // The safety state is unobservable, so this counts toward the same watchdog as a
+    // failed collision-state read below.
+    note_state_unobservable( period );
   } else {
-    // The park after a prolonged read failure happens on this first recovered cycle;
-    // publish it like any other event.
+    // The park after a prolonged unobservable period happens on this first recovered
+    // cycle; publish it like any other event.
     status_event |= state_read_failure_time_ >= params_.state_read_timeout;
-    state_read_failure_time_ = 0.0;
 
-    status_event |= run_safety_pipeline();
+    status_event |= run_safety_pipeline( period );
     if ( params_.set_current_limits ) {
       write_current_limits();
     }
@@ -454,6 +444,22 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
 }
 
 // ===== Helpers =====
+
+void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &period )
+{
+  // Nominal dt where the reported period is unusable (0 on the first cycle, paused sim
+  // clock); get_update_rate() is the same rate the pipeline integrates with.
+  const double rate = get_update_rate();
+  const double dt = period.seconds() > 0.0 ? period.seconds() : ( rate > 0.0 ? 1.0 / rate : 0.0 );
+  state_read_failure_time_ += dt;
+  if ( state_read_failure_time_ >= params_.state_read_timeout ) {
+    RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                           "Safety state unobservable for %.2f s; holding. The pipeline will "
+                           "rebase and park when it recovers.",
+                           state_read_failure_time_ );
+    pipeline_->invalidate();
+  }
+}
 
 bool SafetyPositionController::read_current_positions()
 {
@@ -524,16 +530,18 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   cfg.stall_park.stall_timeout = params_.qp_stall_timeout;
   cfg.stall_park.park_timeout = params_.stall_park_timeout;
 
-  // Tunneling check: one full-speed step must not cross the whole braking zone,
-  // otherwise the damper can be skipped over between two collision checks.
+  // Tunneling check: if one full-speed step can cross the whole braking zone, the damper
+  // may be skipped over between two collision checks. Comparing the joint step [rad]
+  // against the zone width [m] assumes a ~1 m lever arm, so this is a conservative
+  // heuristic, not an exact criterion — hence a warning rather than a hard failure.
   const double zone_width = params_.collision_safety_zone - params_.collision_padding;
   const double max_step = cfg.qp.v_max.maxCoeff() * dt;
   if ( params_.check_self_collisions && max_step >= zone_width ) {
     RCLCPP_WARN( get_node()->get_logger(),
-                 "Max per-cycle step (%.4f) >= safety zone width (%.4f): fast joints could "
-                 "tunnel through the damper zone. Increase collision_safety_zone or the "
-                 "update rate.",
-                 max_step, zone_width );
+                 "Max per-cycle step (%.4f rad) >= safety zone width (%.4f m): a fast joint on a "
+                 "long lever could cross the damper zone between two checks. Increase "
+                 "collision_safety_zone (currently %.4f) or the update rate (currently %.0f Hz).",
+                 max_step, zone_width, params_.collision_safety_zone, 1.0 / dt );
   }
 
   try {
@@ -564,7 +572,7 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   return true;
 }
 
-bool SafetyPositionController::run_safety_pipeline()
+bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &period )
 {
   const size_t n = params_.joints.size();
   const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
@@ -589,10 +597,17 @@ bool SafetyPositionController::run_safety_pipeline()
                  "Collision detected (min_dist=%.4f m). Pairs in collision: %s. "
                  "QP holding/pushing out.",
                  collision_observer_->lastMinDistance(), pairs_str.c_str() );
+    status_event = true;
   }
   if ( snapshot.observation.checks_active && !snapshot.observation.state_valid ) {
+    // The collision state is as unobservable as a failed controlled-joint read: feed
+    // the same watchdog so a dead encoder on an uncontrolled joint also parks on
+    // recovery instead of jump-starting toward the still-live reference.
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "Failed to setup collision checking. Braking to a stop." );
+    note_state_unobservable( period );
+  } else {
+    state_read_failure_time_ = 0.0;
   }
 
   // ---- Solve, integrate, stall/park ----

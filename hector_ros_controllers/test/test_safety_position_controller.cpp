@@ -1600,6 +1600,25 @@ TEST_F( SafetyPositionControllerCollisionTest, ActivateFailsWhenSafetyZoneEquals
   EXPECT_EQ( cb, controller_interface::CallbackReturn::ERROR );
 }
 
+TEST_F( SafetyPositionControllerCollisionTest, NarrowSafetyZoneStillActivates )
+{
+  // The tunneling check compares a joint step [rad] against the zone width [m], which
+  // only lines up at a ~1 m lever arm — a conservative heuristic that must warn, not
+  // block activation (every deployed Athena config trips it).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "collision_safety_zone", 0.015 ),
+                        rclcpp::Parameter( "collision_padding", 0.0 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+
+  rclcpp_lifecycle::State inactive( lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+                                    "inactive" );
+  auto cb = controller_->on_activate( inactive );
+  EXPECT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
+}
+
 // ============================================================================
 // Safety Bypass Skips Collision And Allows Relaxed Limits
 // ============================================================================
@@ -1762,6 +1781,43 @@ TEST_F( SafetyPositionControllerCollisionTest, TransientUncontrolledJointGlitchD
     setStateValue( "joint1", hw_cmd_values_[0] );
   }
   EXPECT_NEAR( hw_cmd_values_[0], 0.2, 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, ProlongedUncontrolledJointOutageParksOnRecovery )
+{
+  // joint4 is observed for collision checking but not controlled, so it never reaches
+  // read_current_positions(). A dead encoder there makes the collision state
+  // unobservable: the arm brakes, and on recovery it must park rather than jump-start
+  // toward the still-live reference — the same contract as a controlled-joint outage.
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 );
+
+  // default state_read_timeout is 0.1 s = 10 cycles at the 100 Hz test rate
+  setStateValue( "joint4", std::numeric_limits<double>::quiet_NaN() );
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  setStateValue( "joint4", 0.0 );
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "an uncontrolled-joint outage must park on recovery like a controlled one";
 }
 
 TEST_F( SafetyPositionControllerCollisionTest, QpModeRampsAndReachesTarget )

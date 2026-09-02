@@ -178,7 +178,15 @@ private:
    * write. Translates pipeline/observer events into logs.
    * @return true if an event occurred that the caller should publish a status for
    */
-  bool run_safety_pipeline();
+  bool run_safety_pipeline( const rclcpp::Duration &period );
+
+  /**
+   * @brief Account for a cycle in which the safety state could not be observed (busy or
+   * non-finite joint states, failed collision-state read). Past state_read_timeout the
+   * pipeline is invalidated, so recovery rebases and parks instead of resuming the
+   * pre-failure motion.
+   */
+  void note_state_unobservable( const rclcpp::Duration &period );
 
   // ---- Configuration / mode ----
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
@@ -209,7 +217,9 @@ private:
   std::unique_ptr<CollisionChecker> collision_checker_;   ///< optional self-collision checker
   std::unique_ptr<CollisionObserver> collision_observer_; ///< per-cycle observation + edge state
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
-  std::string srdf_;               ///< SRDF XML (semantic)
+  /// SRDF XML (semantic). Written by the subscriber callback, read by on_configure —
+  /// safe only because the node runs on a single-threaded executor.
+  std::string srdf_;
   std::atomic<bool> srdf_received_{ false }; ///< latched SRDF received
   double last_manipulability_{ 0.0 };        ///< latest Yoshikawa manipulability index
 
