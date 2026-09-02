@@ -9,7 +9,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
-#include <realtime_tools/realtime_buffer.hpp>
+#include <realtime_tools/realtime_thread_safe_box.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
 #include <safety_position_controller/collision_checker.hpp>
@@ -50,8 +50,9 @@ public:
   SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr node, const Params &params,
                      const CollisionChecker *checker );
 
-  /// Refresh the status snapshot. Must be called only from the controller update thread
-  /// (single writer); publishStatus() then reads a consistent snapshot from any thread.
+  /// Refresh the status snapshot from the control thread. The write always lands, so a
+  /// publishStatus() later in the same cycle reports this cycle; blocking is bounded by
+  /// a reader's snapshot copy under a priority-inheritance mutex.
   void updateSnapshot( const SafetyPipeline *pipeline, double min_distance,
                        std::size_t num_pairs_in_safety_zone, double manipulability );
 
@@ -79,7 +80,8 @@ public:
 
 private:
   /// Trivially-copyable view of the status fields written from the controller update
-  /// thread. Held in a RealtimeBuffer so publishStatus() needs no mutex.
+  /// thread. Held in a RealtimeThreadSafeBox: its priority-inheritance mutex bounds the
+  /// control thread's wait to a reader's copy of this small struct.
   struct StatusSnapshot {
     double min_distance{ std::numeric_limits<double>::max() };
     double manipulability{ 0.0 };
@@ -100,7 +102,7 @@ private:
   const CollisionChecker *checker_; ///< non-owning, for pair-name resolution
 
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>::SharedPtr status_pub_;
-  realtime_tools::RealtimeBuffer<StatusSnapshot> rt_status_buffer_;
+  realtime_tools::RealtimeThreadSafeBox<StatusSnapshot> rt_status_box_;
 
   std::atomic<bool> qp_debug_enabled_{ false };
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>::SharedPtr qp_debug_pub_;

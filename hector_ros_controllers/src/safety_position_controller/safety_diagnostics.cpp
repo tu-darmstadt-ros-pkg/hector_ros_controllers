@@ -57,7 +57,10 @@ void SafetyDiagnostics::updateSnapshot( const SafetyPipeline *pipeline, const do
     snap.stalled = pipeline->stalled();
     snap.parked = pipeline->parked();
   }
-  rt_status_buffer_.writeFromNonRT( snap );
+  // Blocking set: the write must land before a same-cycle event publish, else that
+  // publish would report the previous cycle. Bounded by a reader's copy under a
+  // priority-inheritance mutex.
+  rt_status_box_.set( snap );
 }
 
 void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
@@ -65,7 +68,7 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
   if ( !status_pub_ ) {
     return;
   }
-  const StatusSnapshot snap = *rt_status_buffer_.readFromNonRT();
+  const StatusSnapshot snap = rt_status_box_.get();
   hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus msg;
   msg.header.stamp = node_->now();
   msg.safety_bypass_active = flags.bypass_active;
