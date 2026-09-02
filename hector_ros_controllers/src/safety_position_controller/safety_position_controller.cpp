@@ -138,9 +138,16 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       "~/commands", rclcpp::SystemDefaultsQoS(),
       [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
 
+  // Transient local, matching the e-stop manager, which publishes its aggregated state
+  // once per change and latches it: a volatile subscriber joining afterwards is told
+  // nothing and would run as if no stop were in effect. A depth of one would be enough
+  // for the latch, but an engage and the release after it can arrive together while the
+  // executor is busy, and the engage must not be overwritten before its callback runs.
   estop_subscriber_ = node->create_subscription<std_msgs::msg::Bool>(
-      "~/safety_estop", rclcpp::SystemDefaultsQoS(),
+      params_.e_stop_topic, rclcpp::QoS( rclcpp::KeepLast( 10 ) ).reliable().transient_local(),
       [this]( const std_msgs::msg::Bool::SharedPtr msg ) { note_estop_request( msg->data ); } );
+  RCLCPP_INFO( node->get_logger(), "Listening for the soft e-stop on '%s'.",
+               params_.e_stop_topic.c_str() );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }

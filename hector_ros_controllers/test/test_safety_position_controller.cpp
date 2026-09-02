@@ -43,7 +43,8 @@ public:
 
   void initController( const std::vector<std::string> &joints = {},
                        bool check_self_collisions = false, bool set_current_limits = false,
-                       const std::string &urdf_file = "test_robot.urdf" )
+                       const std::string &urdf_file = "test_robot.urdf",
+                       const std::vector<rclcpp::Parameter> &extra_params = {} )
   {
     auto j = joints.empty() ? controlled_joints_ : joints;
     const auto urdf = hector_test::loadUrdfFile( urdf_file );
@@ -68,6 +69,7 @@ public:
         rclcpp::Parameter( "collision_cache_epsilon", 0.000001 ),
         rclcpp::Parameter( "debug_visualize_collisions", false ),
     };
+    overrides.insert( overrides.end(), extra_params.begin(), extra_params.end() );
     opts.parameter_overrides( overrides );
     params.node_options = opts;
 
@@ -318,6 +320,48 @@ TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
     followCommands();
   }
   EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
+{
+  // The controller has to listen where the robot's e-stop actually is. On Athena that
+  // is the SOFT stop, whose "please stop" the arm can honour by holding position; the
+  // hard stop cuts power, faults the hardware and deactivates every controller, so no
+  // controller-side handling would run for it anyway.
+  const std::string topic = "e_stop_manager/aggregated_state/emergency_stop_software";
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "e_stop_topic", topic ) } );
+
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
+                   controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+                   topic ) != nullptr )
+      << "the configured topic must be the one subscribed";
+
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
+                   controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+                   "test_safety_position/safety_estop" ) == nullptr )
+      << "the default topic must not also be subscribed";
+}
+
+TEST_F( SafetyPositionControllerTest, EstopSubscriptionKeepsTheLatchedState )
+{
+  // The e-stop manager publishes its aggregated state once per change and latches it
+  // (RELIABLE, TRANSIENT_LOCAL). A volatile subscriber that joins after the operator
+  // engaged the stop is told nothing and runs as if none were in effect, so the
+  // durability here is load bearing, not a default.
+  initController();
+  const auto sub = rtest::findSubscription<std_msgs::msg::Bool>(
+      controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+      "test_safety_position/safety_estop" );
+  ASSERT_TRUE( sub != nullptr );
+
+  const auto qos = sub->get_actual_qos();
+  EXPECT_EQ( qos.durability(), rclcpp::DurabilityPolicy::TransientLocal )
+      << "a volatile subscriber would miss a stop engaged before it subscribed";
+  EXPECT_EQ( qos.reliability(), rclcpp::ReliabilityPolicy::Reliable );
+  // An engage and the release after it can be delivered together while the executor is
+  // busy; a depth of one would let the release overwrite the unread engage.
+  EXPECT_GT( qos.depth(), 1u ) << "the engage must survive until its callback runs";
 }
 
 TEST_F( SafetyPositionControllerTest, EstopPulseBetweenCyclesIsHonored )

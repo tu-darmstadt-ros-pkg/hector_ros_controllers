@@ -307,6 +307,25 @@ safety_position_controller:
     validation:
       bounds<>: [0.0, 100.0]
 
+  e_stop_topic:
+    type: string
+    default_value: ~/safety_estop
+    description: >
+      Topic (std_msgs/Bool) carrying the SOFT emergency stop: a request to stop moving,
+      which this controller honours by holding the measured positions and abandoning the
+      reference in effect, so nothing moves again until a new one arrives. Point it at
+      the robot's soft e-stop, e.g.
+      'e_stop_manager/aggregated_state/emergency_stop_software'. The HARD stop needs no
+      entry here: it removes drive power, and the arm cannot move whatever is commanded.
+      Note that the hardware component only reports the fault once its reads have failed
+      consecutively for about half a second, so this controller keeps issuing commands
+      into an unpowered arm until then.
+      Subscribed transient local and reliable, matching the e-stop manager, which
+      publishes once per change and latches: the state in effect before this controller
+      subscribed is delivered on subscribe. A publisher on this topic MUST therefore be
+      transient local, which a plain 'ros2 topic pub' is not unless told to be.
+    read_only: true
+
   safety_bypass_timeout:
     type: double
     default_value: 60.0
