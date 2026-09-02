@@ -224,8 +224,16 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   if ( collision_checker_ ) {
     collision_checker_->updateCollisionPadding( params_.collision_padding );
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
-    collision_checker_->updateDoDebugVisualization( params_.debug_visualize_collisions );
-    collision_checker_->updatePublishCollisionDistances( params_.publish_collision_distances );
+    // Full visualization needs the nearest points of every pair, not just the
+    // safety-zone ones.
+    collision_checker_->setComputeAllNearestPoints( params_.debug_visualize_collisions );
+    if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
+      if ( !collision_visualizer_ ) {
+        collision_visualizer_ = std::make_unique<CollisionVisualizer>( get_node() );
+      }
+    } else {
+      collision_visualizer_.reset();
+    }
     if ( !collision_checker_->setManipulabilityFrame( params_.manipulability_ee_frame ) ) {
       RCLCPP_WARN( get_node()->get_logger(),
                    "manipulability_ee_frame '%s' is not in the model; manipulability disabled.",
@@ -291,6 +299,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   // drop commands received while inactive
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
   state_read_failure_time_ = 0.0;
+  park_on_recovery_pending_ = false;
 
   publish_status();
 
@@ -450,11 +459,14 @@ void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &
   const double rate = get_update_rate();
   const double dt = period.seconds() > 0.0 ? period.seconds() : ( rate > 0.0 ? 1.0 / rate : 0.0 );
   state_read_failure_time_ += dt;
-  if ( state_read_failure_time_ >= params_.state_read_timeout ) {
-    RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                           "Safety state unobservable for %.2f s; holding. The pipeline will "
-                           "rebase and park when it recovers.",
-                           state_read_failure_time_ );
+  // Only on the edge: invalidate() rebases the command onto the measured position, so
+  // repeating it every cycle would turn the hold into "follow the measurement" and let
+  // a loaded limb sag away under gravity.
+  if ( state_read_failure_time_ >= params_.state_read_timeout && !park_on_recovery_pending_ ) {
+    RCLCPP_ERROR( get_node()->get_logger(),
+                  "Safety state unobservable for %.2f s; holding. The pipeline will rebase "
+                  "and park when it recovers.",
+                  state_read_failure_time_ );
     pipeline_->invalidate();
     park_on_recovery_pending_ = true;
   }
@@ -655,10 +667,17 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
   for ( size_t i = 0; i < n; ++i ) { qp_cmd_std_[i] = qp_cmd[static_cast<Eigen::Index>( i )]; }
   write_position_commands( qp_cmd_std_ );
 
-  // Directional info for RViz distance-line coloring (green = moving away)
-  if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
-    collision_observer_->publishDirectionalInfo( pipeline_->velocity(),
-                                                 params_.collision_safety_zone );
+  // RViz markers, colored by whether the motion moves each pair apart. Only after a
+  // real check: the visualizer draws the checker's latched state, which would otherwise
+  // be redrawn with fresh stamps while the arm moves on (bypass, unobservable state).
+  if ( collision_visualizer_ && collision_checker_ && snapshot.observation.checks_active &&
+       snapshot.observation.state_valid ) {
+    collision_visualizer_->publish( *collision_checker_,
+                                    params_.debug_visualize_collisions
+                                        ? CollisionVisualizer::Level::FullGeometry
+                                        : CollisionVisualizer::Level::LinesOnly,
+                                    collision_observer_->directionalInfo( pipeline_->velocity() ),
+                                    params_.collision_safety_zone );
   }
 
   diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );

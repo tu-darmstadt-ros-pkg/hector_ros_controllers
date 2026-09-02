@@ -1813,16 +1813,29 @@ TEST_F( SafetyPositionControllerCollisionTest, ProlongedUncontrolledJointOutageP
   // default state_read_timeout is 0.1 s = 10 cycles at the 100 Hz test rate
   setStateValue( "joint4", std::numeric_limits<double>::quiet_NaN() );
   publishes = 0;
-  for ( int i = 0; i < 20; ++i ) {
+  for ( int i = 0; i < 15; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
     setStateValue( "joint1", hw_cmd_values_[0] );
   }
   EXPECT_LE( publishes, 2 ) << "the fault is an event, not a per-cycle publish";
+
+  // A loaded limb sags away from its command while the fault lasts. Rebasing onto the
+  // measurement every cycle would turn the hold into "follow the sag".
+  const double held_during_outage = hw_cmd_values_[0];
+  for ( int i = 0; i < 20; ++i ) {
+    setStateValue( "joint1", hw_cmd_values_[0] - 0.05 ); // simulated sag under gravity
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    ASSERT_NEAR( hw_cmd_values_[0], held_during_outage, 1e-9 )
+        << "the command must hold, not follow the measurement (cycle " << i << ")";
+  }
+  setStateValue( "joint1", held_during_outage );
   setStateValue( "joint4", 0.0 );
 
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
   EXPECT_TRUE( controller_->pipeline_->parked() )
       << "an uncontrolled-joint outage must park on recovery like a controlled one";
+  EXPECT_NEAR( hw_cmd_values_[0], held_during_outage, 1e-9 )
+      << "the hold must not have drifted toward the (sagging) measurement";
 
   publishes = 0;
   for ( int i = 0; i < 20; ++i ) {

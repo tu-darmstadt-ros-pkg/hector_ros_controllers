@@ -116,11 +116,11 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
 
 CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                                     double collision_padding, double collision_cache_epsilon,
-                                    bool pub_debug_geometry )
+                                    bool compute_all_nearest_points )
     : node_( node ), collision_padding_( collision_padding ),
-      collision_cache_epsilon_( collision_cache_epsilon ), pub_debug_geometry_( pub_debug_geometry )
+      collision_cache_epsilon_( collision_cache_epsilon ),
+      compute_all_nearest_points_( compute_all_nearest_points )
 {
-  updateDoDebugVisualization( pub_debug_geometry );
 }
 
 bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::string &srdf_xml,
@@ -348,10 +348,6 @@ CollisionChecker::buildConfiguration( const std::unordered_map<std::string, doub
 const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
   const double safety_zone_threshold = safety_zone_threshold_;
-#ifdef SAFETY_CC_ENABLE_TIMING
-  using clock = std::chrono::steady_clock;
-  const auto t0 = clock::now();
-#endif
 
   if ( q.size() != model_.nq ) {
     RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
@@ -368,15 +364,9 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
 
   // Kinematics + placements
   pinocchio::forwardKinematics( model_, data_, q );
-#ifdef SAFETY_CC_ENABLE_TIMING
-  const auto t_fk = clock::now();
-#endif
   pinocchio::updateGeometryPlacements( model_, data_, geom_model_, geom_data_ );
-#ifdef SAFETY_CC_ENABLE_TIMING
-  const auto t_placement = clock::now();
-#endif
 
-  const bool single_pass = pub_debug_geometry_;
+  const bool single_pass = compute_all_nearest_points_;
 
   if ( single_pass ) {
     // Only the debug-viz path uses freshness; reset it just there.
@@ -448,10 +438,6 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
       }
     }
   }
-
-#ifdef SAFETY_CC_ENABLE_TIMING
-  const auto t_distance = clock::now();
-#endif
 
   CollisionResult result;
   result.in_collision = ( global_min_distance <= collision_padding_ );
@@ -535,10 +521,6 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
 
     pinocchio::computeJointJacobians( model_, data_ );
 
-#ifdef SAFETY_CC_ENABLE_TIMING
-    const auto t_jacobian = clock::now();
-#endif
-
     for ( const std::size_t k : safety_zone_indices ) {
       CollisionResult::PairInfo info;
       info.pair_index = k;
@@ -546,67 +528,12 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
       info.gradient = computePairGradient( k );
       result.safety_zone_pairs.push_back( std::move( info ) );
     }
-
-#ifdef SAFETY_CC_ENABLE_TIMING
-    const auto t_gradient = clock::now();
-    timing_stats_.jacobian_us +=
-        static_cast<double>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>( t_jacobian - t_distance ).count() ) /
-        1000.0;
-    timing_stats_.gradient_us +=
-        static_cast<double>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>( t_gradient - t_jacobian ).count() ) /
-        1000.0;
-#endif
   }
 
-#ifdef SAFETY_CC_ENABLE_TIMING
-  const auto t_end = clock::now();
-  timing_stats_.fk_us +=
-      static_cast<double>( std::chrono::duration_cast<std::chrono::nanoseconds>( t_fk - t0 ).count() ) /
-      1000.0;
-  timing_stats_.placement_us +=
-      static_cast<double>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>( t_placement - t_fk ).count() ) /
-      1000.0;
-  timing_stats_.distance_us +=
-      static_cast<double>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>( t_distance - t_placement ).count() ) /
-      1000.0;
-  timing_stats_.total_us +=
-      static_cast<double>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>( t_end - t0 ).count() ) /
-      1000.0;
-  timing_stats_.num_safety_zone_pairs += safety_zone_indices.size();
-  timing_stats_.count++;
-  RCLCPP_INFO_THROTTLE(
-      node_->get_logger(), *node_->get_clock(), 2000,
-      "[CC timing] avg total=%.1f µs (FK=%.1f, placement=%.1f, dist=%.1f, "
-      "jac=%.1f, grad=%.1f) pairs=%zu, zone_pairs=%.1f",
-      timing_stats_.total_us / timing_stats_.count, timing_stats_.fk_us / timing_stats_.count,
-      timing_stats_.placement_us / timing_stats_.count,
-      timing_stats_.distance_us / timing_stats_.count,
-      timing_stats_.jacobian_us / timing_stats_.count,
-      timing_stats_.gradient_us / timing_stats_.count, geom_model_.collisionPairs.size(),
-      static_cast<double>( timing_stats_.num_safety_zone_pairs ) / timing_stats_.count );
-#endif
-
   last_collision_result_ = std::move( result );
-  if ( pub_debug_geometry_ )
-    publishMarkers();
-  else if ( pub_collision_distances_ )
-    publishMinimalMarkers();
   return last_collision_result_;
 }
 
-void CollisionChecker::updateDoDebugVisualization( const bool pub_debug_geometry )
-{
-  pub_debug_geometry_ = pub_debug_geometry;
-  if ( pub_debug_geometry_ && !markers_pub_ ) {
-    markers_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-        "~/debug_collision_geometry", 1 );
-  }
-}
 void CollisionChecker::updateCollisionPadding( const double collision_padding )
 {
   if ( collision_padding != collision_padding_ ) {
@@ -651,164 +578,6 @@ void CollisionChecker::setBroadphase( bool enable )
 }
 
 bool CollisionChecker::isBroadphaseEnabled() const { return use_broadphase_; }
-
-void CollisionChecker::updatePublishCollisionDistances( bool enable )
-{
-  pub_collision_distances_ = enable;
-  if ( enable && !rt_markers_pub_ ) {
-    auto pub = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-        "~/debug_collision_geometry", 1 );
-    rt_markers_pub_ =
-        std::make_shared<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>>(
-            pub );
-  }
-}
-
-void CollisionChecker::publishMinimalMarkers()
-{
-  if ( !rt_markers_pub_ || !rt_markers_pub_->trylock() )
-    return;
-
-  auto &arr = rt_markers_pub_->msg_;
-  arr.markers.clear();
-
-  const rclcpp::Time now = node_->now();
-
-  // Delete all previous markers
-  visualization_msgs::msg::Marker delete_all;
-  delete_all.header.frame_id = root_frame_;
-  delete_all.header.stamp = now;
-  delete_all.action = visualization_msgs::msg::Marker::DELETEALL;
-  arr.markers.push_back( std::move( delete_all ) );
-
-  const auto &result = last_collision_result_;
-  if ( result.safety_zone_pairs.empty() && !result.in_collision ) {
-    rt_markers_pub_->unlockAndPublish();
-    return;
-  }
-
-  // Build LINE_LIST markers for safety zone and collision pairs
-  auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
-    visualization_msgs::msg::Marker m;
-    m.header.frame_id = root_frame_;
-    m.header.stamp = now;
-    m.ns = ns;
-    m.id = id;
-    m.type = visualization_msgs::msg::Marker::LINE_LIST;
-    m.action = visualization_msgs::msg::Marker::ADD;
-    m.scale.x = thickness;
-    m.lifetime = rclcpp::Duration::from_seconds( 0.0 );
-    m.pose.orientation.w = 1.0;
-    return m;
-  };
-
-  visualization_msgs::msg::Marker lines_zone =
-      make_line_marker( "distance_lines_safety_zone", 0, 0.005 );
-  visualization_msgs::msg::Marker lines_coll =
-      make_line_marker( "distance_lines_collision", 0, 0.006 );
-
-  // Collision-category lines use per-vertex colors:
-  //   orange  = inside the padding but not touching (0 < d <= padding)
-  //   magenta = actually penetrating (d <= 0)
-  std_msgs::msg::ColorRGBA orange;
-  orange.r = 1.0f;
-  orange.g = 0.55f;
-  orange.b = 0.0f;
-  orange.a = 1.0f;
-  std_msgs::msg::ColorRGBA magenta;
-  magenta.r = 1.0f;
-  magenta.g = 0.0f;
-  magenta.b = 1.0f;
-  magenta.a = 1.0f;
-
-  auto push_collision_line = [&]( const geometry_msgs::msg::Point &pA,
-                                  const geometry_msgs::msg::Point &pB, const double distance ) {
-    const auto &color = ( distance <= 0.0 ) ? magenta : orange;
-    lines_coll.points.push_back( pA );
-    lines_coll.colors.push_back( color );
-    lines_coll.points.push_back( pB );
-    lines_coll.colors.push_back( color );
-  };
-
-  // Fallback: when the controller did not request gradient computation (threshold=0),
-  // safety_zone_pairs is empty even on collision. Draw the colliding pair from the
-  // global-min index so RViz still shows the collision line.
-  if ( result.safety_zone_pairs.empty() && result.in_collision &&
-       result.min_distance_pair_index < geom_data_.distanceResults.size() ) {
-    const auto &dres = geom_data_.distanceResults[result.min_distance_pair_index];
-    if ( !dres.nearest_points[0].hasNaN() && !dres.nearest_points[1].hasNaN() &&
-         dres.nearest_points[0].allFinite() && dres.nearest_points[1].allFinite() ) {
-      geometry_msgs::msg::Point pA, pB;
-      pA.x = dres.nearest_points[0][0];
-      pA.y = dres.nearest_points[0][1];
-      pA.z = dres.nearest_points[0][2];
-      pB.x = dres.nearest_points[1][0];
-      pB.y = dres.nearest_points[1][1];
-      pB.z = dres.nearest_points[1][2];
-      push_collision_line( pA, pB, dres.min_distance );
-    }
-  }
-
-  for ( const auto &pair : result.safety_zone_pairs ) {
-    const auto &dres = geom_data_.distanceResults[pair.pair_index];
-    if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
-         !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() )
-      continue;
-
-    geometry_msgs::msg::Point pA, pB;
-    pA.x = dres.nearest_points[0][0];
-    pA.y = dres.nearest_points[0][1];
-    pA.z = dres.nearest_points[0][2];
-    pB.x = dres.nearest_points[1][0];
-    pB.y = dres.nearest_points[1][1];
-    pB.z = dres.nearest_points[1][2];
-
-    if ( pair.distance <= collision_padding_ ) {
-      push_collision_line( pA, pB, pair.distance );
-    } else {
-      std_msgs::msg::ColorRGBA color;
-      const double dir = pairDirection( viz_directional_derivatives_,
-                                        geom_model_.collisionPairs.size(), pair.pair_index );
-      // Neutral band: |g^T v| below this is tangential motion / standstill — without it
-      // numerical noise around zero makes the color flicker red/green.
-      constexpr double kDirNeutralBand = 1e-3; // [m/s]
-      if ( !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
-        if ( dir > 0.0 ) {
-          color.r = 0.0f;
-          color.g = 1.0f;
-          color.b = 0.0f;
-          color.a = 1.0f;
-        } else {
-          color.r = 1.0f;
-          color.g = 0.0f;
-          color.b = 0.0f;
-          color.a = 1.0f;
-        }
-      } else {
-        color.r = 1.0f;
-        color.g = 0.8f;
-        color.b = 0.0f;
-        color.a = 0.9f;
-      }
-      lines_zone.points.push_back( pA );
-      lines_zone.colors.push_back( color );
-      lines_zone.points.push_back( pB );
-      lines_zone.colors.push_back( color );
-    }
-  }
-
-  // RViz ignores an empty-points LINE_LIST update (old lines persist); DELETE to clear instead.
-  auto push_line_marker = [&]( visualization_msgs::msg::Marker &&m ) {
-    if ( m.points.empty() ) {
-      m.action = visualization_msgs::msg::Marker::DELETE;
-    }
-    arr.markers.push_back( std::move( m ) );
-  };
-  push_line_marker( std::move( lines_zone ) );
-  push_line_marker( std::move( lines_coll ) );
-
-  rt_markers_pub_->unlockAndPublish();
-}
 
 Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
 {
@@ -883,263 +652,6 @@ std::pair<std::string, std::string> CollisionChecker::getPairNames( std::size_t 
     return { "", "" };
   const auto &cp = geom_model_.collisionPairs[pair_index];
   return { geom_model_.geometryObjects[cp.first].name, geom_model_.geometryObjects[cp.second].name };
-}
-
-void CollisionChecker::setDirectionalInfo( const std::vector<double> &derivatives,
-                                           double safety_zone_threshold )
-{
-  viz_directional_derivatives_ = derivatives;
-  viz_safety_zone_threshold_ = safety_zone_threshold;
-}
-
-void CollisionChecker::publishMarkers() const
-{
-  if ( !markers_pub_ )
-    return;
-
-  visualization_msgs::msg::MarkerArray arr;
-  arr.markers.reserve( geom_model_.geometryObjects.size() + geom_model_.collisionPairs.size() + 4 );
-  const rclcpp::Time now = node_->now();
-
-  // Build lookups for geometry coloring: penetrating (d <= 0) and inside padding
-  // (0 < d <= padding).
-  std::vector<size_t> objects_penetrating;
-  std::vector<size_t> objects_in_padding;
-  auto add_unique = [&]( std::vector<size_t> &vec, size_t idx ) {
-    if ( std::find( vec.begin(), vec.end(), idx ) == vec.end() )
-      vec.push_back( idx );
-  };
-  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-    if ( !nearest_points_fresh_[k] )
-      continue; // skip stale (pruned) pairs
-    const auto &cp = geom_model_.collisionPairs[k];
-    const auto &dres = geom_data_.distanceResults[k];
-    if ( dres.min_distance <= 0.0 ) {
-      add_unique( objects_penetrating, cp.first );
-      add_unique( objects_penetrating, cp.second );
-    } else if ( dres.min_distance <= collision_padding_ ) {
-      add_unique( objects_in_padding, cp.first );
-      add_unique( objects_in_padding, cp.second );
-    }
-  }
-
-  // 1) Geometry markers
-  for ( std::size_t i = 0; i < geom_model_.geometryObjects.size(); ++i ) {
-    const auto &go = geom_model_.geometryObjects[i];
-    const auto &M = geom_data_.oMg[i];
-
-    visualization_msgs::msg::Marker m;
-    m.header.frame_id = root_frame_;
-    m.header.stamp = now;
-    m.ns = "collision_geometry";
-    m.id = static_cast<int>( i );
-    m.action = visualization_msgs::msg::Marker::ADD;
-
-    m.pose.position.x = M.translation().x();
-    m.pose.position.y = M.translation().y();
-    m.pose.position.z = M.translation().z();
-    Eigen::Quaterniond q( M.rotation() );
-    m.pose.orientation.x = q.x();
-    m.pose.orientation.y = q.y();
-    m.pose.orientation.z = q.z();
-    m.pose.orientation.w = q.w();
-
-    using namespace coal;
-    const auto *s = go.geometry.get();
-    if ( auto sp = dynamic_cast<const Sphere *>( s ) ) {
-      m.type = visualization_msgs::msg::Marker::SPHERE;
-      m.scale.x = m.scale.y = m.scale.z = 2.0 * sp->radius;
-    } else if ( auto bx = dynamic_cast<const Box *>( s ) ) {
-      m.type = visualization_msgs::msg::Marker::CUBE;
-      m.scale.x = bx->halfSide[0] * 2.0;
-      m.scale.y = bx->halfSide[1] * 2.0;
-      m.scale.z = bx->halfSide[2] * 2.0;
-    } else if ( auto cy = dynamic_cast<const Cylinder *>( s ) ) {
-      m.type = visualization_msgs::msg::Marker::CYLINDER;
-      m.scale.x = m.scale.y = 2.0 * cy->radius;
-      m.scale.z = cy->halfLength * 2.0;
-    } else {
-      if ( !go.meshPath.empty() ) {
-        m.type = visualization_msgs::msg::Marker::MESH_RESOURCE;
-        m.mesh_resource = go.meshPath;
-        m.mesh_use_embedded_materials = true;
-        m.scale.x = go.meshScale[0];
-        m.scale.y = go.meshScale[1];
-        m.scale.z = go.meshScale[2];
-      } else {
-        m.type = visualization_msgs::msg::Marker::ARROW; // fallback
-        m.scale.x = 0.05;
-        m.scale.y = 0.01;
-        m.scale.z = 0.01;
-      }
-    }
-
-    if ( std::find( objects_penetrating.begin(), objects_penetrating.end(), i ) !=
-         objects_penetrating.end() ) {
-      // Penetrating: red
-      m.color.r = 1.0f;
-      m.color.g = 0.0f;
-      m.color.b = 0.0f;
-      m.color.a = 1.0f;
-    } else if ( std::find( objects_in_padding.begin(), objects_in_padding.end(), i ) !=
-                objects_in_padding.end() ) {
-      // Inside the padding (counts as collision for the controller, but not touching): orange
-      m.color.r = 1.0f;
-      m.color.g = 0.55f;
-      m.color.b = 0.0f;
-      m.color.a = 0.9f;
-    } else {
-      m.color.r = 0.7f;
-      m.color.g = 0.7f;
-      m.color.b = 0.7f;
-      m.color.a = 0.6f;
-    }
-
-    m.lifetime = rclcpp::Duration::from_seconds( 0.0 );
-    arr.markers.push_back( std::move( m ) );
-  }
-
-  // Helper to check if nearest points are valid
-  auto valid_nearest_points = []( const coal::DistanceResult &dres ) -> bool {
-    return !dres.nearest_points[0].hasNaN() && !dres.nearest_points[1].hasNaN() &&
-           dres.nearest_points[0].allFinite() && dres.nearest_points[1].allFinite();
-  };
-
-  // Helper to create a line marker between nearest points of a pair
-  auto make_line_points = []( const coal::DistanceResult &dres )
-      -> std::pair<geometry_msgs::msg::Point, geometry_msgs::msg::Point> {
-    geometry_msgs::msg::Point pA, pB;
-    pA.x = dres.nearest_points[0][0];
-    pA.y = dres.nearest_points[0][1];
-    pA.z = dres.nearest_points[0][2];
-    pB.x = dres.nearest_points[1][0];
-    pB.y = dres.nearest_points[1][1];
-    pB.z = dres.nearest_points[1][2];
-    return { pA, pB };
-  };
-
-  // 2) Distance lines — separated into namespaces by category
-  // Initialize LINE_LIST markers for each category
-  auto make_line_marker = [&]( const std::string &ns, int id, double thickness ) {
-    visualization_msgs::msg::Marker m;
-    m.header.frame_id = root_frame_;
-    m.header.stamp = now;
-    m.ns = ns;
-    m.id = id;
-    m.type = visualization_msgs::msg::Marker::LINE_LIST;
-    m.action = visualization_msgs::msg::Marker::ADD;
-    m.scale.x = thickness;
-    m.lifetime = rclcpp::Duration::from_seconds( 0.0 );
-    // pose defaults to identity
-    m.pose.orientation.w = 1.0;
-    return m;
-  };
-
-  // Lines for pairs outside safety zone (gray, thin)
-  visualization_msgs::msg::Marker lines_safe = make_line_marker( "distance_lines_safe", 0, 0.002 );
-  // Lines for pairs in safety zone — per-point colors used
-  visualization_msgs::msg::Marker lines_zone =
-      make_line_marker( "distance_lines_safety_zone", 0, 0.005 );
-  // Lines for pairs at/below collision padding (bright red, thick)
-  visualization_msgs::msg::Marker lines_coll =
-      make_line_marker( "distance_lines_collision", 0, 0.006 );
-
-  lines_safe.points.reserve( geom_model_.collisionPairs.size() * 2 );
-  lines_zone.points.reserve( geom_model_.collisionPairs.size() * 2 );
-  lines_zone.colors.reserve( geom_model_.collisionPairs.size() * 2 );
-  lines_coll.points.reserve( geom_model_.collisionPairs.size() * 2 );
-
-  // Default colors
-  std_msgs::msg::ColorRGBA gray;
-  gray.r = 0.5f;
-  gray.g = 0.5f;
-  gray.b = 0.5f;
-  gray.a = 0.5f;
-  // Collision-category lines use per-vertex colors:
-  //   orange  = inside the padding but not touching (0 < d <= padding)
-  //   magenta = actually penetrating (d <= 0)
-  std_msgs::msg::ColorRGBA orange;
-  orange.r = 1.0f;
-  orange.g = 0.55f;
-  orange.b = 0.0f;
-  orange.a = 1.0f;
-  std_msgs::msg::ColorRGBA magenta;
-  magenta.r = 1.0f;
-  magenta.g = 0.0f;
-  magenta.b = 1.0f;
-  magenta.a = 1.0f;
-
-  lines_safe.color = gray;
-
-  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-    // Skip stale (pruned) pairs; their nearest points are from an earlier cycle.
-    if ( !nearest_points_fresh_[k] )
-      continue;
-
-    const auto &dres = geom_data_.distanceResults[k];
-    if ( !valid_nearest_points( dres ) )
-      continue;
-
-    auto [pA, pB] = make_line_points( dres );
-
-    if ( dres.min_distance <= collision_padding_ ) {
-      // Collision pair (per-vertex color: magenta = penetrating, orange = in padding)
-      const auto &color = ( dres.min_distance <= 0.0 ) ? magenta : orange;
-      lines_coll.points.push_back( pA );
-      lines_coll.colors.push_back( color );
-      lines_coll.points.push_back( pB );
-      lines_coll.colors.push_back( color );
-    } else if ( viz_safety_zone_threshold_ > 0.0 && dres.min_distance < viz_safety_zone_threshold_ ) {
-      // Safety zone pair — color by directional derivative. Neutral band avoids
-      // red/green flicker from numerical noise around zero (standstill/tangential).
-      std_msgs::msg::ColorRGBA color;
-      const double dir =
-          pairDirection( viz_directional_derivatives_, geom_model_.collisionPairs.size(), k );
-      constexpr double kDirNeutralBand = 1e-3; // [m/s]
-      if ( !std::isnan( dir ) && std::abs( dir ) > kDirNeutralBand ) {
-        if ( dir > 0.0 ) {
-          // Moving away: green
-          color.r = 0.0f;
-          color.g = 1.0f;
-          color.b = 0.0f;
-          color.a = 1.0f;
-        } else {
-          // Moving closer: red
-          color.r = 1.0f;
-          color.g = 0.0f;
-          color.b = 0.0f;
-          color.a = 1.0f;
-        }
-      } else {
-        // No directional info / neutral: yellow
-        color.r = 1.0f;
-        color.g = 0.8f;
-        color.b = 0.0f;
-        color.a = 0.9f;
-      }
-      lines_zone.points.push_back( pA );
-      lines_zone.colors.push_back( color );
-      lines_zone.points.push_back( pB );
-      lines_zone.colors.push_back( color );
-    } else {
-      // Safe pair (outside safety zone)
-      lines_safe.points.push_back( pA );
-      lines_safe.points.push_back( pB );
-    }
-  }
-
-  // RViz ignores an empty-points LINE_LIST update (old lines persist); DELETE to clear instead.
-  auto push_line_marker = [&]( visualization_msgs::msg::Marker &&m ) {
-    if ( m.points.empty() ) {
-      m.action = visualization_msgs::msg::Marker::DELETE;
-    }
-    arr.markers.push_back( std::move( m ) );
-  };
-  push_line_marker( std::move( lines_safe ) );
-  push_line_marker( std::move( lines_zone ) );
-  push_line_marker( std::move( lines_coll ) );
-
-  markers_pub_->publish( arr );
 }
 
 bool CollisionChecker::setManipulabilityFrame( const std::string &ee_frame_name )

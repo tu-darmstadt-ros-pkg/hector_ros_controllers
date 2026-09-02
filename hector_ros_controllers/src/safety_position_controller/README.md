@@ -12,8 +12,9 @@ with flow-around (ProxQP), per-joint deviation boxes, and a stall/park state mac
 | `SafetyPipeline` | Per-cycle control law: desired velocity + leashes, position/deviation boxes, constraint projection, solve, integration, stall/park. Returns **events**, never logs | no |
 | `SafetyQpLimiter` | The dense QP itself (velocity boxes, braking bounds, collision dampers, tiered infeasibility relaxation) | no |
 | `StallParkMonitor` | Stall / park state machine (park latch survives E-stop) | no |
-| `CollisionChecker` | Pinocchio + coal self-collision distances, gradients, RViz markers | yes |
-| `CollisionObserver` | Assembles the check configuration (measured + commanded overlay), runs the checker, caches results, edge-triggers "entered collision" | yes |
+| `CollisionChecker` | Pinocchio + coal self-collision distances and gradients | yes (logging only) |
+| `CollisionVisualizer` | RViz markers on `~/debug_collision_geometry`: distance lines colored by approach direction, optionally the collision geometry | yes |
+| `CollisionObserver` | Assembles the check configuration (measured + commanded overlay), runs the checker, caches results, edge-triggers "entered collision" | no |
 | `SafetyDiagnostics` | `~/status`, `~/qp_debug`, debug joint states, warning formatters | yes |
 | `joint_info.*` | `JointInfo` (URDF types/limits), `parse_joint_infos()`, angle helpers | no |
 
@@ -50,6 +51,7 @@ and parks — the arm holds until the reference changes by more than
 - **Safe-set math** (dampers, braking, relaxation stages): `safety_qp_limiter.cpp`.
 - **Cycle behavior** (leashes, deviation boxes, stall/park semantics): `safety_pipeline.cpp` — add a pure unit test in `test_safety_pipeline.cpp`.
 - **Which pairs constrain** (pair filtering, budget, gradients): `collision_checker.cpp`.
+- **Marker appearance** (colors, namespaces, what is drawn): `collision_visualizer.cpp`.
 - **New status/debug output**: `safety_diagnostics.cpp` + the msg definitions in `hector_ros_controllers_msgs`.
 - **Parameters**: `params/safety_position_controller_parameters.yaml` (generate_parameter_library), plumbed into `SafetyPipeline::Config` in `setup_pipeline_on_activate()`.
 

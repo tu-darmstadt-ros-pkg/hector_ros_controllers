@@ -79,6 +79,7 @@ add_library(
   src/safety_position_controller/collision_observer.cpp
   src/safety_position_controller/safety_diagnostics.cpp
   src/safety_position_controller/collision_checker.cpp
+  src/safety_position_controller/collision_visualizer.cpp
   src/gripper_position_effort_controller.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
@@ -173,6 +174,15 @@ if(BUILD_TESTING)
     test_collision_checker ${PROJECT_NAME}::controllers_test_doubles
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_collision_checker PRIVATE ${DEFS})
+
+  ament_add_gmock(test_collision_visualizer test/test_collision_visualizer.cpp)
+  target_include_directories(
+    test_collision_visualizer PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                      ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_collision_visualizer ${PROJECT_NAME}::controllers_test_doubles
+    ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_collision_visualizer PRIVATE ${DEFS})
 
   ament_add_gmock(test_safety_forward_controller
                   test/test_safety_forward_controller.cpp)

@@ -107,26 +107,26 @@ CollisionObserver::observe( const bool checks_active, const std::vector<double> 
   return snapshot;
 }
 
-void CollisionObserver::publishDirectionalInfo( const Eigen::VectorXd &velocity,
-                                                const double safety_zone )
+const std::vector<double> &CollisionObserver::directionalInfo( const Eigen::VectorXd &velocity )
 {
-  if ( !observed_ || !checker_ ) {
-    return;
+  const std::size_t num_pairs = checker_ ? checker_->getNumCollisionPairs() : 0;
+  directional_.assign( num_pairs, std::numeric_limits<double>::quiet_NaN() );
+  if ( !observed_ ) {
+    return directional_;
   }
-  const std::size_t num_pairs = checker_->getNumCollisionPairs();
-  std::vector<double> per_pair_dir( num_pairs, std::numeric_limits<double>::quiet_NaN() );
   for ( const auto &pi : lastSafetyZonePairs() ) {
-    if ( pi.pair_index < num_pairs ) {
-      double dot = 0.0;
-      for ( size_t i = 0; i < joint_v_index_.size(); ++i ) {
-        if ( joint_v_index_[i] >= 0 && joint_v_index_[i] < pi.gradient.size() ) {
-          dot += pi.gradient[joint_v_index_[i]] * velocity[static_cast<Eigen::Index>( i )];
-        }
-      }
-      per_pair_dir[pi.pair_index] = dot;
+    if ( pi.pair_index >= num_pairs ) {
+      continue;
     }
+    double dot = 0.0;
+    for ( size_t i = 0; i < joint_v_index_.size(); ++i ) {
+      if ( joint_v_index_[i] >= 0 && joint_v_index_[i] < pi.gradient.size() ) {
+        dot += pi.gradient[joint_v_index_[i]] * velocity[static_cast<Eigen::Index>( i )];
+      }
+    }
+    directional_[pi.pair_index] = dot;
   }
-  checker_->setDirectionalInfo( per_pair_dir, safety_zone );
+  return directional_;
 }
 
 } // namespace safety_position_controller

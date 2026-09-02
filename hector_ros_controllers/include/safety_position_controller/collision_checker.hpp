@@ -7,8 +7,6 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
-#include <realtime_tools/realtime_publisher.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/geometry.hpp>
@@ -23,8 +21,6 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-
-// #define SAFETY_CC_ENABLE_TIMING // TODO: remove when no longer needed for optimization
 
 /// Result of a collision query: collision flag + minimum clearance.
 struct CollisionResult {
@@ -51,11 +47,12 @@ public:
    * @param node lifecycle node (pub/log/time)
    * @param collision_padding min allowed distance [m]
    * @param collision_cache_epsilon cache threshold on max(q - q_last) [rad/m] -> reuse last distances
-   * @param pub_debug_geometry publish MarkerArray on ~/debug_collision_geometry
+   * @param compute_all_nearest_points compute nearest points for every pair, not just
+   * the safety-zone ones (needed to draw all distance lines)
    */
   explicit CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                              double collision_padding = 0.0, double collision_cache_epsilon = 1e-6,
-                             bool pub_debug_geometry = false );
+                             bool compute_all_nearest_points = false );
 
   /**
    * @brief Init from URDF/SRDF XML.
@@ -169,6 +166,21 @@ public:
    */
   std::pair<std::string, std::string> getPairNames( std::size_t pair_index ) const;
 
+  /// Whether nearest points are computed for every pair (full marker visualization)
+  /// rather than only the safety-zone pairs.
+  void setComputeAllNearestPoints( bool enable ) { compute_all_nearest_points_ = enable; }
+
+  // ---- Read-only views of the last check, for visualization ----
+  const pinocchio::GeometryModel &geometryModel() const { return geom_model_; }
+  const pinocchio::GeometryData &geometryData() const { return geom_data_; }
+  const CollisionResult &lastResult() const { return last_collision_result_; }
+  /// Per pair: whether its distance (and nearest points) were recomputed this cycle.
+  /// Broadphase pruning leaves pruned pairs holding stale data.
+  const std::vector<bool> &nearestPointsFresh() const { return nearest_points_fresh_; }
+  /// URDF root link; FK is relative to it, so markers are published in this frame.
+  const std::string &rootFrame() const { return root_frame_; }
+  double collisionPadding() const { return collision_padding_; }
+
   /**
    * @brief Set collision padding [m].
    * @param collision_padding new threshold
@@ -176,47 +188,10 @@ public:
   void updateCollisionPadding( double collision_padding );
 
   /**
-   * @brief Toggle RViz debug publishing.
-   * @param pub_debug_geometry on/off
-   */
-  void updateDoDebugVisualization( bool pub_debug_geometry );
-
-  /**
    * @brief Set cache epsilon
    * @param epsilon new threshold
    */
   void updateCollisionCacheEpsilon( double epsilon );
-
-  /**
-   * @brief Directional derivative of one pair for marker coloring.
-   * @param derivatives per-pair values as set by setDirectionalInfo()
-   * @param num_pairs number of collision pairs the values must describe
-   * @param pair_index pair to look up
-   * @return the derivative, or NaN if @p derivatives does not describe the current pairs
-   */
-  static double pairDirection( const std::vector<double> &derivatives, std::size_t num_pairs,
-                               std::size_t pair_index )
-  {
-    return derivatives.size() == num_pairs && pair_index < num_pairs
-               ? derivatives[pair_index]
-               : std::numeric_limits<double>::quiet_NaN();
-  }
-
-  /**
-   * @brief Set per-pair directional derivatives for visualization coloring.
-   * Must be called before the next collision check if you want colors to reflect motion direction.
-   * @param derivatives one value per collision pair; NaN = no info, >=0 = moving away, <0 = moving closer
-   * @param safety_zone_threshold the threshold used to classify pairs into safety zone vs safe
-   */
-  void setDirectionalInfo( const std::vector<double> &derivatives, double safety_zone_threshold );
-
-  /**
-   * @brief Toggle lightweight collision distance visualization.
-   * Publishes only safety-zone and collision distance lines via a realtime publisher.
-   * Ignored when full debug visualization is active.
-   * @param enable on/off
-   */
-  void updatePublishCollisionDistances( bool enable );
 
   /**
    * @brief Enable/disable broadphase AABB-tree acceleration for distance queries.
@@ -261,24 +236,12 @@ private:
   Eigen::VectorXd computePairGradient( std::size_t pair_k );
 
   /**
-   * @brief Publish geometry and nearest-point markers with namespace-separated categories.
-   */
-  void publishMarkers() const;
-
-  /**
-   * @brief Publish lightweight distance-only markers for safety zone and collision pairs.
-   * Uses realtime publisher (non-blocking). Skips geometry markers and safe-pair lines.
-   */
-  void publishMinimalMarkers();
-
-  /**
    * @brief Keep only pairs attached to controlled joints (and ancestors).
    * @param controlled_joints names defining relevance
    */
   void filterCollisionPairs( const std::vector<std::string> &controlled_joints );
 
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
 
   pinocchio::Model model_;
   pinocchio::Data data_;
@@ -293,22 +256,18 @@ private:
   double collision_cache_epsilon_{ 1e-6 };
   double safety_zone_threshold_{ 0.0 };    ///< 0 = no gradient computation
   std::size_t max_safety_zone_pairs_{ 0 }; ///< cap on returned pairs; 0 = unlimited
-  bool pub_debug_geometry_{ false };
-  bool pub_collision_distances_{ false };
-  std::shared_ptr<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>> rt_markers_pub_;
+  /// Compute nearest points for EVERY pair (needed to draw all distance lines), not
+  /// just the safety-zone ones.
+  bool compute_all_nearest_points_{ false };
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;
 
-  /// Per-pair: true if nearest_points were recomputed this cycle. Broadphase pruning leaves pruned
-  /// pairs holding stale data, so publishMarkers() must skip pairs that are not fresh.
+  /// Per-pair: true if nearest_points were recomputed this cycle. Broadphase pruning
+  /// leaves pruned pairs holding stale data (see nearestPointsFresh()).
   std::vector<bool> nearest_points_fresh_;
 
   /// Model root link (URDF root); frame_id for markers since FK is relative to it. Defaults to "base_link".
   std::string root_frame_{ "base_link" };
-
-  // Per-pair directional derivatives for visualization (set by controller via setDirectionalInfo)
-  std::vector<double> viz_directional_derivatives_; ///< one per collision pair; NaN = no info
-  double viz_safety_zone_threshold_{ 0.0 };
 
   // Pre-allocated Jacobian workspace (sized in initFromXml)
   Eigen::MatrixXd J1_workspace_; ///< 6 × nv
@@ -322,20 +281,6 @@ private:
   bool use_broadphase_{ true };
   using BroadPhaseManager = pinocchio::BroadPhaseManagerTpl<coal::DynamicAABBTreeCollisionManager>;
   std::unique_ptr<BroadPhaseManager> broadphase_manager_;
-
-#ifdef SAFETY_CC_ENABLE_TIMING
-  struct TimingStats {
-    double fk_us{ 0 };
-    double placement_us{ 0 };
-    double distance_us{ 0 };
-    double jacobian_us{ 0 };
-    double gradient_us{ 0 };
-    double total_us{ 0 };
-    int count{ 0 };
-    std::size_t num_safety_zone_pairs{ 0 };
-  };
-  TimingStats timing_stats_;
-#endif
 };
 
 #endif // COLLISION_CHECKER_HPP

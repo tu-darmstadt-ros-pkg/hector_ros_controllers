@@ -60,9 +60,10 @@ public:
                     bool state_valid, const Eigen::VectorXd &commanded_positions,
                     double safety_zone_threshold );
 
-  /// Push per-pair directional info (gradient · velocity) to the checker for RViz
-  /// distance-line coloring (green = moving away). No-op without a valid observation.
-  void publishDirectionalInfo( const Eigen::VectorXd &velocity, double safety_zone );
+  /// Per-pair gradient · velocity for the marker coloring (green = moving apart), one
+  /// entry per collision pair; all NaN without a valid observation. Valid until the
+  /// next call.
+  const std::vector<double> &directionalInfo( const Eigen::VectorXd &velocity );
 
   double lastMinDistance() const { return last_min_distance_; }
   std::size_t lastMinDistancePairIndex() const { return last_min_distance_pair_index_; }
@@ -85,6 +86,7 @@ private:
   std::vector<CollisionChecker::JointQSlot> commanded_slots_; ///< per controlled_joints_
   Eigen::VectorXd q_;                                         ///< check configuration
   std::vector<SafetyPipeline::PairCandidate> pair_candidates_;
+  std::vector<double> directional_; ///< workspace for directionalInfo()
   const std::vector<CollisionResult::PairInfo> *last_safety_zone_pairs_{ nullptr };
   double last_min_distance_{ std::numeric_limits<double>::max() };
   std::size_t last_min_distance_pair_index_{ std::numeric_limits<std::size_t>::max() };

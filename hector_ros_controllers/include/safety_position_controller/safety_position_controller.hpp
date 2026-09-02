@@ -10,6 +10,7 @@
 #include <realtime_tools/realtime_buffer.hpp>
 #include <safety_position_controller/collision_checker.hpp>
 #include <safety_position_controller/collision_observer.hpp>
+#include <safety_position_controller/collision_visualizer.hpp>
 #include <safety_position_controller/joint_info.hpp>
 #include <safety_position_controller/safety_diagnostics.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
@@ -224,6 +225,7 @@ private:
   // ---- Collision checking ----
   std::unique_ptr<CollisionChecker> collision_checker_;   ///< optional self-collision checker
   std::unique_ptr<CollisionObserver> collision_observer_; ///< per-cycle observation + edge state
+  std::unique_ptr<CollisionVisualizer> collision_visualizer_; ///< RViz markers; null when disabled
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
   /// SRDF XML (semantic). Written by the subscriber callback, read by on_configure —
   /// safe only because the node runs on a single-threaded executor.
