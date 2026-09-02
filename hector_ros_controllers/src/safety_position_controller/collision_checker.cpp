@@ -296,37 +296,52 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
   return checkCollisionQ( buildConfiguration( joint_positions ) );
 }
 
+CollisionChecker::JointQSlot CollisionChecker::getJointQSlot( const std::string &joint_name ) const
+{
+  const auto it = name_to_id_.find( joint_name );
+  if ( it == name_to_id_.end() ) {
+    return {};
+  }
+  const pinocchio::JointIndex jid = it->second;
+  const int nq_j = model_.joints[jid].nq();
+  const int nv_j = model_.joints[jid].nv();
+  if ( nq_j == 1 ) { // revolute / prismatic
+    return { model_.idx_qs[jid], false };
+  }
+  if ( nq_j == 2 && nv_j == 1 ) { // continuous: unit complex [cos, sin]
+    return { model_.idx_qs[jid], true };
+  }
+  return {};
+}
+
+void CollisionChecker::writeJointPosition( Eigen::VectorXd &q, const JointQSlot &slot,
+                                           const double position )
+{
+  if ( slot.index < 0 ) {
+    return;
+  }
+  if ( slot.continuous ) {
+    q[slot.index] = std::cos( position );
+    q[slot.index + 1] = std::sin( position );
+  } else {
+    q[slot.index] = position;
+  }
+}
+
 Eigen::VectorXd
 CollisionChecker::buildConfiguration( const std::unordered_map<std::string, double> &joint_positions )
 {
   // transforms the joint positions into the pinocchio format
   Eigen::VectorXd q = q_default_;
   for ( const auto &[name, position] : joint_positions ) {
-    const auto it = name_to_id_.find( name );
-    if ( it == name_to_id_.end() ) {
+    const JointQSlot slot = getJointQSlot( name );
+    if ( slot.index < 0 ) {
       RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
-                            "Unknown joint '%s' (ignored).", name.c_str() );
+                            "Joint '%s' is unknown or has an unsupported DoF layout (ignored).",
+                            name.c_str() );
       continue;
     }
-    const pinocchio::JointIndex jid = it->second;
-    const int nq_j = model_.joints[jid].nq(); // number of position DoF for this joint
-    const int nv_j = model_.joints[jid].nv(); // number of velocity DoF for this joint
-    const int iq = model_.idx_qs[jid];        // starting index in q vector
-    const double alpha = position;
-
-    if ( nq_j == 1 ) { // e.g prismatic or revolute with 1 DoF
-      q[iq] = alpha;
-    } else if ( nq_j == 2 && nv_j == 1 ) { // e.g. continuous Joint !!
-      // Revolute Continuous Joints represented as unit complex [cos(α), sin(α)]
-      const double c = std::cos( alpha );
-      const double s = std::sin( alpha );
-      q[iq] = c;
-      q[iq + 1] = s;
-    } else {
-      RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
-                            "Joint '%s' (nq=%d,nv=%d) not supported; keeping default.",
-                            model_.names[jid].c_str(), nq_j, nv_j );
-    }
+    writeJointPosition( q, slot, position );
   }
   return q;
 }

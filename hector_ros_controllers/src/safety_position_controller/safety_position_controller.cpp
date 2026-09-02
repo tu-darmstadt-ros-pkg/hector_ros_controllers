@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
@@ -188,6 +189,7 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   joint_index_.assign( n, -1 );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   hold_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  all_positions_.assign( all_joint_names_.size(), std::numeric_limits<double>::quiet_NaN() );
 
   if ( !gather_joint_indices() ) {
     RCLCPP_ERROR( get_node()->get_logger(),
@@ -418,10 +420,6 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
     // failed collision-state read below.
     note_state_unobservable( period );
   } else {
-    // The park after a prolonged unobservable period happens on this first recovered
-    // cycle; publish it like any other event.
-    status_event |= state_read_failure_time_ >= params_.state_read_timeout;
-
     status_event |= run_safety_pipeline( period );
     if ( params_.set_current_limits ) {
       write_current_limits();
@@ -458,26 +456,43 @@ void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &
                            "rebase and park when it recovers.",
                            state_read_failure_time_ );
     pipeline_->invalidate();
+    park_on_recovery_pending_ = true;
   }
+}
+
+bool SafetyPositionController::take_recovery_event()
+{
+  state_read_failure_time_ = 0.0;
+  return std::exchange( park_on_recovery_pending_, false );
 }
 
 bool SafetyPositionController::read_current_positions()
 {
+  // One read per cycle for every joint: the controlled ones drive the pipeline, the
+  // rest complete the collision-check configuration. Reading them separately could
+  // hand the two consumers different snapshots of the same robot.
+  all_positions_.assign( all_joint_names_.size(), std::numeric_limits<double>::quiet_NaN() );
+  all_state_valid_ = state_interfaces_.size() >= all_joint_names_.size();
+  for ( size_t i = 0; i < all_joint_names_.size() && i < state_interfaces_.size(); ++i ) {
+    const auto opt = state_interfaces_[i].get_optional();
+    if ( opt.has_value() && std::isfinite( *opt ) ) {
+      all_positions_[i] = *opt;
+    } else {
+      all_state_valid_ = false;
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                            "Joint state of '%s' is unreadable (busy or non-finite).",
+                            all_joint_names_[i].c_str() );
+    }
+  }
+
+  // Only the controlled joints gate the cycle; the rest merely make the collision state
+  // observable (handled via all_state_valid_).
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    const auto opt = state_interfaces_[static_cast<size_t>( joint_index_[i] )].get_optional();
-    if ( !opt.has_value() ) {
-      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                            throttle_logging_msg, "Joint state of '%s' is busy; skipping cycle.",
-                            params_.joints[i].c_str() );
+    const double position = all_positions_[static_cast<size_t>( joint_index_[i] )];
+    if ( !std::isfinite( position ) ) {
       return false;
     }
-    if ( !std::isfinite( opt.value() ) ) {
-      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
-                             throttle_logging_msg, "Joint state of '%s' is %f; holding position.",
-                             params_.joints[i].c_str(), opt.value() );
-      return false;
-    }
-    current_positions_[i] = opt.value();
+    current_positions_[i] = position;
   }
   return true;
 }
@@ -586,9 +601,9 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
   }
 
   // ---- Collision observation at the commanded configuration ----
-  const auto snapshot = collision_observer_->observe( collision_checks_active, state_interfaces_,
-                                                      pipeline_->commandedPositions(),
-                                                      params_.collision_safety_zone );
+  const auto snapshot =
+      collision_observer_->observe( collision_checks_active, all_positions_, all_state_valid_,
+                                    pipeline_->commandedPositions(), params_.collision_safety_zone );
   if ( snapshot.collision_started ) {
     const std::string pairs_str = diagnostics_->formatCollisionPairs(
         collision_observer_->lastSafetyZonePairs(), params_.collision_padding,
@@ -607,7 +622,8 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
                           "Failed to setup collision checking. Braking to a stop." );
     note_state_unobservable( period );
   } else {
-    state_read_failure_time_ = 0.0;
+    // Recovered: the pipeline parks on this cycle, which is an event worth publishing.
+    status_event |= take_recovery_event();
   }
 
   // ---- Solve, integrate, stall/park ----

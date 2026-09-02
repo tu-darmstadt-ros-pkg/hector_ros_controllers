@@ -3,11 +3,9 @@
 #include <cstddef>
 #include <limits>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Core>
-#include <hardware_interface/loaned_state_interface.hpp>
 
 #include <safety_position_controller/collision_checker.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
@@ -49,16 +47,18 @@ public:
   /**
    * @brief Run the collision check at the commanded configuration.
    * When @p checks_active is false (bypass / checks disabled), resets the edge state
-   * and caches instead. observation.state_valid=false means the joint state reads
-   * failed and the safety state is unobservable this cycle.
+   * and caches instead.
    * @param checks_active whether collision checking should run this cycle
-   * @param state_interfaces position state interfaces in all_joint_names order
+   * @param measured_positions positions in all_joint_names order; the controlled joints
+   * are overlaid with @p commanded_positions
+   * @param state_valid false when a measured position could not be read: the safety
+   * state is unobservable, so no check runs (reported back in the observation)
    * @param commanded_positions commanded configuration of the controlled joints
    * @param safety_zone_threshold outer zone distance for gradient requests [m]
    */
-  Snapshot observe( bool checks_active,
-                    std::vector<hardware_interface::LoanedStateInterface> &state_interfaces,
-                    const Eigen::VectorXd &commanded_positions, double safety_zone_threshold );
+  Snapshot observe( bool checks_active, const std::vector<double> &measured_positions,
+                    bool state_valid, const Eigen::VectorXd &commanded_positions,
+                    double safety_zone_threshold );
 
   /// Push per-pair directional info (gradient · velocity) to the checker for RViz
   /// distance-line coloring (green = moving away). No-op without a valid observation.
@@ -79,7 +79,11 @@ private:
   std::vector<std::string> controlled_joints_;
   std::vector<int> joint_v_index_;
 
-  std::unordered_map<std::string, double> cc_positions_; ///< name→position map for the check
+  // Configuration-vector slots resolved once at construction: the per-cycle check needs
+  // no name lookups.
+  std::vector<CollisionChecker::JointQSlot> measured_slots_;  ///< per all_joint_names_
+  std::vector<CollisionChecker::JointQSlot> commanded_slots_; ///< per controlled_joints_
+  Eigen::VectorXd q_;                                         ///< check configuration
   std::vector<SafetyPipeline::PairCandidate> pair_candidates_;
   const std::vector<CollisionResult::PairInfo> *last_safety_zone_pairs_{ nullptr };
   double last_min_distance_{ std::numeric_limits<double>::max() };

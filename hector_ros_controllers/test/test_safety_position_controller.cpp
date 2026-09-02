@@ -1793,7 +1793,10 @@ TEST_F( SafetyPositionControllerCollisionTest, ProlongedUncontrolledJointOutageP
   configureWithSrdf();
   setupHardwareInterfaces();
   findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  int publishes = 0;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).WillRepeatedly( [&publishes]( auto & ) {
+    ++publishes;
+  } );
   activateController();
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
@@ -1809,15 +1812,23 @@ TEST_F( SafetyPositionControllerCollisionTest, ProlongedUncontrolledJointOutageP
 
   // default state_read_timeout is 0.1 s = 10 cycles at the 100 Hz test rate
   setStateValue( "joint4", std::numeric_limits<double>::quiet_NaN() );
+  publishes = 0;
   for ( int i = 0; i < 20; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
     setStateValue( "joint1", hw_cmd_values_[0] );
   }
+  EXPECT_LE( publishes, 2 ) << "the fault is an event, not a per-cycle publish";
   setStateValue( "joint4", 0.0 );
 
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
   EXPECT_TRUE( controller_->pipeline_->parked() )
       << "an uncontrolled-joint outage must park on recovery like a controlled one";
+
+  publishes = 0;
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+  EXPECT_EQ( publishes, 0 ) << "the recovery park publishes once, not every cycle";
 }
 
 TEST_F( SafetyPositionControllerCollisionTest, QpModeRampsAndReachesTarget )

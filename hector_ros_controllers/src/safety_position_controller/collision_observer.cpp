@@ -13,6 +13,18 @@ CollisionObserver::CollisionObserver( CollisionChecker *checker,
       controlled_joints_( std::move( controlled_joints ) ),
       joint_v_index_( std::move( joint_v_index ) )
 {
+  if ( !checker_ ) {
+    return;
+  }
+  q_ = checker_->neutralConfiguration();
+  measured_slots_.reserve( all_joint_names_.size() );
+  for ( const auto &name : all_joint_names_ ) {
+    measured_slots_.push_back( checker_->getJointQSlot( name ) );
+  }
+  commanded_slots_.reserve( controlled_joints_.size() );
+  for ( const auto &name : controlled_joints_ ) {
+    commanded_slots_.push_back( checker_->getJointQSlot( name ) );
+  }
 }
 
 const std::vector<CollisionResult::PairInfo> &CollisionObserver::lastSafetyZonePairs() const
@@ -37,9 +49,8 @@ void CollisionObserver::reset()
 }
 
 CollisionObserver::Snapshot
-CollisionObserver::observe( const bool checks_active,
-                            std::vector<hardware_interface::LoanedStateInterface> &state_interfaces,
-                            const Eigen::VectorXd &commanded_positions,
+CollisionObserver::observe( const bool checks_active, const std::vector<double> &measured_positions,
+                            const bool state_valid, const Eigen::VectorXd &commanded_positions,
                             const double safety_zone_threshold )
 {
   Snapshot snapshot;
@@ -52,34 +63,30 @@ CollisionObserver::observe( const bool checks_active,
     return snapshot;
   }
 
-  // Fewer interfaces than joints would silently check stale positions — fail safe.
-  bool state_valid = state_interfaces.size() >= all_joint_names_.size();
-  for ( size_t i = 0; i < all_joint_names_.size() && i < state_interfaces.size(); ++i ) {
-    const auto opt = state_interfaces[i].get_optional();
-    // A non-finite position makes the safety state just as unobservable as a busy
-    // handle; it must brake here instead of reaching the checker as a fake collision.
-    if ( opt.has_value() && std::isfinite( *opt ) ) {
-      cc_positions_[all_joint_names_[i]] = *opt;
-    } else {
-      state_valid = false;
-    }
-  }
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    cc_positions_[controlled_joints_[i]] = commanded_positions[static_cast<Eigen::Index>( i )];
-  }
-
-  snapshot.observation.state_valid = state_valid;
-  if ( !state_valid ) {
+  // Fewer positions than joints would silently check stale ones — fail safe.
+  snapshot.observation.state_valid =
+      state_valid && measured_positions.size() >= all_joint_names_.size();
+  if ( !snapshot.observation.state_valid ) {
     // Nothing was observed this cycle: the caches must not keep reporting the
     // pre-fault distances as current.
     clearObservation();
     return snapshot;
   }
 
+  // Measured everywhere, overlaid with the commanded configuration of the controlled
+  // joints — the check must run at what is about to be written.
+  for ( size_t i = 0; i < all_joint_names_.size(); ++i ) {
+    CollisionChecker::writeJointPosition( q_, measured_slots_[i], measured_positions[i] );
+  }
+  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+    CollisionChecker::writeJointPosition( q_, commanded_slots_[i],
+                                          commanded_positions[static_cast<Eigen::Index>( i )] );
+  }
+
   observed_ = true;
   // Always request gradients for the full zone: they ARE the constraints.
   checker_->setSafetyZoneThreshold( safety_zone_threshold );
-  const auto &cc_result = checker_->checkCollision( cc_positions_ );
+  const auto &cc_result = checker_->checkCollisionQ( q_ );
   last_min_distance_ = cc_result.min_distance;
   last_min_distance_pair_index_ = cc_result.min_distance_pair_index;
   last_safety_zone_pairs_ = &cc_result.safety_zone_pairs;

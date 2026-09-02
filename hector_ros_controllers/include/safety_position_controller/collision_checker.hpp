@@ -103,6 +103,25 @@ public:
    */
   void setMaxSafetyZonePairs( std::size_t max_pairs );
 
+  /// Where a joint's position lives in the configuration vector. Resolve once (name
+  /// lookup) and reuse every cycle; index < 0 means the joint is not in the model.
+  struct JointQSlot {
+    int index{ -1 };
+    bool continuous{ false }; ///< stored as the unit complex [cos, sin]
+  };
+
+  /**
+   * @brief Resolve a joint's configuration-vector slot by name.
+   * @return the slot; index < 0 if the joint is unknown or has an unsupported DoF layout
+   */
+  JointQSlot getJointQSlot( const std::string &joint_name ) const;
+
+  /// Write one joint position into a configuration vector; no-op for an invalid slot.
+  static void writeJointPosition( Eigen::VectorXd &q, const JointQSlot &slot, double position );
+
+  /// Neutral configuration of the model (size model_.nq); the seed for building q.
+  const Eigen::VectorXd &neutralConfiguration() const { return q_default_; }
+
   /**
    * @brief Build a full pinocchio configuration vector from a name→position map.
    * Unknown joints are ignored (warn-throttled); unset joints keep their neutral value.

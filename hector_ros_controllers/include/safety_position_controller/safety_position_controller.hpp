@@ -132,8 +132,9 @@ public:
 
 private:
   /**
-   * @brief Read current joint positions for configured joints.
-   * @return false if a state handle was locked by another thread or reported a
+   * @brief Read every joint's position once into all_positions_ (and the controlled
+   * ones into current_positions_), setting all_state_valid_ for the collision check.
+   * @return false if a CONTROLLED joint was locked by another thread or reported a
    * non-finite position (skip the cycle and hold)
    */
   bool read_current_positions();
@@ -188,6 +189,13 @@ private:
    */
   void note_state_unobservable( const rclcpp::Duration &period );
 
+  /**
+   * @brief Clear the unobservable-state accounting on a good cycle.
+   * @return true exactly once after an escalation, so the resulting park is published
+   * as a single event instead of on every cycle
+   */
+  bool take_recovery_event();
+
   // ---- Configuration / mode ----
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
 
@@ -230,9 +238,14 @@ private:
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> current_positions_; ///< latest measured positions
   std::vector<double> hold_positions_;    ///< positions to hold during E-stop
-  /// Consecutive time [s] without a valid joint-state read; past
+  /// Latest measured positions of ALL joints (aligned with all_joint_names_), read once
+  /// per cycle so the pipeline and the collision check see the same robot.
+  std::vector<double> all_positions_;
+  bool all_state_valid_{ false }; ///< every entry of all_positions_ was read this cycle
+  /// Consecutive time [s] in which the safety state could not be observed; past
   /// params_.state_read_timeout the pipeline is invalidated (rebase + park on recovery).
   double state_read_failure_time_{ 0.0 };
+  bool park_on_recovery_pending_{ false }; ///< an escalation happened; publish its park once
 
   // ---- Safety pipeline ----
   std::unique_ptr<SafetyPipeline> pipeline_; ///< ROS-free QP safety pipeline
