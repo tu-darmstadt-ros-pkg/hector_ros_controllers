@@ -101,8 +101,6 @@ private:
     bool parked{ false };
   };
 
-  void updateDebugPublishers( bool enable );
-
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
   const Params &params_;
   const CollisionChecker *checker_; ///< non-owning, for pair-name resolution
@@ -112,6 +110,8 @@ private:
     std::vector<std::string> joint_names;
     std::vector<double> stiff_current_limits;
     std::vector<double> compliant_current_limits;
+    bool current_limits_enabled{ false };
+    bool collision_check_enabled{ false };
   };
   realtime_tools::RealtimeThreadSafeBox<StatusConfig> config_box_;
 
@@ -121,6 +121,7 @@ private:
   std::atomic<bool> qp_debug_enabled_{ false };
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>::SharedPtr qp_debug_pub_;
 
+  std::atomic<bool> debug_js_enabled_{ false };
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
 

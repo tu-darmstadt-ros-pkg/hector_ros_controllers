@@ -17,12 +17,22 @@ SafetyDiagnostics::SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr
       node_->create_publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>(
           "~/status", qos_latched );
 
-  // Debug joint state publishers (dynamically reconfigurable)
+  // Debug joint state publishers (dynamically reconfigurable). Like ~/qp_debug below,
+  // the publishers are created once and only the gate is toggled: destroying them from
+  // the parameter callback would free them under the control thread's publish call.
   param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( node_ );
-  updateDebugPublishers( params_.publish_debug_joint_states );
+  debug_in_js_pub_ =
+      node_->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
+  debug_out_js_pub_ =
+      node_->create_publisher<sensor_msgs::msg::JointState>( "~/debug_out_joint_states", 10 );
+  debug_js_enabled_.store( params_.publish_debug_joint_states, std::memory_order_relaxed );
   cb_handle_debug_pubs_ = param_subscriber_->add_parameter_callback(
       "publish_debug_joint_states",
-      [this]( const rclcpp::Parameter &p ) { updateDebugPublishers( p.as_bool() ); },
+      [this]( const rclcpp::Parameter &p ) {
+        debug_js_enabled_.store( p.as_bool(), std::memory_order_relaxed );
+        RCLCPP_INFO( node_->get_logger(), "Debug joint state publishing %s",
+                     p.as_bool() ? "enabled" : "disabled" );
+      },
       node_->get_name() );
 
   // QP debug introspection publisher (dynamically reconfigurable)
@@ -65,7 +75,11 @@ void SafetyDiagnostics::configure( std::vector<std::string> joint_names,
                                    std::vector<double> compliant_current_limits )
 {
   config_box_.set( StatusConfig{ std::move( joint_names ), std::move( stiff_current_limits ),
-                                 std::move( compliant_current_limits ) } );
+                                 std::move( compliant_current_limits ), params_.set_current_limits,
+                                 params_.check_self_collisions } );
+  // The snapshot outlives a deactivation, so drop it here: the first status of a new
+  // activation must not report the previous one's park/stall state.
+  rt_status_box_.set( StatusSnapshot{} );
 }
 
 void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
@@ -74,12 +88,13 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
     return;
   }
   const StatusSnapshot snap = rt_status_box_.get();
+  const StatusConfig config = config_box_.get();
   hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus msg;
   msg.header.stamp = node_->now();
   msg.safety_bypass_active = flags.bypass_active;
   msg.compliant_mode = flags.compliant_mode;
-  msg.current_limits_enabled = params_.set_current_limits;
-  msg.collision_check_enabled = params_.check_self_collisions;
+  msg.current_limits_enabled = config.current_limits_enabled;
+  msg.collision_check_enabled = config.collision_check_enabled;
   msg.estop_engaged = flags.estop_engaged;
   msg.min_collision_distance = snap.min_distance;
   msg.num_pairs_in_safety_zone = snap.num_pairs_in_safety_zone;
@@ -93,8 +108,7 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
   msg.parked = snap.parked;
 
   // Populate active current limits per joint (only meaningful when current_limits_enabled)
-  if ( params_.set_current_limits ) {
-    const StatusConfig config = config_box_.get();
+  if ( config.current_limits_enabled ) {
     msg.joint_names = config.joint_names;
     msg.current_limits =
         flags.compliant_mode ? config.compliant_current_limits : config.stiff_current_limits;
@@ -167,7 +181,7 @@ void SafetyDiagnostics::maybePublishQpDebug( const SafetyPipeline &pipeline,
 
 void SafetyDiagnostics::publishJointStateIn( const std::vector<double> &positions )
 {
-  if ( !debug_in_js_pub_ ) {
+  if ( !debug_js_enabled_.load( std::memory_order_relaxed ) ) {
     return;
   }
   sensor_msgs::msg::JointState msg;
@@ -179,7 +193,7 @@ void SafetyDiagnostics::publishJointStateIn( const std::vector<double> &position
 
 void SafetyDiagnostics::publishJointStateOut( const std::vector<double> &positions )
 {
-  if ( !debug_out_js_pub_ ) {
+  if ( !debug_js_enabled_.load( std::memory_order_relaxed ) ) {
     return;
   }
   sensor_msgs::msg::JointState msg;
@@ -261,24 +275,6 @@ std::string SafetyDiagnostics::formatCollisionPairs( const std::vector<Collision
   std::ostringstream fallback;
   fallback << "'" << name_a << "' <-> '" << name_b << "'";
   return fallback.str();
-}
-
-void SafetyDiagnostics::updateDebugPublishers( const bool enable )
-{
-  if ( enable ) {
-    if ( !debug_in_js_pub_ ) {
-      debug_in_js_pub_ =
-          node_->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
-    }
-    if ( !debug_out_js_pub_ ) {
-      debug_out_js_pub_ =
-          node_->create_publisher<sensor_msgs::msg::JointState>( "~/debug_out_joint_states", 10 );
-    }
-    RCLCPP_INFO( node_->get_logger(), "Debug joint state publishers enabled" );
-  } else {
-    debug_in_js_pub_.reset();
-    debug_out_js_pub_.reset();
-  }
 }
 
 } // namespace safety_position_controller
