@@ -1004,6 +1004,59 @@ TEST_F( SafetyPositionControllerTest, ProlongedNonFiniteJointStateParksOnRecover
       << "recovery after prolonged non-finite feedback must park";
 }
 
+TEST_F( SafetyPositionControllerTest, ProlongedMeasurementDivergenceParksOnRecovery )
+{
+  // A joint that leaves on its own (backdriven, slipping, a re-homed encoder) is not
+  // something the command may chase: the self-collision check runs at the commanded
+  // configuration, so a command that keeps steering a robot which is somewhere else is
+  // validating a fiction. A lasting divergence must rebase onto the measured state and
+  // park, exactly as an unreadable joint state does.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  // Being blocked is not divergence: the command leads by at most the leash and the
+  // joint keeps being pushed, which is what a loaded flipper needs.
+  for ( int i = 0; i < 20; ++i ) {
+    setStateValue( "joint1", 0.0 ); // hardware refuses to follow
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    ASSERT_FALSE( controller_->pipeline_->parked() ) << "a blocked joint must keep pushing";
+  }
+
+  // The joint being dragged well past the leash is. Default tracking_leash is 0.5, so
+  // 1.5 rad away is past the bound the leash can explain.
+  for ( int i = 0; i < 20; ++i ) {
+    setStateValue( "joint1", -1.5 );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+  setStateValue( "joint1", -1.5 );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "a lasting divergence must rebase and park, not keep steering a stale model";
+
+  // Parked at the measured state, and the pre-divergence reference stays abandoned.
+  for ( int i = 0; i < 10; ++i ) {
+    setStateValue( "joint1", -1.5 );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], -1.5, 1e-6 ) << "held at where the joint actually is";
+  }
+}
+
 TEST_F( SafetyPositionControllerTest, EstopPulseDuringStateReadOutageIsHonored )
 {
   // An E-stop must not need working joint-state reads: an engage (or a whole

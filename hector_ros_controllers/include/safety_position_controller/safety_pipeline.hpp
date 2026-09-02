@@ -18,9 +18,9 @@ namespace safety_position_controller
  * @brief ROS-free per-cycle safety pipeline between the processed reference and the
  * commanded positions.
  *
- * Owns the desired velocity + reference leash, position-limit and per-joint deviation
- * boxes, collision damper constraint assembly, the QP solve (SafetyQpLimiter),
- * integration, the tracking leash (anti-windup) and the stall/park state machine.
+ * Owns the desired velocity + reference leash, the position-limit, per-joint deviation
+ * and tracking-leash boxes, collision damper constraint assembly, the QP solve
+ * (SafetyQpLimiter), integration and the stall/park state machine.
  * Reports events instead of logging; the caller (controller) translates them.
  *
  * Per-cycle protocol (the collision check must run at the commanded configuration,
@@ -28,6 +28,9 @@ namespace safety_position_controller
  *   1. prepare(reference, measured, bypass)  → rebase, v_des, boxes, park hold/resume
  *   2. caller evaluates collisions at commandedPositions()
  *   3. step(observation)                     → constraints, solve, integrate, stall/park
+ *
+ * Every bound is a box the QP solves against, so the configuration that was checked in
+ * step 2 is the one step 3 writes.
  *
  * Not thread-safe; call from the control thread only.
  */
@@ -44,8 +47,10 @@ public:
     /// Controlled joint index → collision-model velocity-space index (-1 if absent).
     /// May be empty when no collision model is used.
     std::vector<int> joint_v_index;
-    double reference_leash_time{ 0.3 };      ///< bounds reference run-ahead; 0 disables
-    double tracking_leash{ 0.5 };            ///< anti-windup vs measured [rad]; 0 disables
+    double reference_leash_time{ 0.3 }; ///< bounds reference run-ahead; 0 disables
+    /// Anti-windup box on |command - measured| [rad]; 0 disables. Must exceed the
+    /// hardware's nominal following lag, or the box throttles the commanded speed.
+    double tracking_leash{ 0.5 };
     double bypass_limit_tolerance{ 0.0 };    ///< position-limit extension (fraction of range)
     double stall_velocity_threshold{ 0.01 }; ///< |v| below this counts as not moving
     double park_resume_threshold{ 0.01 };    ///< reference change that counts as new command
@@ -81,7 +86,8 @@ public:
 
   /**
    * @param config see Config; joints must be non-empty and sizes consistent
-   * @throws std::invalid_argument on inconsistent config (also from SafetyQpLimiter)
+   * @throws std::invalid_argument on inconsistent config (also from SafetyQpLimiter),
+   * or when tracking_leash is too large to bound a continuous joint's wrapped lag
    */
   explicit SafetyPipeline( Config config );
 
@@ -96,8 +102,8 @@ public:
 
   /**
    * @brief Phase 1: rebase if invalidated, clamp the reference to the position limits,
-   * desired velocity toward the (leashed) reference, position-limit and deviation boxes,
-   * park hold/resume.
+   * desired velocity toward the (leashed) reference, position-limit, deviation and
+   * tracking-leash boxes, park hold/resume.
    * @param reference raw reference per joint (non-finite entries demand zero velocity);
    * for continuous joints the shortest path to the target is taken
    * @param measured measured positions per joint
@@ -112,8 +118,8 @@ public:
   const Eigen::VectorXd &commandedPositions() const { return cmd_; }
 
   /**
-   * @brief Phase 2: assemble collision damper constraints, solve, integrate, apply the
-   * tracking leash and update the stall/park state machine.
+   * @brief Phase 2: assemble collision damper constraints, solve, integrate and update
+   * the stall/park state machine.
    * @param obs collision observation for this cycle (see CollisionObservation)
    * @return edge events of this cycle; results via the getters below
    */
@@ -131,6 +137,10 @@ public:
   bool parked() const { return monitor_.parked(); }
   double stallTime() const { return monitor_.stallTime(); }
   bool wantsMotion() const { return wants_motion_; }
+  /// True when a joint is further from its command than the tracking leash can explain:
+  /// the hardware left on its own, so the configuration the collision check runs at no
+  /// longer describes the robot. Valid after prepare(); always false without a leash.
+  bool measurementDiverged() const { return measurement_diverged_; }
   /// Per-joint hold flags of the current cycle (size n; all zero unless
   /// Config::hold_unrequested). Valid after prepare().
   const std::vector<uint8_t> &heldJoints() const { return input_.hold; }
@@ -154,13 +164,13 @@ private:
   /// reference the upstream controller is holding there is a live target.
   bool park_pending_{ false };
   bool wants_motion_{ false };
+  bool measurement_diverged_{ false };
   Eigen::VectorXd cmd_;         ///< commanded positions (integration state)
   Eigen::VectorXd vel_;         ///< commanded velocities
   Eigen::VectorXd ref_leashed_; ///< leashed reference targets (deviation is measured
                                 ///< against these, so lag cannot blow the budget)
   SafetyQpInput input_;
   std::vector<double> reference_;        ///< this cycle's reference (park latch source)
-  std::vector<double> measured_;         ///< this cycle's measured positions
   std::vector<double> parked_reference_; ///< reference snapshot latched at park time
   std::vector<std::size_t> constraint_pair_indices_;
 };

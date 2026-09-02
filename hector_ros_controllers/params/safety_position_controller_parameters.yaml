@@ -153,9 +153,18 @@ safety_position_controller:
     type: double
     default_value: 0.5
     description: >
-      Anti-windup bound in [rad] on |commanded - measured| position per joint. If the
-      hardware cannot follow (e.g. compliant mode), the command is clamped near the
-      measured position instead of running ahead and storing energy. 0 disables.
+      Anti-windup bound in [rad] on |commanded - measured| position per joint, enforced
+      as a position box inside the safety QP. If the hardware cannot follow (compliant
+      mode, contact, a blockage) the command stops at the bound under the normal
+      velocity and acceleration limits and the motion is reported as stalled, instead of
+      running ahead and storing energy; a joint that stays stuck therefore also parks once
+      'stall_park_timeout' elapses. Must exceed the hardware's nominal following lag by a
+      margin, otherwise the box throttles the commanded speed. A joint found further than
+      twice this bound from its command is treated as having left on its own (backdriven,
+      slipping, a re-homed encoder): the commanded configuration no longer describes the
+      robot, so the safety state counts as unobservable and 'state_read_timeout' applies.
+      For continuous joints twice this bound must stay below pi, since their lag is only
+      known modulo a full turn. 0 disables.
     validation:
       bounds<>: [0.0, 10.0]
 

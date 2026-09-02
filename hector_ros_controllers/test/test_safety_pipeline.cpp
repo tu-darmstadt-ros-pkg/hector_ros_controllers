@@ -202,8 +202,182 @@ TEST( SafetyPipeline, TrackingLeashStillBoundsContinuousJointLag )
   for ( int i = 0; i < 100; ++i ) {
     pipeline.prepare( { 1.5 }, measured, false );
     pipeline.step( {} );
+    ASSERT_LE( pipeline.commandedPositions()[0], 0.2 + 1e-3 )
+        << "the leash must bound every cycle, not just the settled state; cycle " << i;
   }
-  EXPECT_NEAR( pipeline.commandedPositions()[0], 0.2, 1e-6 );
+  EXPECT_NEAR( pipeline.commandedPositions()[0], 0.2, 1e-3 );
+  EXPECT_TRUE( pipeline.stalled() ) << "hardware that cannot follow is a stall";
+}
+
+TEST( SafetyPipeline, TrackingLeashRespectsVelocityAndAccelerationBoxes )
+{
+  // The leash is a bound the QP solves against, so the command it produces is the one
+  // that was collision-checked and the reported velocity is the one actually applied.
+  // Correcting the command after the solve breaks both: it moves the command outside
+  // the QP's velocity/acceleration boxes while the solver still reports full speed.
+  auto cfg = makeConfig( 1 );
+  cfg.tracking_leash = 0.2;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0 }; // hardware stuck
+  double previous_cmd = 0.0;
+  double previous_vel = 0.0;
+  for ( int i = 0; i < 100; ++i ) {
+    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.step( {} );
+    const double cmd = pipeline.commandedPositions()[0];
+    const double vel = pipeline.velocity()[0];
+    ASSERT_NEAR( cmd - previous_cmd, vel * kDt, 1e-9 )
+        << "the command must move by exactly the reported velocity in cycle " << i;
+    ASSERT_LE( std::abs( cmd - previous_cmd ), kVMax * kDt + 1e-9 ) << "cycle " << i;
+    ASSERT_LE( std::abs( vel - previous_vel ), kDec * kDt + 1e-9 ) << "cycle " << i;
+    previous_cmd = cmd;
+    previous_vel = vel;
+  }
+  EXPECT_NEAR( pipeline.commandedPositions()[0], 0.2, 1e-3 );
+  EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-3 ) << "settled against the leash";
+}
+
+TEST( SafetyPipeline, TrackingLeashHoldsWhenTheMeasurementJumpsAway )
+{
+  // A measurement that runs away from the command (a slipping or backdriven joint, a
+  // re-homed encoder) must not drag the command after it: the held command is the one
+  // that was collision-checked, a dragged one never was.
+  auto cfg = makeConfig( 1 );
+  cfg.tracking_leash = 0.2;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0 };
+  cycle( pipeline, { 0.0 }, measured );
+  ASSERT_NEAR( pipeline.commandedPositions()[0], 0.0, 1e-9 );
+
+  measured[0] = -1.0; // the joint left on its own
+  for ( int i = 0; i < 20; ++i ) {
+    pipeline.prepare( { 0.0 }, measured, false );
+    pipeline.step( {} );
+    ASSERT_NEAR( pipeline.commandedPositions()[0], 0.0, 1e-9 )
+        << "the command must hold, not chase the measurement, in cycle " << i;
+  }
+}
+
+TEST( SafetyPipeline, MeasurementRunningAwayIsReportedAsDiverged )
+{
+  // The box bounds how far the command may LEAD the joint and deliberately does not
+  // chase a joint that leaves on its own, so something has to notice when it does: the
+  // collision check runs at the command, which then no longer describes the robot.
+  auto cfg = makeConfig( 1 );
+  cfg.tracking_leash = 0.2;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0 };
+  cycle( pipeline, { 0.0 }, measured );
+  EXPECT_FALSE( pipeline.measurementDiverged() );
+
+  // Pinned against the leash by a blockage is NOT divergence: the flipper case must not
+  // trip the watchdog, however long it pushes.
+  for ( int i = 0; i < 200; ++i ) {
+    measured[0] = 0.0;
+    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.step( {} );
+    ASSERT_FALSE( pipeline.measurementDiverged() ) << "leash-pinned is not diverged, cycle " << i;
+  }
+
+  // The joint leaving on its own is.
+  measured[0] = -0.5; // 0.7 from the command, past 2x the leash
+  pipeline.prepare( { 1.5 }, measured, false );
+  pipeline.step( {} );
+  EXPECT_TRUE( pipeline.measurementDiverged() );
+
+  // And it clears once the joint is back within reach.
+  measured[0] = pipeline.commandedPositions()[0] - 0.1;
+  pipeline.prepare( { 1.5 }, measured, false );
+  pipeline.step( {} );
+  EXPECT_FALSE( pipeline.measurementDiverged() );
+}
+
+TEST( SafetyPipeline, ContinuousJointDivergenceIsCaughtBeforeTheWrapAliases )
+{
+  // A continuous joint's lag is only known modulo a full turn. Once the true lag passes
+  // pi the wrapped value names the other side of the joint, which would mirror the box
+  // onto the wrong side of the command and lock the joint one way. The divergence bound
+  // must be reached first, while the wrapped lag is still faithful.
+  auto cfg = makeConfig( 1 );
+  cfg.joints[0].type = spc::JointType::CONTINUOUS;
+  cfg.joints[0].has_position_limits = false;
+  cfg.tracking_leash = 0.5;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0 };
+  cycle( pipeline, { 0.0 }, measured );
+
+  // The hardware is dragged backwards while the operator holds a negative command.
+  double true_position = measured[0];
+  bool diverged_reported = false;
+  for ( int i = 0; i < 200; ++i ) {
+    true_position -= 6.0 * kDt;                                   // dragged at 6 rad/s
+    measured[0] = spc::get_signed_distance( 0.0, true_position ); // hardware wraps
+    pipeline.prepare( { -1.0 }, measured, false );
+    pipeline.step( {} );
+    const double true_lag = pipeline.commandedPositions()[0] - true_position;
+    if ( pipeline.measurementDiverged() ) {
+      diverged_reported = true;
+      EXPECT_LT( std::abs( true_lag ), M_PI )
+          << "divergence must be reported before the wrapped lag can alias";
+      break;
+    }
+    ASSERT_LT( std::abs( true_lag ), M_PI ) << "aliased before reporting, cycle " << i;
+  }
+  EXPECT_TRUE( diverged_reported ) << "a runaway continuous joint must be reported";
+}
+
+TEST( SafetyPipeline, ContinuousJointRefusesALeashItCannotBound )
+{
+  // Beyond this the divergence bound would sit past pi, where a wrapped lag can no
+  // longer be told from its alias, so the wrap handling would have no guarantee left.
+  auto cfg = makeConfig( 1 );
+  cfg.joints[0].type = spc::JointType::CONTINUOUS;
+  cfg.tracking_leash = M_PI / 2.0 + 0.01;
+  EXPECT_THROW( Pipeline{ cfg }, std::invalid_argument );
+
+  cfg.tracking_leash = M_PI / 2.0 - 0.01;
+  EXPECT_NO_THROW( Pipeline{ cfg } );
+
+  // A bounded joint has no wrap, so the same leash is fine there.
+  auto bounded = makeConfig( 1 );
+  bounded.tracking_leash = 3.0;
+  EXPECT_NO_THROW( Pipeline{ bounded } );
+}
+
+TEST( SafetyPipeline, BlockedJointKeepsPushingAtTheLeash )
+{
+  // An upstream controller that integrates its own reference (the flipper velocity to
+  // position controller) runs the reference to the joint limit while the limb is
+  // blocked. The command must keep pushing at the leash rather than backing off: the
+  // flipper carries the robot.
+  auto cfg = makeConfig( 1 );
+  cfg.tracking_leash = 0.2;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0 }; // blocked by the ground
+  double reference = 0.0;
+  for ( int i = 0; i < 300; ++i ) {
+    reference += kVMax * kDt; // upstream integrates on, unaware of the blockage
+    pipeline.prepare( { reference }, measured, false );
+    pipeline.step( {} );
+  }
+  EXPECT_NEAR( pipeline.commandedPositions()[0], 0.2, 1e-3 )
+      << "still pushing at the leash, not backed off";
+  EXPECT_TRUE( pipeline.stalled() );
+
+  // The bound is anchored to the measurement, not to the command, so settling against
+  // it cannot ratchet the command outward however long the blockage lasts.
+  const double settled = pipeline.commandedPositions()[0];
+  for ( int i = 0; i < 30000; ++i ) { // ten minutes at 50 Hz
+    reference += kVMax * kDt;
+    pipeline.prepare( { reference }, measured, false );
+    pipeline.step( {} );
+  }
+  EXPECT_NEAR( pipeline.commandedPositions()[0], settled, 1e-9 ) << "the leash must not creep";
 }
 
 TEST( SafetyPipeline, ReferenceOutsideThePositionLimitsHoldsWithoutStalling )
@@ -256,10 +430,19 @@ TEST( SafetyPipeline, DeviationBoxAroundLeashedReferenceDroppedDuringBypass )
   EXPECT_NEAR( pipeline.qpInput().q_hi[1], 0.25, 1e-6 );
   EXPECT_NEAR( pipeline.qpInput().q_lo[1], -0.25, 1e-6 );
 
-  // Bypass drops the deviation boxes → only the position limits remain
+  // Bypass drops the deviation boxes. The tracking leash is anti-windup for the
+  // hardware, not a collision constraint, so it survives the bypass exactly as the
+  // position limits do.
   pipeline.prepare( reference, measured, true );
-  EXPECT_NEAR( pipeline.qpInput().q_hi[0], 3.0, 1e-9 );
-  EXPECT_NEAR( pipeline.qpInput().q_lo[0], -3.0, 1e-9 );
+  EXPECT_NEAR( pipeline.qpInput().q_hi[0], 0.5, 1e-9 );
+  EXPECT_NEAR( pipeline.qpInput().q_lo[0], -0.5, 1e-9 );
+
+  auto no_leash = cfg;
+  no_leash.tracking_leash = 0.0;
+  Pipeline unleashed( no_leash );
+  unleashed.prepare( reference, measured, true );
+  EXPECT_NEAR( unleashed.qpInput().q_hi[0], 3.0, 1e-9 ) << "only the position limits remain";
+  EXPECT_NEAR( unleashed.qpInput().q_lo[0], -3.0, 1e-9 );
 }
 
 TEST( SafetyPipeline, HeadOnBlockStallsParksAndResumesOnNewReference )

@@ -7,6 +7,14 @@
 
 namespace safety_position_controller
 {
+namespace
+{
+/// A command may legitimately lead its joint by tracking_leash. Twice that means the
+/// hardware left on its own (backdriven, slipping, a re-homed encoder), not that it is
+/// merely lagging: the configuration the collision check ran on no longer describes the
+/// robot, so the caller is told to treat the safety state as unobservable.
+constexpr double kDivergenceLeashFactor = 2.0;
+} // namespace
 
 SafetyPipeline::SafetyPipeline( Config config )
     : config_( std::move( config ) ), monitor_( config_.stall_park )
@@ -25,6 +33,18 @@ SafetyPipeline::SafetyPipeline( Config config )
     throw std::invalid_argument( "SafetyPipeline: joint_v_index size mismatch" );
   }
 
+  // A continuous joint's lag is only known modulo a full turn, so the divergence bound
+  // has to be reachable before the wrapped lag could alias into the wrong half turn.
+  if ( config_.tracking_leash > 0.0 && kDivergenceLeashFactor * config_.tracking_leash >= M_PI ) {
+    for ( const JointInfo &joint : config_.joints ) {
+      if ( joint.type == JointType::CONTINUOUS ) {
+        throw std::invalid_argument(
+            "SafetyPipeline: tracking_leash is too large for a continuous joint; the "
+            "measured lag is only known modulo a full turn, so it must stay below pi/2" );
+      }
+    }
+  }
+
   limiter_ = std::make_unique<SafetyQpLimiter>( n, config_.qp ); // validates qp params
 
   cmd_ = Eigen::VectorXd::Zero( ni );
@@ -39,7 +59,6 @@ SafetyPipeline::SafetyPipeline( Config config )
   constraint_pair_indices_.reserve( config_.qp.max_collision_constraints );
   input_.hold.assign( n, 0 );
   reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
-  measured_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   parked_reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
 }
 
@@ -48,7 +67,6 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
 {
   const std::size_t n = config_.joints.size();
   reference_.assign( reference.begin(), reference.end() );
-  measured_.assign( measured.begin(), measured.end() );
 
   if ( !state_valid_ ) {
     for ( std::size_t i = 0; i < n; ++i ) { cmd_[static_cast<Eigen::Index>( i )] = measured[i]; }
@@ -64,6 +82,7 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
 
   // ---- Desired velocity toward the (leashed) reference ----
   wants_motion_ = false;
+  measurement_diverged_ = false;
   for ( std::size_t i = 0; i < n; ++i ) {
     const auto idx = static_cast<Eigen::Index>( i );
     const JointInfo &joint = config_.joints[i];
@@ -107,6 +126,32 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
           std::max( input_.q_lo[idx], std::min( ref_leashed_[idx] - dev_limit, cmd_[idx] ) );
       input_.q_hi[idx] =
           std::min( input_.q_hi[idx], std::max( ref_leashed_[idx] + dev_limit, cmd_[idx] ) );
+    }
+
+    // Anti-windup box around the measured position: bounds how far the command may run
+    // ahead of the hardware, so a joint that cannot follow (compliant mode, contact, a
+    // blockage) stores no energy and is reported as stalled instead. A box rather than a
+    // correction after the solve: the QP brakes into it under its own velocity and
+    // acceleration limits, and the configuration that was collision-checked is the one
+    // that gets written. Unlike the deviation box this one is not widened to include the
+    // command — a box only ever forbids motion, so an unreachable bound holds the command
+    // where it is (positionLimitBound is 0 for a negative distance) without pulling it
+    // toward a measurement that ran away by itself. Continuous joints integrate cmd_
+    // freely while the hardware reports wrapped angles, so the box is centered in the
+    // command's frame rather than the measurement's.
+    if ( config_.tracking_leash > 0.0 && std::isfinite( measured[i] ) ) {
+      const double lag = ( joint.type == JointType::CONTINUOUS )
+                             ? get_signed_distance( measured[i], cmd_[idx] )
+                             : ( cmd_[idx] - measured[i] );
+      const double center = cmd_[idx] - lag;
+      input_.q_lo[idx] = std::max( input_.q_lo[idx], center - config_.tracking_leash );
+      input_.q_hi[idx] = std::min( input_.q_hi[idx], center + config_.tracking_leash );
+      // The box bounds how far the command may LEAD the joint; it deliberately does not
+      // chase a joint that leaves on its own. Report that case instead of steering a
+      // model the robot has left: unbounded divergence would both invalidate the
+      // collision check (it runs at the command) and, for a continuous joint, let the
+      // wrapped lag alias into the wrong half turn and mirror the box.
+      measurement_diverged_ |= std::abs( lag ) > kDivergenceLeashFactor * config_.tracking_leash;
     }
   }
 
@@ -187,22 +232,6 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
   const SafetyQpResult &result = limiter_->solve( input_ );
   vel_ = result.v;
   cmd_ += vel_ * config_.dt;
-
-  if ( config_.tracking_leash > 0.0 ) {
-    // Anti-windup: never run further ahead of the measured position than the leash.
-    // Continuous joints integrate cmd_ freely while the hardware may report wrapped
-    // angles, so the lag is the shortest angular distance and the correction is applied
-    // to cmd_ instead of rebasing it onto the measured frame.
-    for ( std::size_t i = 0; i < n; ++i ) {
-      const auto idx = static_cast<Eigen::Index>( i );
-      const double ahead = ( config_.joints[i].type == JointType::CONTINUOUS )
-                               ? get_signed_distance( measured_[i], cmd_[idx] )
-                               : ( cmd_[idx] - measured_[i] );
-      if ( std::abs( ahead ) > config_.tracking_leash ) {
-        cmd_[idx] += std::copysign( config_.tracking_leash, ahead ) - ahead;
-      }
-    }
-  }
 
   // ---- Stall detection: reference demands motion but the QP output is ~zero ----
   Events events;

@@ -678,6 +678,16 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "Failed to setup collision checking. Braking to a stop." );
     note_state_unobservable( period );
+  } else if ( pipeline_->measurementDiverged() ) {
+    // A joint is further from its command than the tracking leash can explain, so it
+    // left on its own (backdriven, slipping, a re-homed encoder). The collision check
+    // runs at the commanded configuration, which therefore no longer describes the
+    // robot: same watchdog, so a lasting divergence rebases onto the measured state and
+    // parks instead of steering a model the robot has left.
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                          "A joint is far from its command; the checked configuration no "
+                          "longer describes the robot. Braking to a stop." );
+    note_state_unobservable( period );
   } else {
     // Recovered: the pipeline parks on this cycle, which is an event worth publishing.
     status_event |= take_recovery_event();

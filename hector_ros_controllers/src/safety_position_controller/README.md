@@ -9,7 +9,7 @@ with flow-around (ProxQP), per-joint deviation boxes, and a stall/park state mac
 | Class / file | Role | ROS? |
 |---|---|---|
 | `SafetyPositionController` | ros2_control shell: lifecycle, interfaces, E-stop, bypass, reference unwrap/clamp, event → log/status translation | yes |
-| `SafetyPipeline` | Per-cycle control law: desired velocity + leashes, position/deviation boxes, constraint projection, solve, integration, stall/park. Returns **events**, never logs | no |
+| `SafetyPipeline` | Per-cycle control law: desired velocity + reference leash, position/deviation/tracking boxes, constraint projection, solve, integration, stall/park. Returns **events**, never logs | no |
 | `SafetyQpLimiter` | The dense QP itself (velocity boxes, braking bounds, collision dampers, tiered infeasibility relaxation) | no |
 | `StallParkMonitor` | Stall / park state machine (park latch survives E-stop) | no |
 | `CollisionChecker` | Pinocchio + coal self-collision distances and gradients | yes (logging only) |
@@ -29,10 +29,10 @@ pipeline — hence the two-phase `prepare()` / `step()` protocol:
 
 ```mermaid
 flowchart TB
-    REF[reference_interfaces] --> P1["SafetyPipeline::prepare()<br/>reference clamp, v_des + leash,<br/>position/deviation boxes, park hold/resume"]
+    REF[reference_interfaces] --> P1["SafetyPipeline::prepare()<br/>reference clamp, v_des + leash,<br/>position/deviation/tracking boxes, park hold/resume"]
     P1 -->|"commandedPositions()"| OBS["CollisionObserver::observe()"]
     CC[CollisionChecker] --> OBS
-    OBS -->|"CollisionObservation<br/>(pairs, in_collision, state_valid)"| P2["SafetyPipeline::step()<br/>project gradients → damper rows,<br/>QP solve, integrate, tracking leash"]
+    OBS -->|"CollisionObservation<br/>(pairs, in_collision, state_valid)"| P2["SafetyPipeline::step()<br/>project gradients → damper rows,<br/>QP solve, integrate"]
     QP[SafetyQpLimiter] --> P2
     SPM[StallParkMonitor] --> P2
     P2 -->|commanded positions| W[write_position_commands]
@@ -49,7 +49,7 @@ and parks — the arm holds until the reference changes by more than
 ## Where to change what
 
 - **Safe-set math** (dampers, braking, relaxation stages): `safety_qp_limiter.cpp`.
-- **Cycle behavior** (leashes, deviation boxes, stall/park semantics): `safety_pipeline.cpp` — add a pure unit test in `test_safety_pipeline.cpp`.
+- **Cycle behavior** (leash, boxes, stall/park semantics): `safety_pipeline.cpp` — add a pure unit test in `test_safety_pipeline.cpp`. Every bound is a box the QP solves against, so the configuration the collision check ran on is the one that gets written.
 - **Which pairs constrain** (pair filtering, budget, gradients): `collision_checker.cpp`.
 - **Marker appearance** (colors, namespaces, what is drawn): `collision_visualizer.cpp`.
 - **New status/debug output**: `safety_diagnostics.cpp` + the msg definitions in `hector_ros_controllers_msgs`.
