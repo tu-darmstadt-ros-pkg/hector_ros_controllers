@@ -182,6 +182,9 @@ private:
    */
   bool run_safety_pipeline( const rclcpp::Duration &period );
 
+  /// Handle an E-stop request from the ~/safety_estop subscriber (executor thread).
+  void note_estop_request( bool active );
+
   /**
    * @brief Account for a cycle in which the safety state could not be observed (busy or
    * non-finite joint states, failed collision-state read). Past state_read_timeout the
@@ -207,6 +210,10 @@ private:
   /// estop_active_ as of the last processed edge: the update loop's edge memory and the
   /// engagement flag reported in ~/status.
   std::atomic<bool> estop_engaged_{ false };
+  /// An engage was requested since the last cycle. Set on every engage message and
+  /// consumed by the update loop, so a pulse that both engages and releases between two
+  /// cycles still produces one engaged cycle instead of cancelling itself out.
+  std::atomic<bool> estop_engage_pending_{ false };
 
   // ---- Safety bypass (for folded arm positions etc.) ----
   std::atomic<bool> safety_bypass_active_{

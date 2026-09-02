@@ -320,6 +320,45 @@ TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
   EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
 }
 
+TEST_F( SafetyPositionControllerTest, EstopPulseBetweenCyclesIsHonored )
+{
+  // A stalled executor can deliver the engage and the release back to back, so the
+  // update loop never samples the engaged level. The engage must still abandon the
+  // pre-E-stop target instead of cancelling out against the release.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
+
+  // Both messages land between two update cycles.
+  controller_->note_estop_request( true );
+  controller_->note_estop_request( false );
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  const double position_at_estop = hw_cmd_values_[0];
+
+  for ( int i = 0; i < 50; ++i ) {
+    controller_->reference_interfaces_[0] = 1.0; // upstream keeps commanding it
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
+        << "the pulse must abandon the pre-E-stop target (cycle " << i << ")";
+  }
+}
+
 TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewCommandOnCommandTopic )
 {
   // Same contract in non-chained mode. The "~/commands" message stays in the realtime

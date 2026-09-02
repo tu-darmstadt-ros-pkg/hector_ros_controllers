@@ -140,12 +140,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
 
   estop_subscriber_ = node->create_subscription<std_msgs::msg::Bool>(
       "~/safety_estop", rclcpp::SystemDefaultsQoS(),
-      [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
-        const bool prev = estop_active_.exchange( msg->data, std::memory_order_relaxed );
-        if ( msg->data != prev ) {
-          RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s", msg->data ? "ENGAGED" : "DISENGAGED" );
-        }
-      } );
+      [this]( const std_msgs::msg::Bool::SharedPtr msg ) { note_estop_request( msg->data ); } );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -401,7 +396,10 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
 
   // E-stop first: it must act even while the joint states are unreadable, otherwise an
   // engage (or a whole engage+release pulse) during a read outage would be lost.
-  const bool estop_active = estop_active_.load( std::memory_order_relaxed );
+  // Consumed unconditionally (not short-circuited): a held E-stop is carried by the
+  // level, and the latch must not survive into the release cycle.
+  const bool engage_pending = estop_engage_pending_.exchange( false, std::memory_order_relaxed );
+  const bool estop_active = estop_active_.load( std::memory_order_relaxed ) || engage_pending;
 
   bool status_event = false;
   if ( estop_active != estop_engaged_.load( std::memory_order_relaxed ) ) {
@@ -463,6 +461,17 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
 }
 
 // ===== Helpers =====
+
+void SafetyPositionController::note_estop_request( const bool active )
+{
+  const bool prev = estop_active_.exchange( active, std::memory_order_relaxed );
+  if ( active ) {
+    estop_engage_pending_.store( true, std::memory_order_relaxed );
+  }
+  if ( active != prev ) {
+    RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s", active ? "ENGAGED" : "DISENGAGED" );
+  }
+}
 
 void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &period )
 {
