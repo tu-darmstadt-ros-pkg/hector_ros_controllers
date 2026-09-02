@@ -62,11 +62,16 @@ the safety pipeline had to intervene, modified) command to the hardware in both 
 
 - **Chained mode**: the exported reference interfaces (`<controller>/<joint>`), written by
   the upstream controller.
-- **Non-chained mode**: the `~/commands` topic (`Float64MultiArray`, one entry per joint).
+- **Non-chained mode**: the `~/commands` topic (`Float64MultiArray`, exactly one entry per
+  joint). A message of any other length is dropped whole and the previous reference kept:
+  applying a prefix would leave the joints it does not name on an older command's targets,
+  which is a pose nobody asked for and which the sender cannot tell from success.
 
 A `NaN` reference (per joint) means "no target": it demands zero velocity, so the joint
 brakes to a smooth stop at the deceleration limit and holds. References are reset to NaN
-on activation and on an E-stop release, so a stale target can never be resumed.
+on activation and when the reference source changes, so a stale target can never be
+resumed there. An E-stop release does not reset them: it parks instead, which latches the
+reference in effect as abandoned and holds until a reference arrives that differs from it.
 
 ## Performance baseline
 

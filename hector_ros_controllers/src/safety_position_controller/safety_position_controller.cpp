@@ -404,14 +404,17 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
   const auto &data = ( *cmd )->data;
   const size_t n_expected = params_.joints.size();
 
-  if ( data.size() < n_expected ) {
+  // All of the message or none of it: a prefix would leave the joints it does not name
+  // on the targets of an earlier command, which is a pose nobody asked for, and the
+  // sender cannot tell that from success.
+  if ( data.size() != n_expected ) {
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                          "Received command size %zu, expected %zu. Using prefix.", data.size(),
-                          n_expected );
+                          "Ignoring a command for %zu joints; this controller has %zu.",
+                          data.size(), n_expected );
+    return controller_interface::return_type::OK;
   }
 
-  const size_t n = std::min( n_expected, data.size() );
-  for ( size_t i = 0; i < n; ++i ) { reference_interfaces_[i] = data[i]; }
+  for ( size_t i = 0; i < n_expected; ++i ) { reference_interfaces_[i] = data[i]; }
 
   return controller_interface::return_type::OK;
 }

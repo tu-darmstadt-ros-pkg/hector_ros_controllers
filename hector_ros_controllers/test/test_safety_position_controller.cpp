@@ -322,6 +322,96 @@ TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
   EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
 }
 
+TEST_F( SafetyPositionControllerTest, WrongSizedCommandIsRejectedWhole )
+{
+  // A short array used to be applied as a prefix, leaving the joints it did not mention
+  // on their previous targets: half of one command mixed with half of an older one. An
+  // oversized array was truncated just as quietly. The sender cannot tell either case
+  // from success, so refuse the whole message and keep the last good reference.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_FALSE( controller_->is_in_chained_mode() );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 0.2, -0.1, 0.3 } );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 );
+  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
+  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+
+  sendCommand( { 0.9 } ); // too short
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 ) << "no prefix may be applied";
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+
+  sendCommand( { 0.9, 0.9, 0.9, 0.9 } ); // too long
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 ) << "no truncation may be applied";
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+
+  sendCommand( {} ); // empty
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 );
+
+  sendCommand( { 0.4, 0.5, 0.6 } ); // the right size is still accepted
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.4 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], 0.5 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.6 );
+}
+
+TEST_F( SafetyPositionControllerTest, RejectedCommandCannotReleaseAPark )
+{
+  // Releasing a park needs a reference that differs from the abandoned one, and a
+  // refused command leaves the reference untouched. A publisher sending the wrong
+  // number of joints therefore cannot restart the limb - which is the point: it is not
+  // commanding this controller, and the previous behaviour of applying its first few
+  // values would have moved the arm on a command nobody could have meant. Fixing the
+  // publisher restores control; nothing else has to be restarted.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 0.5, 0.0, 0.0 } );
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+
+  sendEstop( true );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  sendEstop( false );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  ASSERT_TRUE( controller_->pipeline_->parked() );
+  const double parked_at = hw_cmd_values_[0];
+
+  sendCommand( { 0.9, 0.9 } ); // wrong size: not a command to this controller
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_TRUE( controller_->pipeline_->parked() ) << "a refused command releases nothing";
+    ASSERT_NEAR( hw_cmd_values_[0], parked_at, 1e-6 );
+  }
+
+  sendCommand( { 0.9, 0.0, 0.0 } ); // a correctly sized one does
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_FALSE( controller_->pipeline_->parked() );
+  EXPECT_GT( hw_cmd_values_[0], parked_at + 1e-4 ) << "control returns once the sender is fixed";
+}
+
 TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
 {
   // The controller has to listen where the robot's e-stop actually is. On Athena that
