@@ -57,10 +57,16 @@ void SafetyDiagnostics::updateSnapshot( const SafetyPipeline *pipeline, const do
     snap.stalled = pipeline->stalled();
     snap.parked = pipeline->parked();
   }
-  // Blocking set: the write must land before a same-cycle event publish, else that
-  // publish would report the previous cycle. Bounded by a reader's copy under a
-  // priority-inheritance mutex.
   rt_status_box_.set( snap );
+}
+
+void SafetyDiagnostics::configure( std::vector<std::string> joint_names,
+                                   std::vector<double> stiff_current_limits,
+                                   std::vector<double> compliant_current_limits )
+{
+  joint_names_ = std::move( joint_names );
+  stiff_current_limits_ = std::move( stiff_current_limits );
+  compliant_current_limits_ = std::move( compliant_current_limits );
 }
 
 void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
@@ -89,15 +95,8 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
 
   // Populate active current limits per joint (only meaningful when current_limits_enabled)
   if ( params_.set_current_limits ) {
-    msg.joint_names = params_.joints;
-    msg.current_limits.reserve( params_.joints.size() );
-    for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-      const auto &limit =
-          flags.compliant_mode
-              ? params_.current_limits.joints_map.at( params_.joints[i] ).compliant_limit
-              : params_.current_limits.joints_map.at( params_.joints[i] ).stiff_limit;
-      msg.current_limits.push_back( limit );
-    }
+    msg.joint_names = joint_names_;
+    msg.current_limits = flags.compliant_mode ? compliant_current_limits_ : stiff_current_limits_;
   }
 
   status_pub_->publish( msg );

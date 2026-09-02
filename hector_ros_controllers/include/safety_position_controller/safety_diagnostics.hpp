@@ -50,6 +50,12 @@ public:
   SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr node, const Params &params,
                      const CollisionChecker *checker );
 
+  /// Store the activation-resolved joint names and current limits by value:
+  /// publishStatus() runs on executor threads and must not read the controller's mutable
+  /// Params fields, which on_activate rewrites in place. Call from on_activate.
+  void configure( std::vector<std::string> joint_names, std::vector<double> stiff_current_limits,
+                  std::vector<double> compliant_current_limits );
+
   /// Refresh the status snapshot from the control thread. The write always lands, so a
   /// publishStatus() later in the same cycle reports this cycle; blocking is bounded by
   /// a reader's snapshot copy under a priority-inheritance mutex.
@@ -80,8 +86,7 @@ public:
 
 private:
   /// Trivially-copyable view of the status fields written from the controller update
-  /// thread. Held in a RealtimeThreadSafeBox: its priority-inheritance mutex bounds the
-  /// control thread's wait to a reader's copy of this small struct.
+  /// thread; see updateSnapshot() for the synchronization contract.
   struct StatusSnapshot {
     double min_distance{ std::numeric_limits<double>::max() };
     double manipulability{ 0.0 };
@@ -100,6 +105,11 @@ private:
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
   const Params &params_;
   const CollisionChecker *checker_; ///< non-owning, for pair-name resolution
+
+  // Activation-resolved copies used by publishStatus() (see configure())
+  std::vector<std::string> joint_names_;
+  std::vector<double> stiff_current_limits_;
+  std::vector<double> compliant_current_limits_;
 
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>::SharedPtr status_pub_;
   realtime_tools::RealtimeThreadSafeBox<StatusSnapshot> rt_status_box_;

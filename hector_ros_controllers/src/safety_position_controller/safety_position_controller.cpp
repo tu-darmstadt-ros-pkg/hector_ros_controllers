@@ -246,6 +246,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
       compliant_current_limits_[i] = limits.compliant_limit;
     }
   }
+  diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_ );
 
   RCLCPP_INFO( get_node()->get_logger(),
                "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
