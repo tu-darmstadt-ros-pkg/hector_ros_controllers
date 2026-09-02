@@ -21,7 +21,9 @@ safety_position_controller:
   collision_cache_epsilon:
     type: double
     default_value: 0.000001
-    description: Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true.
+    description: Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true. Keep it far below the smallest joint motion that can matter - a large value keeps serving a stale safe answer while the arm moves.
+    validation:
+      bounds<>: [0.0, 0.01]
 
   use_broadphase:
     type: bool
@@ -185,7 +187,8 @@ safety_position_controller:
       invalidated. The controller keeps holding the last command; when the states
       recover it rebases to the measured position and PARKS until a new reference
       arrives, instead of resuming the stale pre-failure motion. Shorter outages
-      only skip the affected cycles.
+      only skip the affected cycles. Set it to at least twice the control period,
+      otherwise a single missed cycle escalates.
     validation:
       bounds<>: [0.001, 10.0]
 

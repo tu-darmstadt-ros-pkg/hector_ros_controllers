@@ -57,6 +57,10 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     qos.transient_local();
     semantic_description_sub_ = get_node()->create_subscription<std_msgs::msg::String>(
         "robot_description_semantic", qos, [this]( const std_msgs::msg::String::SharedPtr msg ) {
+          // Only the first one: a later delivery would rewrite the string while
+          // on_configure is parsing it.
+          if ( srdf_received_ )
+            return;
           srdf_ = msg->data;
           srdf_received_ = true;
         } );
@@ -259,12 +263,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   // reads them from executor threads, so they must not be written while it can run.
   diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_ );
 
-  status_timer_.reset();
-  if ( params_.status_publish_rate > 0.0 ) {
-    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
-    status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
-  }
-
   RCLCPP_INFO( get_node()->get_logger(),
                "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
                "padding=%.4f, safety_zone=%.4f, cache_eps=%.1e, debug_viz=%s, "
@@ -304,6 +302,15 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
   state_read_failure_time_ = 0.0;
   park_on_recovery_pending_ = false;
+  last_manipulability_ = 0.0;
+
+  // Last, so a failed activation does not leave a timer publishing status for a
+  // controller that never became active.
+  status_timer_.reset();
+  if ( params_.status_publish_rate > 0.0 ) {
+    const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
+    status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
+  }
 
   publish_status();
 
@@ -485,8 +492,8 @@ void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &
   // a loaded limb sag away under gravity.
   if ( state_read_failure_time_ >= params_.state_read_timeout && !park_on_recovery_pending_ ) {
     RCLCPP_ERROR( get_node()->get_logger(),
-                  "Safety state unobservable for %.2f s; holding. The pipeline will rebase "
-                  "and park when it recovers.",
+                  "Safety state unobservable for %.2f s; holding. The pipeline is rebased "
+                  "and parks until a new reference arrives.",
                   state_read_failure_time_ );
     pipeline_->invalidate();
     park_on_recovery_pending_ = true;
