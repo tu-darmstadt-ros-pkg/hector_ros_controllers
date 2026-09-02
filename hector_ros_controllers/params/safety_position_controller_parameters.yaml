@@ -231,6 +231,17 @@ safety_position_controller:
     default_value: false
     description: If true, the controller publishes visualization markers for potential self-collisions to help with debugging.
 
+  collision_visualization_rate:
+    type: double
+    default_value: 10.0
+    description: >
+      Rate in Hz at which the collision markers ('debug_visualize_collisions' /
+      'publish_collision_distances') are published. The markers go out over a reliable
+      publisher, so emitting them at the full control rate lets a slow subscriber (RViz)
+      throttle the publisher itself. 0 publishes every control cycle.
+    validation:
+      bounds<>: [0.0, 1000.0]
+
   publish_collision_distances:
     type: bool
     default_value: false

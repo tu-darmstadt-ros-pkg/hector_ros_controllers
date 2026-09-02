@@ -236,7 +236,12 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     collision_checker_->updateCollisionCacheEpsilon( params_.collision_cache_epsilon );
     if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
       if ( !collision_visualizer_ ) {
-        collision_visualizer_ = std::make_unique<CollisionVisualizer>( get_node() );
+        collision_visualizer_ =
+            std::make_unique<CollisionVisualizer>( get_node(), params_.collision_visualization_rate );
+      } else {
+        // Kept across a deactivate/activate cycle so the topic stays advertised; the
+        // rate still has to follow a parameter change.
+        collision_visualizer_->setPublishRate( params_.collision_visualization_rate );
       }
     } else {
       collision_visualizer_.reset();
