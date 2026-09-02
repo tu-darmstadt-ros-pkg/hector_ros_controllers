@@ -265,13 +265,16 @@ std::vector<std::string> CollisionChecker::getJointNames() const
 
 const CollisionResult &CollisionChecker::unsafeResult()
 {
-  last_collision_result_ = CollisionResult{};
-  last_collision_result_.in_collision = true;
-  last_collision_result_.min_distance = 0.0;
-  // The latch no longer describes q_last_: without invalidating the cache, a stationary
-  // robot would keep being served this unsafe result after the input recovers.
-  invalidateCache();
-  return last_collision_result_;
+  // Static: the latch and the movement cache stay untouched, so after the input
+  // recovers a stationary robot is served the still-valid cached result instead of a
+  // poisoned "assume collision" latch.
+  static const CollisionResult kUnsafe = [] {
+    CollisionResult r;
+    r.in_collision = true;
+    r.min_distance = 0.0;
+    return r;
+  }();
+  return kUnsafe;
 }
 
 const CollisionResult &
@@ -623,7 +626,14 @@ void CollisionChecker::setMaxSafetyZonePairs( const std::size_t max_pairs )
   }
 }
 
-void CollisionChecker::setBroadphase( bool enable ) { use_broadphase_ = enable; }
+void CollisionChecker::setBroadphase( bool enable )
+{
+  if ( enable != use_broadphase_ ) {
+    // The two paths can produce different results for far configurations.
+    invalidateCache();
+    use_broadphase_ = enable;
+  }
+}
 
 bool CollisionChecker::isBroadphaseEnabled() const { return use_broadphase_; }
 

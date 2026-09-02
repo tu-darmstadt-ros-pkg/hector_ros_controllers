@@ -230,8 +230,8 @@ private:
   /// (error results) or the classification parameters change.
   void invalidateCache() { q_last_.resize( 0 ); }
 
-  /// Latch a "assume in collision" result for unusable input and return it.
-  const CollisionResult &unsafeResult();
+  /// "Assume in collision" answer for unusable input; never touches the latch/cache.
+  static const CollisionResult &unsafeResult();
 
   /**
    * @brief Compute the distance gradient for a single collision pair.
