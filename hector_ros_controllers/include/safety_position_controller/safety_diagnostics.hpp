@@ -110,8 +110,6 @@ private:
     std::vector<std::string> joint_names;
     std::vector<double> stiff_current_limits;
     std::vector<double> compliant_current_limits;
-    bool current_limits_enabled{ false };
-    bool collision_check_enabled{ false };
   };
   realtime_tools::RealtimeThreadSafeBox<StatusConfig> config_box_;
 

@@ -349,6 +349,12 @@ TEST_F( SafetyPositionControllerTest, EstopPulseBetweenCyclesIsHonored )
 
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
   const double position_at_estop = hw_cmd_values_[0];
+  EXPECT_TRUE( controller_->estop_engaged_.load() ) << "the latched engage must produce one cycle";
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  followCommands();
+  EXPECT_FALSE( controller_->estop_engaged_.load() )
+      << "the latch must be consumed, so the release is seen on the next cycle";
 
   for ( int i = 0; i < 50; ++i ) {
     controller_->reference_interfaces_[0] = 1.0; // upstream keeps commanding it
@@ -640,8 +646,10 @@ TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopRelease )
 
 TEST_F( SafetyPositionControllerTest, StatusReflectsCollisionCheckEnabled )
 {
-  // Init with collisions enabled
-  initController( {}, /*check_self_collisions=*/true );
+  // Collision checking needs a model with collision geometry: configuring it against a
+  // model with no checkable pair is refused, because the check would pass everything.
+  initController( {}, /*check_self_collisions=*/true, /*set_current_limits=*/false,
+                  "test_robot_collision.urdf" );
   configureController();
   setupHardwareInterfaces();
   findMocks();

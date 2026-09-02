@@ -57,10 +57,6 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     qos.transient_local();
     semantic_description_sub_ = get_node()->create_subscription<std_msgs::msg::String>(
         "robot_description_semantic", qos, [this]( const std_msgs::msg::String::SharedPtr msg ) {
-          // Only the first one: a later delivery would rewrite the string while
-          // on_configure is parsing it.
-          if ( srdf_received_ )
-            return;
           srdf_ = msg->data;
           srdf_received_ = true;
         } );
@@ -168,6 +164,16 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
     if ( !collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints,
                                            false ) ) {
       RCLCPP_ERROR( node->get_logger(), "Failed to initialize collision checker from URDF/SRDF." );
+      return controller_interface::CallbackReturn::ERROR;
+    }
+    if ( collision_checker_->getNumCollisionPairs() == 0 ) {
+      // Every distance query would answer "no collision" at DBL_MAX, so collision
+      // checking would be silently off while reporting healthy.
+      RCLCPP_ERROR( node->get_logger(),
+                    "Collision checking is enabled but no collision pair is left to check. "
+                    "Check that the URDF has collision geometry, that the SRDF does not "
+                    "disable every pair, and that the 'joints' parameter names joints of "
+                    "this model." );
       return controller_interface::CallbackReturn::ERROR;
     }
 
@@ -303,6 +309,9 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   state_read_failure_time_ = 0.0;
   park_on_recovery_pending_ = false;
   last_manipulability_ = 0.0;
+  // A pulse received while inactive must not park a freshly activated controller; a
+  // held E-stop is carried by estop_active_ and re-engages on the first cycle.
+  estop_engage_pending_.store( false, std::memory_order_relaxed );
 
   // Last, so a failed activation does not leave a timer publishing status for a
   // controller that never became active.

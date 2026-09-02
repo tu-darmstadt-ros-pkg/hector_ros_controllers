@@ -130,6 +130,7 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     // passes everything.
     model_ = pinocchio::Model();
     geom_model_ = pinocchio::GeometryModel();
+    manipulability_frame_ = kNoFrame; // indexes the old model's frames
 
     if ( free_flyer )
       pinocchio::urdf::buildModelFromXML( urdf_xml, pinocchio::JointModelFreeFlyer(), model_ );
@@ -180,6 +181,11 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     return true;
   } catch ( const std::exception &e ) {
     RCLCPP_ERROR( node_->get_logger(), "CollisionChecker init failed: %s", e.what() );
+    // A half-built model would pass the size guards and answer from an empty pair set,
+    // i.e. fail open. Leave nothing checkable so the nq == 0 guard reports unsafe.
+    model_ = pinocchio::Model();
+    geom_model_ = pinocchio::GeometryModel();
+    manipulability_frame_ = kNoFrame;
     return false;
   }
 }

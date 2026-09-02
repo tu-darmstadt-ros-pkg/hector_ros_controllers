@@ -75,8 +75,7 @@ void SafetyDiagnostics::configure( std::vector<std::string> joint_names,
                                    std::vector<double> compliant_current_limits )
 {
   config_box_.set( StatusConfig{ std::move( joint_names ), std::move( stiff_current_limits ),
-                                 std::move( compliant_current_limits ), params_.set_current_limits,
-                                 params_.check_self_collisions } );
+                                 std::move( compliant_current_limits ) } );
   // The snapshot outlives a deactivation, so drop it here: the first status of a new
   // activation must not report the previous one's park/stall state.
   rt_status_box_.set( StatusSnapshot{} );
@@ -88,13 +87,12 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
     return;
   }
   const StatusSnapshot snap = rt_status_box_.get();
-  const StatusConfig config = config_box_.get();
   hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus msg;
   msg.header.stamp = node_->now();
   msg.safety_bypass_active = flags.bypass_active;
   msg.compliant_mode = flags.compliant_mode;
-  msg.current_limits_enabled = config.current_limits_enabled;
-  msg.collision_check_enabled = config.collision_check_enabled;
+  msg.current_limits_enabled = params_.set_current_limits;
+  msg.collision_check_enabled = params_.check_self_collisions;
   msg.estop_engaged = flags.estop_engaged;
   msg.min_collision_distance = snap.min_distance;
   msg.num_pairs_in_safety_zone = snap.num_pairs_in_safety_zone;
@@ -108,7 +106,8 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
   msg.parked = snap.parked;
 
   // Populate active current limits per joint (only meaningful when current_limits_enabled)
-  if ( config.current_limits_enabled ) {
+  if ( params_.set_current_limits ) {
+    const StatusConfig config = config_box_.get();
     msg.joint_names = config.joint_names;
     msg.current_limits =
         flags.compliant_mode ? config.compliant_current_limits : config.stiff_current_limits;
