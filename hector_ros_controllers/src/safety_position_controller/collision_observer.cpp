@@ -1,5 +1,7 @@
 #include "safety_position_controller/collision_observer.hpp"
 
+#include <cmath>
+
 namespace safety_position_controller
 {
 
@@ -50,8 +52,10 @@ CollisionObserver::observe( const bool checks_active,
   bool state_valid = true;
   for ( size_t i = 0; i < all_joint_names_.size() && i < state_interfaces.size(); ++i ) {
     const auto opt = state_interfaces[i].get_optional();
-    if ( opt.has_value() ) {
-      cc_positions_[all_joint_names_[i]] = opt.value();
+    // A non-finite position makes the safety state just as unobservable as a busy
+    // handle; it must brake here instead of reaching the checker as a fake collision.
+    if ( opt.has_value() && std::isfinite( *opt ) ) {
+      cc_positions_[all_joint_names_[i]] = *opt;
     } else {
       state_valid = false;
     }

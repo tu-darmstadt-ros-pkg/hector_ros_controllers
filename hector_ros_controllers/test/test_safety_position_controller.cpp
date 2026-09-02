@@ -1581,6 +1581,46 @@ constexpr double kAccPerCycle = 8.0 * kDt;       // max speed-up per cycle
 constexpr double kDecPerCycle = 3.0 * 8.0 * kDt; // max brake per cycle
 } // namespace
 
+TEST_F( SafetyPositionControllerCollisionTest, TransientUncontrolledJointGlitchDoesNotLatchCollision )
+{
+  // A one-cycle NaN on an UNCONTROLLED joint (joint4 has a state interface but is not
+  // commanded) must not freeze the arm. With the movement cache enabled, a latched
+  // "assume collision" result served for the unchanged configuration would zero the
+  // tracking demand forever: the arm never moves, so the cache would never invalidate.
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "collision_cache_epsilon", 1e-6 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // Settle at a collision-free target so the configuration is stationary.
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int cycle = 0; cycle < 300; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  ASSERT_NEAR( hw_cmd_values_[0], 0.5, 1e-4 );
+
+  // One glitched cycle: the collision state is unobservable -> brake, latch nothing.
+  setStateValue( "joint4", std::numeric_limits<double>::quiet_NaN() );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  setStateValue( "joint4", 0.0 );
+
+  // A new reference after the recovery must be tracked again.
+  controller_->reference_interfaces_[0] = 0.2;
+  for ( int cycle = 0; cycle < 300; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  EXPECT_NEAR( hw_cmd_values_[0], 0.2, 1e-3 );
+}
+
 TEST_F( SafetyPositionControllerCollisionTest, QpModeRampsAndReachesTarget )
 {
   // End-to-end regression for the jump bug: a far target is approached with bounded
