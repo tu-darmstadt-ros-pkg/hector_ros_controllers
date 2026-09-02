@@ -175,6 +175,19 @@ safety_position_controller:
     validation:
       bounds<>: [0.0001, 10.0]
 
+  state_read_timeout:
+    type: double
+    default_value: 0.1
+    description: >
+      Time in [s] of consecutive failed joint-state reads (busy handles of async
+      hardware components, non-finite values) after which the safety pipeline is
+      invalidated. The controller keeps holding the last command; when the states
+      recover it rebases to the measured position and PARKS until a new reference
+      arrives, instead of resuming the stale pre-failure motion. Shorter outages
+      only skip the affected cycles.
+    validation:
+      bounds<>: [0.001, 10.0]
+
   default_velocity_limit:
     type: double
     default_value: 1.5

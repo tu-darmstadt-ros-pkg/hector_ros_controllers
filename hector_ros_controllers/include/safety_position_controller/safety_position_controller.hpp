@@ -185,9 +185,11 @@ private:
 
   // ---- E-stop ----
   /// Last requested E-stop state. Tracks the external safety signal and therefore
-  /// survives deactivation; estop_engaged_ is what the update loop acts on.
+  /// survives deactivation; the update loop acts on it directly.
   std::atomic<bool> estop_active_{ false };
-  std::atomic<bool> estop_engaged_{ false }; ///< actually engaged in update loop
+  /// estop_active_ as of the last processed edge: the update loop's edge memory and the
+  /// engagement flag reported in ~/status.
+  std::atomic<bool> estop_engaged_{ false };
 
   // ---- Safety bypass (for folded arm positions etc.) ----
   std::atomic<bool> safety_bypass_active_{
@@ -218,6 +220,9 @@ private:
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> current_positions_; ///< latest measured positions
   std::vector<double> hold_positions_;    ///< positions to hold during E-stop
+  /// Consecutive time [s] without a valid joint-state read; past
+  /// params_.state_read_timeout the pipeline is invalidated (rebase + park on recovery).
+  double state_read_failure_time_{ 0.0 };
 
   // ---- Safety pipeline ----
   std::unique_ptr<SafetyPipeline> pipeline_; ///< ROS-free QP safety pipeline

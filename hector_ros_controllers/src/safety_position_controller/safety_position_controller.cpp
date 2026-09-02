@@ -284,6 +284,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   // drop commands received while inactive
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  state_read_failure_time_ = 0.0;
 
   publish_status();
 
@@ -368,28 +369,24 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 }
 
 controller_interface::return_type
-SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const rclcpp::Duration & )
+SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
+                                                     const rclcpp::Duration &period )
 {
-  if ( !read_current_positions() ) {
-    // A handle is locked by another thread (async hardware). Skipping the cycle leaves
-    // the previous position command in place, which is what re-writing it would do.
-    return controller_interface::return_type::OK;
-  }
-
-  const size_t n = params_.joints.size();
-
   // Debug: incoming joint states
   diagnostics_->publishJointStateIn( reference_interfaces_ );
 
-  // E-stop edge handling
+  // E-stop first: it must act even while the joint states are unreadable, otherwise an
+  // engage (or a whole engage+release pulse) during a read outage would be lost.
   const bool estop_active = estop_active_.load( std::memory_order_relaxed );
 
   bool status_event = false;
   if ( estop_active != estop_engaged_.load( std::memory_order_relaxed ) ) {
     if ( estop_active ) {
-      // engage E-stop: record hold positions
-      hold_positions_ = current_positions_;
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints", n );
+      // Mark the hold as unrecorded; it is taken from the freshest readable states
+      // below. Non-finite entries are never written, so until then nothing moves.
+      hold_positions_.assign( params_.joints.size(), std::numeric_limits<double>::quiet_NaN() );
+      RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints",
+                   params_.joints.size() );
     } else {
       // release E-stop; the pipeline is parked, so the arm holds until a new reference
       RCLCPP_WARN( get_node()->get_logger(),
@@ -400,10 +397,40 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
   }
 
   if ( estop_active ) {
-    // hold the recorded positions (no checks)
+    // Record the hold from the first read that succeeds — normally the engage cycle
+    // itself; during a read outage (the engage must not wait for one) the first valid
+    // read after it.
+    if ( read_current_positions() &&
+         std::any_of( hold_positions_.begin(), hold_positions_.end(),
+                      []( const double p ) { return !std::isfinite( p ); } ) ) {
+      hold_positions_ = current_positions_;
+    }
     pipeline_->invalidate();
     write_position_commands( hold_positions_ );
+  } else if ( !read_current_positions() ) {
+    // A handle is locked by another thread (async hardware). Skipping the cycle leaves
+    // the previous position command in place, which is what re-writing it would do.
+    // Failing for longer than state_read_timeout is a fault, not contention: invalidate
+    // so recovery rebases to the measured state and parks, instead of resuming the
+    // pre-failure reference from a stale velocity state.
+    state_read_failure_time_ += period.seconds() > 0.0 ? period.seconds() : 1.0 / get_update_rate();
+    if ( state_read_failure_time_ >= params_.state_read_timeout ) {
+      RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                             "No valid joint states for %.2f s; holding. The pipeline will "
+                             "rebase and park when they recover.",
+                             state_read_failure_time_ );
+      pipeline_->invalidate();
+    }
+    if ( status_event ) {
+      publish_status(); // an E-stop edge must be visible even during the outage
+    }
+    return controller_interface::return_type::OK;
   } else {
+    // The park after a prolonged read failure happens on this first recovered cycle;
+    // publish it like any other event.
+    status_event |= state_read_failure_time_ >= params_.state_read_timeout;
+    state_read_failure_time_ = 0.0;
+
     status_event |= run_safety_pipeline();
     if ( params_.set_current_limits ) {
       write_current_limits();

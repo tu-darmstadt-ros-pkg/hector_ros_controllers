@@ -863,6 +863,147 @@ TEST_F( SafetyPositionControllerTest, NonFiniteJointStateHoldsPositionAndIsNever
   EXPECT_GT( hw_cmd_values_[0], cmd_before ) << "tracking resumes once feedback is valid again";
 }
 
+TEST_F( SafetyPositionControllerTest, ProlongedBusyStateHandleParksOnRecovery )
+{
+  // A single missed try_lock is contention and skips the cycle; a handle that stays
+  // busy past state_read_timeout is a fault. The pipeline must be invalidated so that
+  // recovery rebases to the measured state and PARKS: resuming the pre-failure
+  // reference from a stale velocity state could jump-start a long-stopped arm.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  StatusMsgType captured;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
+      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  {
+    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+    // default state_read_timeout is 0.1 s = 10 cycles at the 100 Hz test rate
+    for ( int i = 0; i < 20; ++i ) {
+      ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+      EXPECT_DOUBLE_EQ( hw_cmd_values_[0], cmd_before ) << "cycles are skipped while busy";
+    }
+  }
+
+  // Recovery: the pre-failure reference (still 1.0) is abandoned, the limb holds
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "recovery after a prolonged state-read failure must park";
+  EXPECT_TRUE( captured.parked )
+      << "the recovery park is an event and must be published (event-only mode consumers)";
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], cmd_before, 1e-9 ) << "parked limb must hold, not resume";
+  }
+
+  // A NEW reference releases the park and is tracked again
+  controller_->reference_interfaces_[0] = 0.1;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->pipeline_->parked() );
+  const double resume_start = hw_cmd_values_[0];
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_GT( hw_cmd_values_[0], resume_start ) << "tracking must resume toward the new reference";
+}
+
+TEST_F( SafetyPositionControllerTest, ProlongedNonFiniteJointStateParksOnRecovery )
+{
+  // The dead-encoder variant of the prolonged failure: non-finite reads accumulate into
+  // the same escalation as busy handles.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  setStateValue( "joint1", std::numeric_limits<double>::quiet_NaN() );
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+
+  setStateValue( "joint1", cmd_before );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "recovery after prolonged non-finite feedback must park";
+}
+
+TEST_F( SafetyPositionControllerTest, EstopPulseDuringStateReadOutageIsHonored )
+{
+  // An E-stop must not need working joint-state reads: an engage (or a whole
+  // engage+release pulse) inside a read outage previously fell through the skip-cycle
+  // early return and was lost — the arm resumed the pre-outage reference untouched.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 );
+
+  {
+    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+    sendEstop( true );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_TRUE( controller_->estop_engaged_.load() )
+        << "the engage edge must not wait for joint states";
+    sendEstop( false );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_FALSE( controller_->estop_engaged_.load() );
+  }
+
+  // The E-stop abandoned the reference: recovery must hold and park, not resume the
+  // pre-outage target.
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "the release must park like any E-stop release";
+  const double held = hw_cmd_values_[0];
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], held, 1e-9 ) << "the abandoned reference must not be resumed";
+  }
+}
+
 TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
 {
   initController();
@@ -1610,6 +1751,8 @@ TEST_F( SafetyPositionControllerCollisionTest, TransientUncontrolledJointGlitchD
   // One glitched cycle: the collision state is unobservable -> brake, latch nothing.
   setStateValue( "joint4", std::numeric_limits<double>::quiet_NaN() );
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_EQ( controller_->collision_observer_->lastMinDistance(), std::numeric_limits<double>::max() )
+      << "an unobservable cycle must not report the pre-glitch distance as current";
   setStateValue( "joint4", 0.0 );
 
   // A new reference after the recovery must be tracked again.
