@@ -109,9 +109,10 @@ public:
   /**
    * @brief Solve the per-cycle QP.
    * @param input see SafetyQpInput; all vectors must have size n
-   * @return velocity command + diagnostics (never NaN; falls back to braking)
+   * @return velocity command + diagnostics (never NaN; falls back to braking). Refers
+   * to a member workspace: valid until the next solve(), like lastBoxLower()/Upper().
    */
-  SafetyQpResult solve( const SafetyQpInput &input );
+  const SafetyQpResult &solve( const SafetyQpInput &input );
 
   /**
    * @brief Desired velocity toward a target with overshoot guard.
@@ -127,6 +128,9 @@ public:
 
   const SafetyQpParams &params() const { return params_; }
   std::size_t size() const { return n_; }
+
+  /// Result of the last solve(); same lifetime as the box bounds below.
+  const SafetyQpResult &lastResult() const { return result_; }
 
   /// Per-joint velocity bounds used by the LAST solve (velocity + acceleration +
   /// position-limit braking, after conflict resolution). For debugging/introspection.
@@ -144,8 +148,8 @@ private:
   /// from the previous velocity at the deceleration limit)
   void computeVelocityBounds( const SafetyQpInput &input, bool crawl, bool &conflict );
 
-  /// Velocity that brakes toward zero at the deceleration limit.
-  Eigen::VectorXd brakingVelocity( const Eigen::VectorXd &v_prev ) const;
+  /// Velocity that brakes toward zero at the deceleration limit, written into @p v.
+  void brakingVelocity( const Eigen::VectorXd &v_prev, Eigen::VectorXd &v ) const;
 
   std::size_t n_;
   SafetyQpParams params_;
@@ -157,6 +161,7 @@ private:
   Eigen::MatrixXd H_, C_;
   Eigen::VectorXd g_, l_, u_;
   Eigen::VectorXd box_lb_, box_ub_; // per-joint bounds (also used to clamp the solution)
+  SafetyQpResult result_;           // reused across solves; returned by reference
 };
 
 } // namespace safety_position_controller

@@ -243,6 +243,12 @@ private:
 
   Eigen::VectorXd q_default_;
   Eigen::VectorXd q_last_;
+
+  // Per-cycle scratch, kept as members so the control loop does not reallocate.
+  std::vector<std::size_t> safety_zone_indices_;
+  std::vector<std::size_t> primaries_;
+  std::vector<std::size_t> duplicates_;
+  std::vector<std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex>> seen_links_;
   CollisionResult last_collision_result_;
 
   double collision_padding_{ 0.0 };

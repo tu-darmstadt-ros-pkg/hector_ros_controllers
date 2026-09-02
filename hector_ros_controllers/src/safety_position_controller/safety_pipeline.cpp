@@ -167,8 +167,8 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
   }
 
   // ---- Solve, integrate, clamp ----
-  result_ = limiter_->solve( input_ );
-  vel_ = result_.v;
+  const SafetyQpResult &result = limiter_->solve( input_ );
+  vel_ = result.v;
   cmd_ += vel_ * config_.dt;
 
   if ( config_.tracking_leash > 0.0 ) {

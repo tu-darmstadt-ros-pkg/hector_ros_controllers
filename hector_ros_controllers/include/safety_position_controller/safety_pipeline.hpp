@@ -114,7 +114,7 @@ public:
   Events step( const CollisionObservation &obs );
 
   // ---- Introspection (valid after step()) ----
-  const SafetyQpResult &lastResult() const { return result_; }
+  const SafetyQpResult &lastResult() const { return limiter_->lastResult(); }
   const SafetyQpInput &qpInput() const { return input_; }
   const Eigen::VectorXd &velocity() const { return vel_; }
   const Eigen::VectorXd &leashedReference() const { return ref_leashed_; }
@@ -147,7 +147,6 @@ private:
   Eigen::VectorXd ref_leashed_; ///< leashed reference targets (deviation is measured
                                 ///< against these, so lag cannot blow the budget)
   SafetyQpInput input_;
-  SafetyQpResult result_;
   std::vector<double> reference_;        ///< this cycle's reference (park latch source)
   std::vector<double> measured_;         ///< this cycle's measured positions
   std::vector<double> parked_reference_; ///< reference snapshot latched at park time

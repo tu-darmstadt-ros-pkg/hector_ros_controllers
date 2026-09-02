@@ -65,6 +65,10 @@ public:
   /// next call.
   const std::vector<double> &directionalInfo( const Eigen::VectorXd &velocity );
 
+  /// Joints the collision model does not represent (unknown, or an unsupported DoF
+  /// layout): their positions stay at the model's neutral value in every check.
+  const std::vector<std::string> &unmodeledJoints() const { return unmodeled_joints_; }
+
   double lastMinDistance() const { return last_min_distance_; }
   std::size_t lastMinDistancePairIndex() const { return last_min_distance_pair_index_; }
   /// Safety-zone pairs of the last observation, empty when there were none. Points into
@@ -87,6 +91,7 @@ private:
   Eigen::VectorXd q_;                                         ///< check configuration
   std::vector<SafetyPipeline::PairCandidate> pair_candidates_;
   std::vector<double> directional_; ///< workspace for directionalInfo()
+  std::vector<std::string> unmodeled_joints_;
   const std::vector<CollisionResult::PairInfo> *last_safety_zone_pairs_{ nullptr };
   double last_min_distance_{ std::numeric_limits<double>::max() };
   std::size_t last_min_distance_pair_index_{ std::numeric_limits<std::size_t>::max() };

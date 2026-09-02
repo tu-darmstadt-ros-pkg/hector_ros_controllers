@@ -97,14 +97,13 @@ double SafetyQpLimiter::desiredVelocity( const double diff, const double v_max, 
   return std::copysign( mag, diff );
 }
 
-Eigen::VectorXd SafetyQpLimiter::brakingVelocity( const Eigen::VectorXd &v_prev ) const
+void SafetyQpLimiter::brakingVelocity( const Eigen::VectorXd &v_prev, Eigen::VectorXd &v ) const
 {
-  Eigen::VectorXd v( v_prev.size() );
+  v.resize( v_prev.size() );
   for ( Eigen::Index i = 0; i < v_prev.size(); ++i ) {
     const double step = params_.a_dec[i] * params_.dt;
     v[i] = v_prev[i] - std::copysign( std::min( std::abs( v_prev[i] ), step ), v_prev[i] );
   }
-  return v;
 }
 
 void SafetyQpLimiter::computeVelocityBounds( const SafetyQpInput &input, const bool crawl,
@@ -163,13 +162,22 @@ void SafetyQpLimiter::computeVelocityBounds( const SafetyQpInput &input, const b
   }
 }
 
-SafetyQpResult SafetyQpLimiter::solve( const SafetyQpInput &input )
+const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
 {
   const auto t0 = std::chrono::steady_clock::now();
   const auto ni = static_cast<Eigen::Index>( n_ );
 
-  SafetyQpResult result;
-  result.v = Eigen::VectorXd::Zero( ni );
+  // Reused across solves so the per-cycle vectors keep their capacity; the flags are
+  // cleared by name (a new field must be reset here too).
+  SafetyQpResult &result = result_;
+  result.solved = false;
+  result.braking = false;
+  result.bounds_conflict = false;
+  result.push_out_relaxed = false;
+  result.num_collision_constraints = 0;
+  result.solve_time_us = 0.0;
+  result.iterations = 0;
+  result.v.setZero( ni );
 
   // ---- Objective: 0.5 ||v - v_des||^2 (H is constant) ----
   g_ = -input.v_des;
@@ -301,7 +309,7 @@ SafetyQpResult SafetyQpLimiter::solve( const SafetyQpInput &input )
   } else {
     // Still infeasible (e.g. braking transient) or solver failure -> predictable
     // degradation: brake to zero at the deceleration limit.
-    result.v = brakingVelocity( input.v_prev );
+    brakingVelocity( input.v_prev, result.v );
     result.braking = true;
   }
 

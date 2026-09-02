@@ -198,6 +198,12 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 
   collision_observer_ = std::make_unique<CollisionObserver>(
       collision_checker_.get(), all_joint_names_, params_.joints, joint_v_index_ );
+  for ( const auto &joint : collision_observer_->unmodeledJoints() ) {
+    RCLCPP_WARN( node->get_logger(),
+                 "Joint '%s' is not in the collision model (unknown or unsupported DoF "
+                 "layout); it stays at its neutral position in every check.",
+                 joint.c_str() );
+  }
 
   return controller_interface::CallbackReturn::SUCCESS;
 }

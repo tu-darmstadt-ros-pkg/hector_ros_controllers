@@ -64,9 +64,8 @@ void SafetyDiagnostics::configure( std::vector<std::string> joint_names,
                                    std::vector<double> stiff_current_limits,
                                    std::vector<double> compliant_current_limits )
 {
-  joint_names_ = std::move( joint_names );
-  stiff_current_limits_ = std::move( stiff_current_limits );
-  compliant_current_limits_ = std::move( compliant_current_limits );
+  config_box_.set( StatusConfig{ std::move( joint_names ), std::move( stiff_current_limits ),
+                                 std::move( compliant_current_limits ) } );
 }
 
 void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
@@ -95,8 +94,10 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
 
   // Populate active current limits per joint (only meaningful when current_limits_enabled)
   if ( params_.set_current_limits ) {
-    msg.joint_names = joint_names_;
-    msg.current_limits = flags.compliant_mode ? compliant_current_limits_ : stiff_current_limits_;
+    const StatusConfig config = config_box_.get();
+    msg.joint_names = config.joint_names;
+    msg.current_limits =
+        flags.compliant_mode ? config.compliant_current_limits : config.stiff_current_limits;
   }
 
   status_pub_->publish( msg );

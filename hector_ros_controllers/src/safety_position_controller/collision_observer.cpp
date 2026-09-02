@@ -17,14 +17,20 @@ CollisionObserver::CollisionObserver( CollisionChecker *checker,
     return;
   }
   q_ = checker_->neutralConfiguration();
-  measured_slots_.reserve( all_joint_names_.size() );
-  for ( const auto &name : all_joint_names_ ) {
-    measured_slots_.push_back( checker_->getJointQSlot( name ) );
-  }
-  commanded_slots_.reserve( controlled_joints_.size() );
-  for ( const auto &name : controlled_joints_ ) {
-    commanded_slots_.push_back( checker_->getJointQSlot( name ) );
-  }
+  // Resolving the slots once also tells us, once, which joints the collision model does
+  // not represent: their positions are silently held at the neutral value.
+  const auto resolve = [this]( const std::vector<std::string> &names,
+                               std::vector<CollisionChecker::JointQSlot> &slots ) {
+    slots.reserve( names.size() );
+    for ( const auto &name : names ) {
+      slots.push_back( checker_->getJointQSlot( name ) );
+      if ( slots.back().index < 0 ) {
+        unmodeled_joints_.push_back( name );
+      }
+    }
+  };
+  resolve( all_joint_names_, measured_slots_ );
+  resolve( controlled_joints_, commanded_slots_ );
 }
 
 const std::vector<CollisionResult::PairInfo> &CollisionObserver::lastSafetyZonePairs() const

@@ -276,10 +276,6 @@ const CollisionResult &CollisionChecker::unsafeResult()
 const CollisionResult &
 CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
 {
-  if ( model_.nq == 0 ) {
-    RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
-    return unsafeResult();
-  }
   for ( const auto &[name, position] : joint_positions ) {
     if ( !std::isfinite( position ) ) {
       RCLCPP_ERROR( node_->get_logger(),
@@ -345,6 +341,10 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
 {
   const double safety_zone_threshold = safety_zone_threshold_;
 
+  if ( model_.nq == 0 ) {
+    RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
+    return unsafeResult();
+  }
   if ( q.size() != model_.nq ) {
     RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
     return unsafeResult();
@@ -377,7 +377,8 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
   double global_min_distance = std::numeric_limits<double>::max();
   std::size_t min_distance_pair = 0;
   bool has_safety_zone_pairs = false;
-  std::vector<std::size_t> safety_zone_indices;
+  std::vector<std::size_t> &safety_zone_indices = safety_zone_indices_; // capacity reused
+  safety_zone_indices.clear();
 
   if ( use_broadphase_ && broadphase_manager_ ) {
     // --- Broadphase path: AABB-tree pruned distance scan ---
@@ -393,7 +394,7 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
 
     global_min_distance = callback.global_min_distance;
     min_distance_pair = callback.min_distance_pair;
-    safety_zone_indices = std::move( callback.safety_zone_indices );
+    safety_zone_indices.swap( callback.safety_zone_indices );
     has_safety_zone_pairs = !safety_zone_indices.empty();
 
     // Pruned pairs keep last cycle's nearest points; only the visited ones are fresh.
@@ -442,10 +443,12 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
       // Over budget: keep the closest pair of each DISTINCT link pair first, then refill
       // with the closest duplicates — near-duplicates of one contact must not evict a
       // different (e.g. approaching) contact.
-      std::vector<std::size_t> primaries, duplicates;
-      primaries.reserve( safety_zone_indices.size() );
-      std::vector<std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex>> seen_links;
-      seen_links.reserve( safety_zone_indices.size() );
+      std::vector<std::size_t> &primaries = primaries_;
+      std::vector<std::size_t> &duplicates = duplicates_;
+      auto &seen_links = seen_links_;
+      primaries.clear();
+      duplicates.clear();
+      seen_links.clear();
       for ( const std::size_t k : safety_zone_indices ) {
         const auto &cp = geom_model_.collisionPairs[k];
         const auto fa = geom_model_.geometryObjects[cp.first].parentFrame;
@@ -499,7 +502,7 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
         }
       }
 
-      safety_zone_indices = std::move( primaries );
+      safety_zone_indices.swap( primaries );
     }
 
     pinocchio::computeJointJacobians( model_, data_ );

@@ -50,9 +50,10 @@ public:
   SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr node, const Params &params,
                      const CollisionChecker *checker );
 
-  /// Store the activation-resolved joint names and current limits by value:
-  /// publishStatus() runs on executor threads and must not read the controller's mutable
-  /// Params fields, which on_activate rewrites in place. Call from on_activate.
+  /// Store the activation-resolved joint names and current limits: publishStatus() runs
+  /// on executor threads (status timer, service callbacks) and must not read the
+  /// controller's mutable Params fields, which on_activate rewrites in place. Held in a
+  /// box because on_activate can run while a service callback publishes.
   void configure( std::vector<std::string> joint_names, std::vector<double> stiff_current_limits,
                   std::vector<double> compliant_current_limits );
 
@@ -106,10 +107,13 @@ private:
   const Params &params_;
   const CollisionChecker *checker_; ///< non-owning, for pair-name resolution
 
-  // Activation-resolved copies used by publishStatus() (see configure())
-  std::vector<std::string> joint_names_;
-  std::vector<double> stiff_current_limits_;
-  std::vector<double> compliant_current_limits_;
+  /// Activation-resolved values read by publishStatus() (see configure()).
+  struct StatusConfig {
+    std::vector<std::string> joint_names;
+    std::vector<double> stiff_current_limits;
+    std::vector<double> compliant_current_limits;
+  };
+  realtime_tools::RealtimeThreadSafeBox<StatusConfig> config_box_;
 
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus>::SharedPtr status_pub_;
   realtime_tools::RealtimeThreadSafeBox<StatusSnapshot> rt_status_box_;
