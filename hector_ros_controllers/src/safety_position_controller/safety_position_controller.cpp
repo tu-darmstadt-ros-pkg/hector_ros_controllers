@@ -102,17 +102,13 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       [this]( const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
               std::shared_ptr<std_srvs::srv::SetBool::Response> response ) {
         if ( request->data ) {
-          // Enable bypass: start timer to auto-disable
-          safety_bypass_active_.store( true, std::memory_order_relaxed );
           const double timeout_sec = params_.safety_bypass_timeout;
-          safety_bypass_timer_ =
-              get_node()->create_wall_timer( std::chrono::duration<double>( timeout_sec ), [this]() {
-                safety_bypass_active_.store( false, std::memory_order_relaxed );
-                safety_bypass_timer_->cancel();
-                RCLCPP_WARN( get_node()->get_logger(),
-                             "Safety bypass timeout expired. Safety checks re-enabled." );
-                publish_status();
-              } );
+          const auto deadline = std::chrono::steady_clock::now() +
+                                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                    std::chrono::duration<double>( timeout_sec ) );
+          safety_bypass_deadline_.store( deadline.time_since_epoch().count(),
+                                         std::memory_order_relaxed );
+          safety_bypass_active_.store( true, std::memory_order_relaxed );
           response->success = true;
           response->message = "Safety bypass ENABLED. Collision checks disabled, joint limits "
                               "relaxed. Will auto-disable after " +
@@ -120,12 +116,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
           RCLCPP_WARN( get_node()->get_logger(), "%s", response->message.c_str() );
           publish_status();
         } else {
-          // Disable bypass: cancel timer and re-enable safety
-          safety_bypass_active_.store( false, std::memory_order_relaxed );
-          if ( safety_bypass_timer_ ) {
-            safety_bypass_timer_->cancel();
-            safety_bypass_timer_.reset();
-          }
+          clear_bypass();
           response->success = true;
           response->message = "Safety bypass DISABLED. Normal safety checks restored.";
           RCLCPP_INFO( get_node()->get_logger(), "%s", response->message.c_str() );
@@ -225,6 +216,9 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
   // a target from before the deactivation must never be resumed on activation
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
+  // Nobody is supervising a controller that is only now starting, so it starts guarded
+  // whatever was in effect before. First, so no failing check below can skip it.
+  clear_bypass();
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
@@ -344,6 +338,9 @@ SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   status_timer_.reset();
   estop_engaged_.store( false, std::memory_order_relaxed );
+  // A bypass is granted for as long as someone is watching this controller run. It must
+  // not outlive the controller and be inherited by whatever activates next.
+  clear_bypass();
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -426,6 +423,12 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
   // Debug: incoming joint states
   diagnostics_->publishJointStateIn( reference_interfaces_ );
 
+  // The bypass lapses on its own so an unattended one cannot last: enforced here rather
+  // than by a timer, which would mean an unsynchronised handle shared with the control
+  // thread. Checked before anything reads the flag, so the cycle that ends it is already
+  // guarded.
+  bool status_event = expire_bypass();
+
   // E-stop first: it must act even while the joint states are unreadable, otherwise an
   // engage (or a whole engage+release pulse) during a read outage would be lost.
   // Consumed unconditionally (not short-circuited): a held E-stop is carried by the
@@ -433,7 +436,6 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
   const bool engage_pending = estop_engage_pending_.exchange( false, std::memory_order_relaxed );
   const bool estop_active = estop_active_.load( std::memory_order_relaxed ) || engage_pending;
 
-  bool status_event = false;
   if ( estop_active != estop_engaged_.load( std::memory_order_relaxed ) ) {
     if ( estop_active ) {
       // Mark the hold as unrecorded; it is taken from the freshest readable states
@@ -493,6 +495,26 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
 }
 
 // ===== Helpers =====
+
+void SafetyPositionController::clear_bypass()
+{
+  safety_bypass_deadline_.store( 0, std::memory_order_relaxed );
+  safety_bypass_active_.store( false, std::memory_order_relaxed );
+}
+
+bool SafetyPositionController::expire_bypass()
+{
+  const auto deadline = safety_bypass_deadline_.load( std::memory_order_relaxed );
+  if ( deadline == 0 || !safety_bypass_active_.load( std::memory_order_relaxed ) ) {
+    return false;
+  }
+  if ( std::chrono::steady_clock::now().time_since_epoch().count() < deadline ) {
+    return false;
+  }
+  clear_bypass();
+  RCLCPP_WARN( get_node()->get_logger(), "Safety bypass expired; safety checks are back on." );
+  return true;
+}
 
 void SafetyPositionController::note_estop_request( const bool active )
 {

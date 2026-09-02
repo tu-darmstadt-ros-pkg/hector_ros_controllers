@@ -1,6 +1,7 @@
 #include "test_helpers.hpp"
 
 #include <shared_mutex>
+#include <thread>
 
 // __gcov_dump is only available when compiled with --coverage.
 // Use a weak symbol so the call is a no-op in normal (non-coverage) builds.
@@ -320,6 +321,77 @@ TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
     followCommands();
   }
   EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerTest, BypassDoesNotSurviveALifecycleTransition )
+{
+  // The bypass drops collision checking and widens the joint limits. It is a deliberate,
+  // supervised act on a controller someone is watching, so it must not be inherited by a
+  // controller that has since been stopped and started again - which is exactly what
+  // happens after a hardware fault, when nobody is expecting an arm to come back
+  // unguarded.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_TRUE( bypass_service_mock_ );
+
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = true;
+  auto req_header = std::make_shared<rmw_request_id_t>();
+  EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
+      .Times( ::testing::AnyNumber() );
+  bypass_service_mock_->handle_request( req_header, request );
+  ASSERT_TRUE( controller_->safety_bypass_active_.load() );
+
+  ASSERT_EQ( controller_->on_deactivate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::SUCCESS );
+  EXPECT_FALSE( controller_->safety_bypass_active_.load() )
+      << "deactivation must not leave a bypass armed";
+  EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 ) << "and no deadline may survive";
+
+  // The service answers in every state, so arm one while INACTIVE: activation is the
+  // call that has to refuse to inherit it, and it must do so whether or not a
+  // deactivation preceded it.
+  bypass_service_mock_->handle_request( req_header, request );
+  ASSERT_TRUE( controller_->safety_bypass_active_.load() );
+  activateController();
+  EXPECT_FALSE( controller_->safety_bypass_active_.load() )
+      << "a freshly activated controller must check collisions";
+  EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 );
+}
+
+TEST_F( SafetyPositionControllerTest, BypassLapsesOnItsOwn )
+{
+  // An unattended bypass must not last. The deadline is enforced by the update loop, so
+  // the cycle that ends it is already checking collisions again.
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "safety_bypass_timeout", 0.1 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_TRUE( bypass_service_mock_ );
+
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = true;
+  auto req_header = std::make_shared<rmw_request_id_t>();
+  EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
+      .Times( ::testing::AnyNumber() );
+  bypass_service_mock_->handle_request( req_header, request );
+  ASSERT_TRUE( controller_->safety_bypass_active_.load() );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->safety_bypass_active_.load() ) << "still within the timeout";
+
+  std::this_thread::sleep_for( std::chrono::milliseconds( 150 ) );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->safety_bypass_active_.load() ) << "the timeout must end it";
+  EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 );
 }
 
 TEST_F( SafetyPositionControllerTest, WrongSizedCommandIsRejectedWhole )

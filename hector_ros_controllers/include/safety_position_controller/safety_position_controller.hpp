@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <string>
@@ -182,6 +183,13 @@ private:
    */
   bool run_safety_pipeline( const rclcpp::Duration &period );
 
+  /// Turn the safety bypass off and drop its deadline. Idempotent and callable from any
+  /// thread, including the control loop.
+  void clear_bypass();
+
+  /// Clear the bypass if its deadline has passed. Returns true if this call ended it.
+  bool expire_bypass();
+
   /// Handle an E-stop request from the ~/safety_estop subscriber (executor thread).
   void note_estop_request( bool active );
 
@@ -218,7 +226,12 @@ private:
   // ---- Safety bypass (for folded arm positions etc.) ----
   std::atomic<bool> safety_bypass_active_{
       false }; ///< when true, collision checks and strict limits are relaxed
-  rclcpp::TimerBase::SharedPtr safety_bypass_timer_; ///< auto re-enables safety checks after timeout
+  /// steady_clock time at which the bypass lapses, as a count of nanoseconds; 0 when no
+  /// bypass is armed. The update loop enforces it. A wall timer would have to be created
+  /// and destroyed across the executor, the service and the lifecycle callbacks, one of
+  /// which runs on the control thread when the hardware faults - an unsynchronised
+  /// shared_ptr between threads, and a timer destroyed inside the control loop.
+  std::atomic<std::chrono::steady_clock::rep> safety_bypass_deadline_{ 0 };
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr
       bypass_safety_checks_service_; ///< service to toggle bypass
 
