@@ -71,6 +71,9 @@ public:
   const std::vector<CollisionResult::PairInfo> &lastSafetyZonePairs() const;
 
 private:
+  /// Clear the per-observation caches (distances, pair pointer, collision edge).
+  void clearObservation();
+
   CollisionChecker *checker_; ///< non-owning
   std::vector<std::string> all_joint_names_;
   std::vector<std::string> controlled_joints_;

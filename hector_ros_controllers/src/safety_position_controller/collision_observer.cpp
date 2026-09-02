@@ -21,13 +21,18 @@ const std::vector<CollisionResult::PairInfo> &CollisionObserver::lastSafetyZoneP
   return last_safety_zone_pairs_ ? *last_safety_zone_pairs_ : kNone;
 }
 
-void CollisionObserver::reset()
+void CollisionObserver::clearObservation()
 {
   last_min_distance_ = std::numeric_limits<double>::max();
   last_min_distance_pair_index_ = std::numeric_limits<std::size_t>::max();
   last_safety_zone_pairs_ = nullptr;
-  pair_candidates_.clear();
   was_in_collision_ = false;
+}
+
+void CollisionObserver::reset()
+{
+  clearObservation();
+  pair_candidates_.clear();
   observed_ = false;
 }
 
@@ -43,14 +48,12 @@ CollisionObserver::observe( const bool checks_active,
   observed_ = false;
 
   if ( !snapshot.observation.checks_active ) {
-    was_in_collision_ = false;
-    last_min_distance_ = std::numeric_limits<double>::max();
-    last_min_distance_pair_index_ = std::numeric_limits<std::size_t>::max();
-    last_safety_zone_pairs_ = nullptr;
+    clearObservation();
     return snapshot;
   }
 
-  bool state_valid = true;
+  // Fewer interfaces than joints would silently check stale positions — fail safe.
+  bool state_valid = state_interfaces.size() >= all_joint_names_.size();
   for ( size_t i = 0; i < all_joint_names_.size() && i < state_interfaces.size(); ++i ) {
     const auto opt = state_interfaces[i].get_optional();
     // A non-finite position makes the safety state just as unobservable as a busy
@@ -67,12 +70,9 @@ CollisionObserver::observe( const bool checks_active,
 
   snapshot.observation.state_valid = state_valid;
   if ( !state_valid ) {
-    // Same as checks-inactive: nothing was observed this cycle, so the caches must not
-    // keep reporting the pre-fault distances as current.
-    was_in_collision_ = false;
-    last_min_distance_ = std::numeric_limits<double>::max();
-    last_min_distance_pair_index_ = std::numeric_limits<std::size_t>::max();
-    last_safety_zone_pairs_ = nullptr;
+    // Nothing was observed this cycle: the caches must not keep reporting the
+    // pre-fault distances as current.
+    clearObservation();
     return snapshot;
   }
 
