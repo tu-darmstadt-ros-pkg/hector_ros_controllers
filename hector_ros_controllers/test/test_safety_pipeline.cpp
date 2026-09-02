@@ -142,6 +142,27 @@ TEST( SafetyPipeline, InvalidateRebasesAndParksUntilNewReference )
   EXPECT_NEAR( measured[0], 0.6, 1e-3 );
 }
 
+TEST( SafetyPipeline, NonFiniteReferenceEntryDoesNotReleasePark )
+{
+  Pipeline pipeline( makeConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+  pipeline.invalidate();
+  cycle( pipeline, { 0.5, 0.0 }, measured );
+  ASSERT_TRUE( pipeline.parked() );
+
+  // An inf glitch means "no target" (as in prepare()), not a new command: it must not
+  // release the park and resume the abandoned reference on the other joints.
+  for ( int i = 0; i < 20; ++i ) {
+    cycle( pipeline, { std::numeric_limits<double>::infinity(), 0.0 }, measured );
+  }
+  EXPECT_TRUE( pipeline.parked() );
+  EXPECT_NEAR( measured[0], 0.0, 1e-9 );
+
+  // A genuinely different finite reference still releases it.
+  cycle( pipeline, { 0.2, 0.0 }, measured );
+  EXPECT_FALSE( pipeline.parked() );
+}
+
 TEST( SafetyPipeline, TrackingLeashFollowsContinuousJointsAcrossTheWrap )
 {
   // The hardware may report wrapped angles while cmd_ integrates freely. At the wrap the

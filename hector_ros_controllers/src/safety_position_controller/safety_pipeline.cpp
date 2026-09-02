@@ -201,10 +201,12 @@ bool SafetyPipeline::isNewReference( const std::vector<double> &reference ) cons
 {
   for ( std::size_t i = 0; i < config_.joints.size(); ++i ) {
     const double ref = reference[i];
-    if ( std::isnan( ref ) ) {
+    // Non-finite means "no target" (same as prepare()): an inf glitch must not count as
+    // a new command and release the park.
+    if ( !std::isfinite( ref ) ) {
       continue;
     }
-    if ( std::isnan( parked_reference_[i] ) ) {
+    if ( !std::isfinite( parked_reference_[i] ) ) {
       return true;
     }
     const double delta = ( config_.joints[i].type == JointType::CONTINUOUS )
