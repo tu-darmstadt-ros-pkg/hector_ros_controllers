@@ -551,6 +551,71 @@ TEST( SafetyQpLimiter, HeadOnObstacleStallsWithoutPenetration )
   EXPECT_GT( q[0], 0.3 );      // but it did approach up to the boundary
 }
 
+// ---------------------------------------------------------------------------
+// Held joints (hold_unrequested_joints)
+// ---------------------------------------------------------------------------
+
+TEST( SafetyQpLimiter, HeldJointIsPinnedAtZeroVelocity )
+{
+  // A held joint must not be recruited to satisfy the objective, even though moving it
+  // is the cheapest way to reach v_des.
+  SafetyQpLimiter limiter( 2, makeParams( 2 ) );
+  auto in = makeInput( 2 );
+  in.v_des << 0.8, 0.8;
+  in.hold = { 0, 1 };
+
+  const auto &r = limiter.solve( in );
+  ASSERT_TRUE( r.solved );
+  EXPECT_NEAR( r.v[0], 0.8, 1e-6 ) << "the free joint still tracks its demand";
+  EXPECT_NEAR( r.v[1], 0.0, 1e-9 ) << "the held joint must not move";
+}
+
+TEST( SafetyQpLimiter, HeldJointCannotBePushedOutOfACollision )
+{
+  // The classic flipper case: joint 1 rests at its reference while joint 0 is driven
+  // into it. The damper wants BOTH to separate; only joint 0 may.
+  SafetyQpLimiter limiter( 2, makeParams( 2 ) );
+  auto in = makeInput( 2 );
+  in.v_des << 0.5, 0.0;
+  in.hold = { 0, 1 };
+  // Penetrating: the damper RHS is positive, i.e. it actively demands separation.
+  in.collisions.push_back( makeCollision( Eigen::Vector2d( -1.0, 1.0 ), -0.005 ) );
+
+  const auto &r = limiter.solve( in );
+  EXPECT_NEAR( r.v[1], 0.0, 1e-9 ) << "the resting joint must not be swept away";
+  EXPECT_LE( r.v[0], 0.0 ) << "the driven joint has to give way instead";
+}
+
+TEST( SafetyQpLimiter, HeldJointDecaysAtTheDecelerationLimit )
+{
+  // A joint that becomes held while moving must brake, not step to zero.
+  auto params = makeParams( 1, /*v_max=*/1.0, /*a_acc=*/10.0, /*a_dec=*/20.0 );
+  SafetyQpLimiter limiter( 1, params );
+  auto in = makeInput( 1 );
+  in.v_des << 0.0;
+  in.v_prev << 1.0;
+  in.hold = { 1 };
+
+  const auto &r = limiter.solve( in );
+  ASSERT_TRUE( r.solved );
+  // One deceleration step from v_prev, not an instant stop.
+  EXPECT_NEAR( r.v[0], 1.0 - params.a_dec[0] * params.dt, 1e-6 );
+  EXPECT_LT( r.v[0], 1.0 );
+}
+
+TEST( SafetyQpLimiter, EmptyHoldVectorLeavesEveryJointFree )
+{
+  // Callers that do not use the mode leave `hold` empty; nothing may change.
+  SafetyQpLimiter limiter( 3, makeParams( 3 ) );
+  auto in = makeInput( 3 );
+  in.v_des << 0.4, -0.4, 0.2;
+  ASSERT_TRUE( in.hold.empty() );
+
+  const auto &r = limiter.solve( in );
+  ASSERT_TRUE( r.solved );
+  EXPECT_TRUE( r.v.isApprox( in.v_des, 1e-6 ) );
+}
+
 int main( int argc, char **argv )
 {
   testing::InitGoogleTest( &argc, argv );

@@ -272,12 +272,13 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   RCLCPP_INFO( get_node()->get_logger(),
                "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
                "padding=%.4f, safety_zone=%.4f, cache_eps=%.1e, debug_viz=%s, "
-               "publish_distances=%s",
+               "publish_distances=%s, hold_unrequested=%s",
                params_.joints.size(), params_.check_self_collisions ? "ON" : "OFF",
                params_.use_broadphase ? "ON" : "OFF", params_.collision_padding,
                params_.collision_safety_zone, params_.collision_cache_epsilon,
                params_.debug_visualize_collisions ? "ON" : "OFF",
-               params_.publish_collision_distances ? "ON" : "OFF" );
+               params_.publish_collision_distances ? "ON" : "OFF",
+               params_.hold_unrequested_joints ? "ON" : "OFF" );
 
   if ( !setup_pipeline_on_activate() ) {
     return controller_interface::CallbackReturn::ERROR;
@@ -590,6 +591,8 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   cfg.tracking_leash = params_.tracking_leash;
   cfg.bypass_limit_tolerance = params_.safety_bypass_joint_limit_tolerance;
   cfg.stall_velocity_threshold = params_.qp_stall_velocity_threshold;
+  cfg.hold_unrequested = params_.hold_unrequested_joints;
+  cfg.hold_velocity_threshold = params_.hold_unrequested_velocity_threshold;
   cfg.park_resume_threshold = params_.park_resume_reference_threshold;
   cfg.stall_park.stall_timeout = params_.qp_stall_timeout;
   cfg.stall_park.park_timeout = params_.stall_park_timeout;

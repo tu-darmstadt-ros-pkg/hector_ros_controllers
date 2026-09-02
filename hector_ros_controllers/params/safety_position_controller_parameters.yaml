@@ -114,6 +114,30 @@ safety_position_controller:
     validation:
       bounds<>: [0.0, 100.0]
 
+  hold_unrequested_joints:
+    type: bool
+    default_value: false
+    description: >
+      If true, a joint whose reference is not asking it to move is FROZEN: the safety QP
+      may not recruit it to flow around or push out of a collision. Only joints that are
+      actually being commanded may move; the commanded joint is blocked (and eventually
+      reported as stalled) instead of a resting joint being pushed out of the way.
+      Intended for limbs whose resting pose carries a load - e.g. flippers that are
+      supporting the robot must not swing away just because another flipper is driven
+      into them. Costs the ability to auto-resolve a collision the operator is not
+      actively commanding out of.
+
+  hold_unrequested_velocity_threshold:
+    type: double
+    default_value: 0.01
+    description: >
+      Desired-velocity magnitude in [rad/s] below which a joint counts as 'not requested
+      to move' for 'hold_unrequested_joints'. A held joint decays to zero velocity at its
+      deceleration limit and is then pinned. Only relevant when
+      'hold_unrequested_joints' is true.
+    validation:
+      bounds<>: [0.0001, 10.0]
+
   reference_leash_time:
     type: double
     default_value: 0.3

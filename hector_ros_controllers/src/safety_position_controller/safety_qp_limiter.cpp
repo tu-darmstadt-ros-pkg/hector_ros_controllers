@@ -125,12 +125,15 @@ void SafetyQpLimiter::computeVelocityBounds( const SafetyQpInput &input, const b
     double ub = std::min( params_.v_max[i], v_prev + delta_up );
     double lb = std::max( -params_.v_max[i], v_prev - delta_dn );
 
-    if ( crawl ) {
-      // Clamp toward +-contact_crawl_speed, decaying from the previous velocity at the
-      // deceleration limit so the clamp never conflicts with the acceleration box.
-      const double v_crawl = params_.contact_crawl_speed;
-      ub = std::min( ub, std::max( v_crawl, v_prev - a_dec * dt ) );
-      lb = std::max( lb, std::min( -v_crawl, v_prev + a_dec * dt ) );
+    // A held joint is a crawl clamp with speed 0: the reference is not asking it to
+    // move, so the QP must not recruit it to flow around or push out of a collision.
+    const bool held = static_cast<std::size_t>( i ) < input.hold.size() && input.hold[i] != 0;
+    if ( crawl || held ) {
+      // Clamp toward +-v_clamp, decaying from the previous velocity at the deceleration
+      // limit so the clamp never conflicts with the acceleration box.
+      const double v_clamp = held ? 0.0 : params_.contact_crawl_speed;
+      ub = std::min( ub, std::max( v_clamp, v_prev - a_dec * dt ) );
+      lb = std::max( lb, std::min( -v_clamp, v_prev + a_dec * dt ) );
     }
 
     // Position limit braking bounds (start decelerating early enough to stop at the limit)

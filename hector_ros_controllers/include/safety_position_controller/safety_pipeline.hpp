@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -48,6 +49,11 @@ public:
     double bypass_limit_tolerance{ 0.0 };    ///< position-limit extension (fraction of range)
     double stall_velocity_threshold{ 0.01 }; ///< |v| below this counts as not moving
     double park_resume_threshold{ 0.01 };    ///< reference change that counts as new command
+    /// If true, a joint whose desired velocity stays below hold_velocity_threshold is
+    /// pinned: the QP may not recruit it to flow around or push out of a collision, so
+    /// a resting limb is never swept aside by a collision it did not cause.
+    bool hold_unrequested{ false };
+    double hold_velocity_threshold{ 0.01 }; ///< |v_des| below this counts as "not requested"
     StallParkMonitor::Params stall_park;
   };
 
@@ -125,11 +131,17 @@ public:
   bool parked() const { return monitor_.parked(); }
   double stallTime() const { return monitor_.stallTime(); }
   bool wantsMotion() const { return wants_motion_; }
+  /// Per-joint hold flags of the current cycle (size n; all zero unless
+  /// Config::hold_unrequested). Valid after prepare().
+  const std::vector<uint8_t> &heldJoints() const { return input_.hold; }
   const Config &config() const { return config_; }
 
 private:
   /// True if the reference differs from the one latched at park time (a new command).
   bool isNewReference( const std::vector<double> &reference ) const;
+
+  /// Hold every joint (used where step() zeroes the demand after prepare() ran).
+  void holdAll();
 
   Config config_;
   std::unique_ptr<SafetyQpLimiter> limiter_;

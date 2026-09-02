@@ -37,6 +37,7 @@ SafetyPipeline::SafetyPipeline( Config config )
   input_.q_hi = Eigen::VectorXd::Constant( ni, std::numeric_limits<double>::infinity() );
   input_.collisions.reserve( config_.qp.max_collision_constraints );
   constraint_pair_indices_.reserve( config_.qp.max_collision_constraints );
+  input_.hold.assign( n, 0 );
   reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   measured_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   parked_reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
@@ -121,6 +122,20 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     }
   }
 
+  // ---- Hold joints the reference is not asking to move ----
+  // Evaluated on the FINAL v_des (park zeroes it), so a parked limb is pinned too. The
+  // QP clamps a held joint toward zero velocity at its deceleration limit, which makes
+  // it unavailable for flow-around and push-out: a resting limb that carries load is
+  // never swept aside by a collision another joint drove into. The commanded joint is
+  // blocked instead and, if it stays blocked, reported as stalled.
+  for ( std::size_t i = 0; i < n; ++i ) {
+    input_.hold[i] =
+        config_.hold_unrequested && std::abs( input_.v_des[static_cast<Eigen::Index>( i )] ) <=
+                                        config_.hold_velocity_threshold
+            ? 1
+            : 0;
+  }
+
   input_.v_prev = vel_;
   input_.q = cmd_;
   return resumed_from_park;
@@ -158,11 +173,13 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
         // collision without pairs): state untrusted → stop demanding motion, QP brakes.
         input_.v_des.setZero();
         wants_motion_ = false;
+        holdAll();
       }
     } else {
       // Safety state unobservable → stop demanding motion; the QP brakes smoothly.
       input_.v_des.setZero();
       wants_motion_ = false;
+      holdAll();
     }
   }
 
@@ -195,6 +212,15 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
     parked_reference_ = reference_;
   }
   return events;
+}
+
+void SafetyPipeline::holdAll()
+{
+  // Keeps the hold flags consistent with a v_des that step() zeroed after prepare()
+  // decided them; a no-op unless the mode is on.
+  if ( config_.hold_unrequested ) {
+    std::fill( input_.hold.begin(), input_.hold.end(), uint8_t{ 1 } );
+  }
 }
 
 bool SafetyPipeline::isNewReference( const std::vector<double> &reference ) const

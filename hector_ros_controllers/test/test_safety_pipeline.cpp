@@ -422,6 +422,103 @@ TEST( SafetyPipeline, ConstructorValidatesConfig )
   EXPECT_NO_THROW( Pipeline{ cfg } );
 }
 
+// ---------------------------------------------------------------------------
+// hold_unrequested: a joint the reference is not moving stays put
+// ---------------------------------------------------------------------------
+
+namespace
+{
+/// Joint 0 is driven toward +1 while joint 1 rests at its reference. The pair
+/// separates when joint 0 goes negative OR joint 1 goes positive, so the QP's cheapest
+/// escape is to sweep the resting joint aside — exactly the flipper case.
+Eigen::VectorXd sweepGradient()
+{
+  Eigen::VectorXd g( 2 );
+  g << -1.0, 1.0;
+  return g;
+}
+
+/// Runs `cycles` steps against a pair held at `distance` and returns the measured state.
+std::vector<double> runAgainstPair( Pipeline &pipeline, const double distance, const int cycles )
+{
+  const Eigen::VectorXd gradient = sweepGradient();
+  std::vector<Pipeline::PairCandidate> pairs{ { distance, &gradient, 0 } };
+  Pipeline::CollisionObservation obs;
+  obs.checks_active = true;
+  obs.state_valid = true;
+  obs.pairs = &pairs;
+
+  std::vector<double> measured{ 0.0, 0.0 };
+  for ( int i = 0; i < cycles; ++i ) { cycle( pipeline, { 1.0, 0.0 }, measured, obs ); }
+  return measured;
+}
+} // namespace
+
+TEST( SafetyPipeline, WithoutHoldTheRestingJointIsSweptOutOfTheWay )
+{
+  // Documents the default behavior the hold mode exists to switch off.
+  Pipeline pipeline( makeConfig() );
+  const auto measured = runAgainstPair( pipeline, 0.001, 50 );
+
+  EXPECT_GT( measured[1], 0.01 ) << "the resting joint gives way to let joint 0 through";
+  EXPECT_GT( measured[0], 0.01 );
+}
+
+TEST( SafetyPipeline, HoldPinsTheRestingJointAndBlocksTheDrivenOne )
+{
+  auto cfg = makeConfig();
+  cfg.hold_unrequested = true;
+  Pipeline pipeline( cfg );
+  const auto measured = runAgainstPair( pipeline, 0.001, 50 );
+
+  EXPECT_EQ( measured[1], 0.0 ) << "a joint the reference does not move must not move";
+  // Joint 0 may still creep along whatever slack the damper leaves, but it can no
+  // longer buy room by pushing joint 1 away.
+  Pipeline reference_run( makeConfig() );
+  const auto unheld = runAgainstPair( reference_run, 0.001, 50 );
+  EXPECT_LT( measured[0], unheld[0] );
+}
+
+TEST( SafetyPipeline, HoldLeavesTheCommandedJointFree )
+{
+  // The mode must only pin joints that are NOT being commanded.
+  auto cfg = makeConfig();
+  cfg.hold_unrequested = true;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0, 0.0 };
+  for ( int i = 0; i < 50; ++i ) { cycle( pipeline, { 1.0, 1.0 }, measured ); }
+
+  EXPECT_GT( measured[0], 0.1 );
+  EXPECT_GT( measured[1], 0.1 );
+  EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 0, 0 ) );
+}
+
+TEST( SafetyPipeline, HoldFlagsFollowTheDesiredVelocity )
+{
+  auto cfg = makeConfig();
+  cfg.hold_unrequested = true;
+  cfg.hold_velocity_threshold = 0.01;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0, 0.0 };
+  // Joint 0 far from its target, joint 1 already there.
+  pipeline.prepare( { 1.0, 0.0 }, measured, false );
+  EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 0, 1 ) );
+
+  // A NaN reference means "no target", which is not a request to move either.
+  pipeline.prepare( { kNaN, 0.0 }, measured, false );
+  EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 1, 1 ) );
+}
+
+TEST( SafetyPipeline, HoldIsOffByDefault )
+{
+  Pipeline pipeline( makeConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+  pipeline.prepare( { 0.0, 0.0 }, measured, false );
+  EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 0, 0 ) );
+}
+
 int main( int argc, char **argv )
 {
   testing::InitGoogleMock( &argc, argv );

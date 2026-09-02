@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -55,6 +56,10 @@ struct SafetyQpInput {
   Eigen::VectorXd q;      ///< current commanded positions [rad] (for position limits)
   Eigen::VectorXd q_lo;   ///< lower position limits (-inf if unbounded)
   Eigen::VectorXd q_hi;   ///< upper position limits (+inf if unbounded)
+  /// Per-joint hold flags (size n, or empty for "no joint is held"). A held joint is
+  /// clamped toward zero velocity at its deceleration limit and then pinned there, so
+  /// the QP cannot recruit it to flow around or push out of a collision.
+  std::vector<uint8_t> hold;
   std::vector<QpCollisionConstraint> collisions; ///< sorted closest-first; extra rows dropped
 };
 
@@ -145,7 +150,8 @@ private:
   /// On a per-joint conflict (cannot satisfy both), the box collapses to the braking
   /// velocity and conflict is set.
   /// @param crawl if true, additionally clamp toward +-contact_crawl_speed (decaying
-  /// from the previous velocity at the deceleration limit)
+  /// from the previous velocity at the deceleration limit). Joints flagged in
+  /// input.hold get the same clamp toward zero, which overrides the crawl speed.
   void computeVelocityBounds( const SafetyQpInput &input, bool crawl, bool &conflict );
 
   /// Velocity that brakes toward zero at the deceleration limit, written into @p v.
