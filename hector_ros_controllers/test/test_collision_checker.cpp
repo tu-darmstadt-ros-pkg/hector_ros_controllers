@@ -364,6 +364,49 @@ TEST_F( CollisionCheckerTest, CollisionPaddingWorks )
   EXPECT_NEAR( result_with_pad.min_distance, actual_dist, 1e-10 );
 }
 
+// ---- Test 9b: an error result must not be served from the movement cache ----
+TEST_F( CollisionCheckerTest, TransientNonFiniteInputDoesNotPoisonTheCache )
+{
+  auto checker = makeChecker( 0.0, 1e-4 );
+
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.5 }, { "joint2", 0.3 }, { "joint3", -0.2 }, { "joint4", 0.0 } };
+
+  auto good = checker->checkCollision( positions );
+  ASSERT_FALSE( good.in_collision );
+
+  auto glitched = positions;
+  glitched["joint2"] = std::numeric_limits<double>::quiet_NaN();
+  auto unsafe = checker->checkCollision( glitched );
+  EXPECT_TRUE( unsafe.in_collision );
+
+  // The robot did not move, so the cache key still matches the pre-glitch check: the
+  // recovered input must be recomputed, not answered with the latched unsafe result.
+  auto recovered = checker->checkCollision( positions );
+  EXPECT_FALSE( recovered.in_collision );
+  EXPECT_DOUBLE_EQ( recovered.min_distance, good.min_distance );
+}
+
+// ---- Test 9c: a padding change must re-classify a cached configuration ----
+TEST_F( CollisionCheckerTest, PaddingUpdateInvalidatesTheCache )
+{
+  auto checker = makeChecker( 0.0, 1e-4 );
+
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+
+  auto before = checker->checkCollision( positions );
+  ASSERT_FALSE( before.in_collision );
+  ASSERT_GT( before.min_distance, 0.0 );
+
+  // Raising the padding above the current clearance must re-classify the unchanged
+  // configuration instead of serving the result cached under the old padding.
+  checker->updateCollisionPadding( before.min_distance + 0.01 );
+  auto after = checker->checkCollision( positions );
+  EXPECT_TRUE( after.in_collision );
+  EXPECT_NEAR( after.min_distance, before.min_distance, 1e-10 );
+}
+
 // ---- Test 10: Multi-joint sweep ----
 TEST_F( CollisionCheckerTest, MultiJointSweep )
 {

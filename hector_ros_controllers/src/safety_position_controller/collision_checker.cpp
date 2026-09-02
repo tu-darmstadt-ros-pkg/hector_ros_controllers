@@ -264,6 +264,9 @@ const CollisionResult &CollisionChecker::unsafeResult()
   last_collision_result_ = CollisionResult{};
   last_collision_result_.in_collision = true;
   last_collision_result_.min_distance = 0.0;
+  // The latch no longer describes q_last_: without invalidating the cache, a stationary
+  // robot would keep being served this unsafe result after the input recovers.
+  q_last_.resize( 0 );
   return last_collision_result_;
 }
 
@@ -584,7 +587,11 @@ void CollisionChecker::updateDoDebugVisualization( const bool pub_debug_geometry
 }
 void CollisionChecker::updateCollisionPadding( const double collision_padding )
 {
-  collision_padding_ = collision_padding;
+  if ( collision_padding != collision_padding_ ) {
+    // The cached result classified in_collision under the old padding — invalidate it.
+    q_last_.resize( 0 );
+    collision_padding_ = collision_padding;
+  }
 }
 
 void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
