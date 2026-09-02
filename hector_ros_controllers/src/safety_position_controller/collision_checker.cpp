@@ -163,6 +163,10 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     filterCollisionPairs( controlled_joints );
     nearest_points_fresh_.assign( geom_model_.collisionPairs.size(), false );
 
+    // A cached result from a previous model must not survive re-initialization.
+    invalidateCache();
+    last_collision_result_ = CollisionResult{};
+
     // Pre-allocate Jacobian workspace matrices
     J1_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
     J2_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
@@ -266,7 +270,7 @@ const CollisionResult &CollisionChecker::unsafeResult()
   last_collision_result_.min_distance = 0.0;
   // The latch no longer describes q_last_: without invalidating the cache, a stationary
   // robot would keep being served this unsafe result after the input recovers.
-  q_last_.resize( 0 );
+  invalidateCache();
   return last_collision_result_;
 }
 
@@ -588,8 +592,8 @@ void CollisionChecker::updateDoDebugVisualization( const bool pub_debug_geometry
 void CollisionChecker::updateCollisionPadding( const double collision_padding )
 {
   if ( collision_padding != collision_padding_ ) {
-    // The cached result classified in_collision under the old padding — invalidate it.
-    q_last_.resize( 0 );
+    // The cached result classified in_collision under the old padding.
+    invalidateCache();
     collision_padding_ = collision_padding;
   }
 }
@@ -601,12 +605,11 @@ void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
 
 void CollisionChecker::setSafetyZoneThreshold( double threshold )
 {
-  if ( threshold > safety_zone_threshold_ ) {
-    // Cached result was computed with a smaller threshold and may be missing
-    // pairs that now fall inside the wider safety zone — invalidate it.
-    q_last_.resize( 0 );
+  if ( threshold != safety_zone_threshold_ ) {
+    // The cached result's safety-zone pair set was selected under the old threshold.
+    invalidateCache();
+    safety_zone_threshold_ = threshold;
   }
-  safety_zone_threshold_ = threshold;
 }
 
 double CollisionChecker::getSafetyZoneThreshold() const { return safety_zone_threshold_; }
@@ -614,8 +617,8 @@ double CollisionChecker::getSafetyZoneThreshold() const { return safety_zone_thr
 void CollisionChecker::setMaxSafetyZonePairs( const std::size_t max_pairs )
 {
   if ( max_pairs != max_safety_zone_pairs_ ) {
-    // Cached result was truncated with a different cap — invalidate it.
-    q_last_.resize( 0 );
+    // Cached result was truncated with a different cap.
+    invalidateCache();
     max_safety_zone_pairs_ = max_pairs;
   }
 }

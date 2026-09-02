@@ -225,6 +225,11 @@ public:
   double computeManipulability();
 
 private:
+  /// Forget the cached configuration: the next query recomputes instead of serving
+  /// last_collision_result_. Required whenever the latch and q_last_ stop agreeing
+  /// (error results) or the classification parameters change.
+  void invalidateCache() { q_last_.resize( 0 ); }
+
   /// Latch a "assume in collision" result for unusable input and return it.
   const CollisionResult &unsafeResult();
 
