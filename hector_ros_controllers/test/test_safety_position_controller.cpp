@@ -11,6 +11,17 @@ extern "C" void __gcov_dump() __attribute__( ( weak ) );
 
 using SafetyPositionControllerStatus =
     hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus;
+
+namespace
+{
+/// Arm the safety bypass directly, with a deadline far enough out that it cannot lapse
+/// during a test. The service path is exercised separately.
+void armBypassOn( safety_position_controller::SafetyPositionController &controller )
+{
+  controller.safety_bypass_deadline_.store(
+      ( std::chrono::steady_clock::now() + std::chrono::hours( 1 ) ).time_since_epoch().count() );
+}
+} // namespace
 using SPC = safety_position_controller::SafetyPositionController;
 
 // ============================================================================
@@ -378,7 +389,8 @@ TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
       std::numeric_limits<double>::quiet_NaN();
   EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
              controller_interface::CallbackReturn::ERROR )
-      << "the parameter bound compares with < and > and so lets NaN through";
+      << "not a number is refused too; the parameter bound already rejects it, this is "
+         "the second line of defence for a value written straight into params_";
 
   controller_->params_.current_limits.joints_map.at( "joint1" ).compliant_limit = 3.0;
   EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
@@ -409,23 +421,60 @@ TEST_F( SafetyPositionControllerTest, BypassDoesNotSurviveALifecycleTransition )
   EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
       .Times( ::testing::AnyNumber() );
   bypass_service_mock_->handle_request( req_header, request );
-  ASSERT_TRUE( controller_->safety_bypass_active_.load() );
+  ASSERT_TRUE( controller_->bypass_active() );
 
   ASSERT_EQ( controller_->on_deactivate( rclcpp_lifecycle::State() ),
              controller_interface::CallbackReturn::SUCCESS );
-  EXPECT_FALSE( controller_->safety_bypass_active_.load() )
-      << "deactivation must not leave a bypass armed";
+  EXPECT_FALSE( controller_->bypass_active() ) << "deactivation must not leave a bypass armed";
   EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 ) << "and no deadline may survive";
 
   // The service answers in every state, so arm one while INACTIVE: activation is the
   // call that has to refuse to inherit it, and it must do so whether or not a
   // deactivation preceded it.
   bypass_service_mock_->handle_request( req_header, request );
-  ASSERT_TRUE( controller_->safety_bypass_active_.load() );
+  ASSERT_TRUE( controller_->bypass_active() );
   activateController();
-  EXPECT_FALSE( controller_->safety_bypass_active_.load() )
+  EXPECT_FALSE( controller_->bypass_active() )
       << "a freshly activated controller must check collisions";
   EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 );
+}
+
+TEST_F( SafetyPositionControllerTest, ArmingAndClearingABypassCannotStrandItArmed )
+{
+  // The bypass is armed on an executor thread and cleared on the control thread. Held as
+  // a flag beside a deadline, those two could interleave into armed-with-no-deadline,
+  // which nothing would ever expire: collision checking off until somebody noticed. One
+  // atomic makes that state unrepresentable, so hammer both sides and assert the
+  // invariant rather than trusting the ordering.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_TRUE( bypass_service_mock_ );
+
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = true;
+  auto req_header = std::make_shared<rmw_request_id_t>();
+  EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
+      .Times( ::testing::AnyNumber() );
+
+  std::atomic<bool> stop{ false };
+  std::thread arming( [&]() {
+    while ( !stop.load() ) { bypass_service_mock_->handle_request( req_header, request ); }
+  } );
+  for ( int i = 0; i < 5000; ++i ) {
+    controller_->clear_bypass();
+    // Armed always means a deadline that some later cycle can act on.
+    ASSERT_TRUE( !controller_->bypass_active() || controller_->safety_bypass_deadline_.load() != 0 )
+        << "a bypass must never be armed without a deadline (iteration " << i << ")";
+  }
+  stop.store( true );
+  arming.join();
+
+  controller_->clear_bypass();
+  EXPECT_FALSE( controller_->bypass_active() );
 }
 
 TEST_F( SafetyPositionControllerTest, BypassLapsesOnItsOwn )
@@ -447,15 +496,15 @@ TEST_F( SafetyPositionControllerTest, BypassLapsesOnItsOwn )
   EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
       .Times( ::testing::AnyNumber() );
   bypass_service_mock_->handle_request( req_header, request );
-  ASSERT_TRUE( controller_->safety_bypass_active_.load() );
+  ASSERT_TRUE( controller_->bypass_active() );
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_TRUE( controller_->safety_bypass_active_.load() ) << "still within the timeout";
+  EXPECT_TRUE( controller_->bypass_active() ) << "still within the timeout";
 
   std::this_thread::sleep_for( std::chrono::milliseconds( 150 ) );
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_FALSE( controller_->safety_bypass_active_.load() ) << "the timeout must end it";
+  EXPECT_FALSE( controller_->bypass_active() ) << "the timeout must end it";
   EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 );
 }
 
@@ -698,7 +747,7 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassServiceEnables )
 
   bypass_service_mock_->handle_request( req_header, request );
 
-  EXPECT_TRUE( controller_->safety_bypass_active_.load() );
+  EXPECT_TRUE( controller_->bypass_active() );
 }
 
 TEST_F( SafetyPositionControllerTest, SafetyBypassServiceDisables )
@@ -709,7 +758,7 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassServiceDisables )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
 
   // First enable
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   auto req_header = std::make_shared<rmw_request_id_t>();
   req_header->sequence_number = 2L;
@@ -720,7 +769,7 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassServiceDisables )
 
   bypass_service_mock_->handle_request( req_header, request );
 
-  EXPECT_FALSE( controller_->safety_bypass_active_.load() );
+  EXPECT_FALSE( controller_->bypass_active() );
 }
 
 // ============================================================================
@@ -949,7 +998,7 @@ TEST_F( SafetyPositionControllerTest, StatusReflectsSafetyBypassActive )
 
   // The bypass publish happens in the service callback, not in update.
   // Simulate what the service callback does: set active + publish.
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
   controller_->publish_status();
   EXPECT_TRUE( captured.safety_bypass_active );
 }
@@ -1646,7 +1695,7 @@ TEST_F( SafetyPositionControllerCollisionTest, CollisionBypassSkipsCheck )
   activateController();
 
   // Enable safety bypass -> collision check skipped
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   // Start at safe position
   for ( auto &v : hw_state_values_ ) v = 0.0;
@@ -1909,7 +1958,7 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
   EXPECT_LE( hw_cmd_values_[1], 1.5 ) << "Without bypass, should clamp to upper limit";
 
   // Enable bypass
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   controller_->reference_interfaces_[0] = 0.0;
   controller_->reference_interfaces_[1] = 1.55;
@@ -2003,7 +2052,7 @@ TEST_F( SafetyPositionControllerCollisionTest, BypassSkipsCollisionButAllowsRela
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   // Start at a colliding configuration
   setStateValue( "joint1", 0.0 );
@@ -2288,7 +2337,7 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeStopsAtCollisionAndReportsS
   EXPECT_GT( hw_cmd_values_[1], 0.1 ) << "should have moved toward the target first";
 
   // ---- Bypass: the fold must proceed, but still velocity/acceleration limited ----
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   const double stalled_cmd = hw_cmd_values_[1];
   double prev_cmd = stalled_cmd, prev_v = 0.0, max_dv = 0.0, max_v = 0.0;

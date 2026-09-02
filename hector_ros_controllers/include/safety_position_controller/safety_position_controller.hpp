@@ -183,9 +183,15 @@ private:
    */
   bool run_safety_pipeline( const rclcpp::Duration &period );
 
-  /// Turn the safety bypass off and drop its deadline. Idempotent and callable from any
-  /// thread, including the control loop.
-  void clear_bypass();
+  /// True while safety checks are bypassed.
+  bool bypass_active() const
+  {
+    return safety_bypass_deadline_.load( std::memory_order_relaxed ) != 0;
+  }
+
+  /// Turn the safety bypass off. Idempotent and callable from any thread, including the
+  /// control loop.
+  void clear_bypass() { safety_bypass_deadline_.store( 0, std::memory_order_relaxed ); }
 
   /// Clear the bypass if its deadline has passed. Returns true if this call ended it.
   bool expire_bypass();
@@ -224,13 +230,14 @@ private:
   std::atomic<bool> estop_engage_pending_{ false };
 
   // ---- Safety bypass (for folded arm positions etc.) ----
-  std::atomic<bool> safety_bypass_active_{
-      false }; ///< when true, collision checks and strict limits are relaxed
-  /// steady_clock time at which the bypass lapses, as a count of nanoseconds; 0 when no
-  /// bypass is armed. The update loop enforces it. A wall timer would have to be created
-  /// and destroyed across the executor, the service and the lifecycle callbacks, one of
-  /// which runs on the control thread when the hardware faults - an unsynchronised
-  /// shared_ptr between threads, and a timer destroyed inside the control loop.
+  /// The whole bypass state: the steady_clock time it lapses at, in nanoseconds, or 0
+  /// when none is armed. Deliberately ONE atomic rather than a flag beside a deadline,
+  /// because arming and clearing race - the service answers on an executor thread while
+  /// the update loop expires it and the lifecycle callbacks clear it, one of those on
+  /// the control thread when the hardware faults. Two atomics can interleave into armed
+  /// with no deadline, which never lapses: collision checking off until someone notices.
+  /// A wall timer would be worse still, being a shared_ptr across the same threads and
+  /// destroyed inside the control loop.
   std::atomic<std::chrono::steady_clock::rep> safety_bypass_deadline_{ 0 };
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr
       bypass_safety_checks_service_; ///< service to toggle bypass

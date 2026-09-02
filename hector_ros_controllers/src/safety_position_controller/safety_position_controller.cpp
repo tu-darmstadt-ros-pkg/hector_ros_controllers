@@ -108,7 +108,6 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
                                     std::chrono::duration<double>( timeout_sec ) );
           safety_bypass_deadline_.store( deadline.time_since_epoch().count(),
                                          std::memory_order_relaxed );
-          safety_bypass_active_.store( true, std::memory_order_relaxed );
           response->success = true;
           response->message = "Safety bypass ENABLED. Collision checks disabled, joint limits "
                               "relaxed. Will auto-disable after " +
@@ -512,22 +511,17 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
 
 // ===== Helpers =====
 
-void SafetyPositionController::clear_bypass()
-{
-  safety_bypass_deadline_.store( 0, std::memory_order_relaxed );
-  safety_bypass_active_.store( false, std::memory_order_relaxed );
-}
-
 bool SafetyPositionController::expire_bypass()
 {
-  const auto deadline = safety_bypass_deadline_.load( std::memory_order_relaxed );
-  if ( deadline == 0 || !safety_bypass_active_.load( std::memory_order_relaxed ) ) {
+  auto deadline = safety_bypass_deadline_.load( std::memory_order_relaxed );
+  if ( deadline == 0 || std::chrono::steady_clock::now().time_since_epoch().count() < deadline ) {
     return false;
   }
-  if ( std::chrono::steady_clock::now().time_since_epoch().count() < deadline ) {
+  // Only the caller that still sees this deadline clears it, so a bypass armed in the
+  // meantime keeps the time it was granted instead of being cancelled by this one.
+  if ( !safety_bypass_deadline_.compare_exchange_strong( deadline, 0, std::memory_order_relaxed ) ) {
     return false;
   }
-  clear_bypass();
   RCLCPP_WARN( get_node()->get_logger(), "Safety bypass expired; safety checks are back on." );
   return true;
 }
@@ -695,7 +689,7 @@ bool SafetyPositionController::setup_pipeline_on_activate()
 bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &period )
 {
   const size_t n = params_.joints.size();
-  const bool bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+  const bool bypass_active = this->bypass_active();
   const bool collision_checks_active =
       !bypass_active && params_.check_self_collisions && collision_checker_ != nullptr;
 
@@ -853,7 +847,7 @@ void SafetyPositionController::publish_status()
     return;
   }
   SafetyDiagnostics::StatusFlags flags;
-  flags.bypass_active = safety_bypass_active_.load( std::memory_order_relaxed );
+  flags.bypass_active = bypass_active();
   flags.compliant_mode = in_compliant_mode_.load( std::memory_order_relaxed );
   flags.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
   diagnostics_->publishStatus( flags );

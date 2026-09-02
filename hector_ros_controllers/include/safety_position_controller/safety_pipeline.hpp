@@ -29,8 +29,10 @@ namespace safety_position_controller
  *   2. caller evaluates collisions at commandedPositions()
  *   3. step(observation)                     → constraints, solve, integrate, stall/park
  *
- * Every bound is a box the QP solves against, so the configuration that was checked in
- * step 2 is the one step 3 writes.
+ * Every bound is a box the QP solves against, so what step 3 writes is one bounded step
+ * away from the configuration checked in step 2, taken under the velocity, acceleration
+ * and collision-damper limits that check produced - not a correction applied afterwards
+ * that none of them saw.
  *
  * Not thread-safe; call from the control thread only.
  */
