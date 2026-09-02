@@ -383,27 +383,23 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &, const
 
   // E-stop edge handling
   const bool estop_active = estop_active_.load( std::memory_order_relaxed );
-  bool estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
 
   bool status_event = false;
-  if ( estop_active != estop_engaged ) {
+  if ( estop_active != estop_engaged_.load( std::memory_order_relaxed ) ) {
     if ( estop_active ) {
       // engage E-stop: record hold positions
       hold_positions_ = current_positions_;
-      estop_engaged_.store( true, std::memory_order_relaxed );
-      estop_engaged = true;
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints", n );
     } else {
       // release E-stop; the pipeline is parked, so the arm holds until a new reference
-      estop_engaged_.store( false, std::memory_order_relaxed );
-      estop_engaged = false;
       RCLCPP_WARN( get_node()->get_logger(),
                    "E-STOP released: holding until a new reference arrives" );
     }
+    estop_engaged_.store( estop_active, std::memory_order_relaxed );
     status_event = true;
   }
 
-  if ( estop_engaged ) {
+  if ( estop_active ) {
     // hold the recorded positions (no checks)
     pipeline_->invalidate();
     write_position_commands( hold_positions_ );

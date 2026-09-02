@@ -178,7 +178,7 @@ public:
   static double pairDirection( const std::vector<double> &derivatives, std::size_t num_pairs,
                                std::size_t pair_index )
   {
-    return derivatives.size() == num_pairs && pair_index < derivatives.size()
+    return derivatives.size() == num_pairs && pair_index < num_pairs
                ? derivatives[pair_index]
                : std::numeric_limits<double>::quiet_NaN();
   }
