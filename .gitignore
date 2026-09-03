@@ -5,3 +5,7 @@ CMakeLists.txt.user
 .vscode
 __pycache__/
 **/__pycache__/
+
+# Coverage output (see run_coverage.sh)
+coverage.info
+coverage_report/

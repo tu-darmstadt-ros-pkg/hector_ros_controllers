@@ -7,8 +7,6 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
-#include <realtime_tools/realtime_publisher.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/geometry.hpp>
@@ -23,8 +21,6 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-
-// #define SAFETY_CC_ENABLE_TIMING // TODO: remove when no longer needed for optimization
 
 /// Result of a collision query: collision flag + minimum clearance.
 struct CollisionResult {
@@ -51,11 +47,9 @@ public:
    * @param node lifecycle node (pub/log/time)
    * @param collision_padding min allowed distance [m]
    * @param collision_cache_epsilon cache threshold on max(q - q_last) [rad/m] -> reuse last distances
-   * @param pub_debug_geometry publish MarkerArray on ~/debug_collision_geometry
    */
   explicit CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
-                             double collision_padding = 0.0, double collision_cache_epsilon = 1e-6,
-                             bool pub_debug_geometry = false );
+                             double collision_padding = 0.0, double collision_cache_epsilon = 1e-6 );
 
   /**
    * @brief Init from URDF/SRDF XML.
@@ -80,17 +74,56 @@ public:
    * @brief Collision check from name→position map.
    * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
    * @param joint_positions rad (rev) / m (prismatic)
-   * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
+   * @return the latched result (collision flag, minimum clearance, optional per-pair
+   * gradients); valid until the next collision query
    */
-  CollisionResult checkCollision( const std::unordered_map<std::string, double> &joint_positions );
+  const CollisionResult &
+  checkCollision( const std::unordered_map<std::string, double> &joint_positions );
 
   /**
    * @brief Collision check for full q.
    * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
    * @param q size == model_.nq
-   * @return CollisionResult with collision flag, minimum clearance, and optional per-pair gradients
+   * @return the latched result (collision flag, minimum clearance, optional per-pair
+   * gradients); valid until the next collision query
    */
-  CollisionResult checkCollisionQ( const Eigen::VectorXd &q );
+  const CollisionResult &checkCollisionQ( const Eigen::VectorXd &q );
+
+  /**
+   * @brief Cap the number of safety-zone pairs returned (and gradient computations).
+   * When > 0, checkCollision keeps only the @p max_pairs closest pairs (sorted by
+   * distance ascending); 0 = unlimited. Pairs are always sorted by distance ascending.
+   * @param max_pairs maximum number of pairs; 0 disables the cap
+   */
+  void setMaxSafetyZonePairs( std::size_t max_pairs );
+
+  /// Where a joint's position lives in the configuration vector. Resolve once (name
+  /// lookup) and reuse every cycle; index < 0 means the joint is not in the model.
+  struct JointQSlot {
+    int index{ -1 };
+    bool continuous{ false }; ///< stored as the unit complex [cos, sin]
+  };
+
+  /**
+   * @brief Resolve a joint's configuration-vector slot by name.
+   * @return the slot; index < 0 if the joint is unknown or has an unsupported DoF layout
+   */
+  JointQSlot getJointQSlot( const std::string &joint_name ) const;
+
+  /// Write one joint position into a configuration vector; no-op for an invalid slot.
+  static void writeJointPosition( Eigen::VectorXd &q, const JointQSlot &slot, double position );
+
+  /// Neutral configuration of the model (size model_.nq); the seed for building q.
+  const Eigen::VectorXd &neutralConfiguration() const { return q_default_; }
+
+  /**
+   * @brief Build a full pinocchio configuration vector from a name→position map.
+   * Unknown joints are ignored (warn-throttled); unset joints keep their neutral value.
+   * Handles 1-DoF joints and continuous joints ([cos, sin]).
+   * @param joint_positions rad (revolute) / m (prismatic)
+   * @return q of size model_.nq
+   */
+  Eigen::VectorXd buildConfiguration( const std::unordered_map<std::string, double> &joint_positions );
 
   /**
    * @brief Set the safety-zone threshold used by subsequent collision queries.
@@ -130,6 +163,17 @@ public:
    */
   std::pair<std::string, std::string> getPairNames( std::size_t pair_index ) const;
 
+  // ---- Read-only views of the last check, for visualization ----
+  const pinocchio::GeometryModel &geometryModel() const { return geom_model_; }
+  const pinocchio::GeometryData &geometryData() const { return geom_data_; }
+  const CollisionResult &lastResult() const { return last_collision_result_; }
+  /// Per pair: whether its distance (and nearest points) were recomputed this cycle.
+  /// Broadphase pruning leaves pruned pairs holding stale data.
+  const std::vector<bool> &nearestPointsFresh() const { return nearest_points_fresh_; }
+  /// URDF root link; FK is relative to it, so markers are published in this frame.
+  const std::string &rootFrame() const { return root_frame_; }
+  double collisionPadding() const { return collision_padding_; }
+
   /**
    * @brief Set collision padding [m].
    * @param collision_padding new threshold
@@ -137,32 +181,10 @@ public:
   void updateCollisionPadding( double collision_padding );
 
   /**
-   * @brief Toggle RViz debug publishing.
-   * @param pub_debug_geometry on/off
-   */
-  void updateDoDebugVisualization( bool pub_debug_geometry );
-
-  /**
    * @brief Set cache epsilon
    * @param epsilon new threshold
    */
   void updateCollisionCacheEpsilon( double epsilon );
-
-  /**
-   * @brief Set per-pair directional derivatives for visualization coloring.
-   * Must be called before the next collision check if you want colors to reflect motion direction.
-   * @param derivatives one value per collision pair; NaN = no info, >=0 = moving away, <0 = moving closer
-   * @param safety_zone_threshold the threshold used to classify pairs into safety zone vs safe
-   */
-  void setDirectionalInfo( const std::vector<double> &derivatives, double safety_zone_threshold );
-
-  /**
-   * @brief Toggle lightweight collision distance visualization.
-   * Publishes only safety-zone and collision distance lines via a realtime publisher.
-   * Ignored when full debug visualization is active.
-   * @param enable on/off
-   */
-  void updatePublishCollisionDistances( bool enable );
 
   /**
    * @brief Enable/disable broadphase AABB-tree acceleration for distance queries.
@@ -176,14 +198,28 @@ public:
   bool isBroadphaseEnabled() const;
 
   /**
-   * @brief Compute the Yoshikawa manipulability index for a given end-effector frame.
-   * Evaluated at the configuration of the last collision check (q_last_).
-   * @param ee_frame_name name of the end-effector frame in the URDF
-   * @return w = sqrt(det(J * J^T)), 0 if singular or frame not found
+   * @brief Select the end-effector frame for computeManipulability().
+   * Resolves the frame once so the per-cycle call needs no name lookup.
+   * @param ee_frame_name frame in the URDF; empty disables manipulability
+   * @return false if the frame is not in the model
    */
-  double computeManipulability( const std::string &ee_frame_name );
+  bool setManipulabilityFrame( const std::string &ee_frame_name );
+
+  /**
+   * @brief Yoshikawa manipulability at the configuration of the last collision check.
+   * @return w = sqrt(det(J * J^T)); 0 if singular or no frame was selected
+   */
+  double computeManipulability();
 
 private:
+  /// Forget the cached configuration: the next query recomputes instead of serving
+  /// last_collision_result_. Required whenever the latch and q_last_ stop agreeing
+  /// (error results) or the classification parameters change.
+  void invalidateCache() { q_last_.resize( 0 ); }
+
+  /// "Assume in collision" answer for unusable input; never touches the latch/cache.
+  static const CollisionResult &unsafeResult();
+
   /**
    * @brief Compute the distance gradient for a single collision pair.
    * Requires FK + computeJointJacobians to have been called already.
@@ -193,24 +229,12 @@ private:
   Eigen::VectorXd computePairGradient( std::size_t pair_k );
 
   /**
-   * @brief Publish geometry and nearest-point markers with namespace-separated categories.
-   */
-  void publishMarkers() const;
-
-  /**
-   * @brief Publish lightweight distance-only markers for safety zone and collision pairs.
-   * Uses realtime publisher (non-blocking). Skips geometry markers and safe-pair lines.
-   */
-  void publishMinimalMarkers();
-
-  /**
    * @brief Keep only pairs attached to controlled joints (and ancestors).
    * @param controlled_joints names defining relevance
    */
   void filterCollisionPairs( const std::vector<std::string> &controlled_joints );
 
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
 
   pinocchio::Model model_;
   pinocchio::Data data_;
@@ -219,50 +243,40 @@ private:
 
   Eigen::VectorXd q_default_;
   Eigen::VectorXd q_last_;
+
+  // Per-cycle scratch, kept as members so the control loop does not reallocate.
+  std::vector<std::size_t> safety_zone_indices_;
+  std::vector<std::size_t> primaries_;
+  std::vector<std::size_t> duplicates_;
+  std::vector<std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex>> seen_links_;
   CollisionResult last_collision_result_;
 
   double collision_padding_{ 0.0 };
   double collision_cache_epsilon_{ 1e-6 };
-  double safety_zone_threshold_{ 0.0 }; ///< 0 = no gradient computation
-  bool pub_debug_geometry_{ false };
-  bool pub_collision_distances_{ false };
-  std::shared_ptr<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>> rt_markers_pub_;
+  double safety_zone_threshold_{ 0.0 };    ///< 0 = no gradient computation
+  std::size_t max_safety_zone_pairs_{ 0 }; ///< cap on returned pairs; 0 = unlimited
 
   std::unordered_map<std::string, pinocchio::JointIndex> name_to_id_;
 
-  /// Per-pair: true if nearest_points were recomputed this cycle. Broadphase pruning leaves pruned
-  /// pairs holding stale data, so publishMarkers() must skip pairs that are not fresh.
+  /// Per-pair: true if nearest_points were recomputed this cycle. Broadphase pruning
+  /// leaves pruned pairs holding stale data (see nearestPointsFresh()).
   std::vector<bool> nearest_points_fresh_;
 
   /// Model root link (URDF root); frame_id for markers since FK is relative to it. Defaults to "base_link".
   std::string root_frame_{ "base_link" };
 
-  // Per-pair directional derivatives for visualization (set by controller via setDirectionalInfo)
-  std::vector<double> viz_directional_derivatives_; ///< one per collision pair; NaN = no info
-  double viz_safety_zone_threshold_{ 0.0 };
-
   // Pre-allocated Jacobian workspace (sized in initFromXml)
   Eigen::MatrixXd J1_workspace_; ///< 6 × nv
   Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+
+  static constexpr pinocchio::FrameIndex kNoFrame = std::numeric_limits<pinocchio::FrameIndex>::max();
+  pinocchio::FrameIndex manipulability_frame_{ kNoFrame };
+  Eigen::MatrixXd manipulability_jacobian_; ///< 6 × nv workspace
 
   // Broadphase acceleration
   bool use_broadphase_{ true };
   using BroadPhaseManager = pinocchio::BroadPhaseManagerTpl<coal::DynamicAABBTreeCollisionManager>;
   std::unique_ptr<BroadPhaseManager> broadphase_manager_;
-
-#ifdef SAFETY_CC_ENABLE_TIMING
-  struct TimingStats {
-    double fk_us{ 0 };
-    double placement_us{ 0 };
-    double distance_us{ 0 };
-    double jacobian_us{ 0 };
-    double gradient_us{ 0 };
-    double total_us{ 0 };
-    int count{ 0 };
-    std::size_t num_safety_zone_pairs{ 0 };
-  };
-  TimingStats timing_stats_;
-#endif
 };
 
 #endif // COLLISION_CHECKER_HPP

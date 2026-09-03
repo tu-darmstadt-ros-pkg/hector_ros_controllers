@@ -17,76 +17,82 @@ A **safety layer for joint position commands**, usable both
 * **Chainable or standalone**:
 
     * *Chained mode*: consumes reference interfaces from an upstream controller.
-    * *Non-chained mode*: acts as a position controller driven by `Float64MultiArray` on `~/commands`.
-* **Continuous joint handling**:
+    * *Non-chained mode*: acts as a position controller driven by `Float64MultiArray` on `~/commands`. A message whose length is not exactly the joint count is dropped whole and the previous reference kept — a prefix would leave the joints it does not name on an older command's targets.
+* **Continuous joint handling**: continuous joints always take the shortest path to the target, and the command integrates freely while the hardware reports wrapped angles.
+* **Joint limit enforcement**: the reference is clamped to the URDF limits, and the QP brakes into them along a discrete braking envelope so a limit is approached, not overshot.
+* **Self-collision avoidance by velocity damper (ProxQP)**: rather than scaling the whole command down, each cycle solves a small dense QP over joint velocities that tracks the desired velocity subject to
+    * per-joint velocity and acceleration boxes (`acceleration_limits`, `deceleration_scale`),
+    * position-limit braking bounds,
+    * one Faverjon–Tournassoud damper row per collision pair inside `collision_safety_zone`, combined with the braking envelope that can still stop at `collision_padding`,
+    * per-joint deviation boxes around the leashed reference (`joint_deviation_limits`), bounding how far any link may leave the upstream-validated path,
+    * an anti-windup box on `|command − measured|` (`tracking_leash`).
 
-    * Optionally unwraps continuous joints to the nearest equivalent angle.
-* **Joint limit enforcement**:
-
-    * Clamps commands to URDF limits (rev/prismatic/other) if enabled.
-* **Self-collision check with distance-based velocity scaling**:
-
-    * Uses URDF + SRDF via `CollisionChecker` (Pinocchio + hpp-fcl).
-    * Returns minimum pairwise clearance distance, not just a binary collision flag.
-    * When `check_self_collisions` is enabled, per-cycle joint motion is automatically limited based on URDF velocity limits (`block_velocity_scaling`) and **scaled down proportionally** as the robot approaches collision geometry.
-    * **Safety zone**: Between `collision_padding` and `collision_safety_zone`, velocity is linearly interpolated from 0% to 100%. Beyond `collision_safety_zone`, full velocity is allowed. At or below `collision_padding`, motion is blocked entirely.
-    * **Directional scaling** (`directional_collision_scaling`): When enabled, the controller computes collision distance gradients w.r.t. joint velocities for all pairs within the safety zone. Only motions that *decrease* a collision distance are slowed down — motions moving away from all collisions proceed at full speed. This prevents the robot from becoming trapped near collisions. The check is conservative: if *any* safety-zone pair's distance would decrease, the full distance-based scaling is applied.
-    * This replaces the former `block_if_too_far` parameter with a mandatory, distance-aware velocity limiting system.
-* **Collision debug visualization** (RViz markers):
-
-    * When `debug_visualize_collisions` is enabled, publishes `MarkerArray` on `~/debug_collision_geometry` with separate namespaces for toggling in RViz:
-        * `collision_geometry` — all collision geometry objects (gray = safe, red = colliding).
-        * `distance_lines_safe` — nearest-point lines for pairs outside the safety zone (gray).
-        * `distance_lines_safety_zone` — nearest-point lines for safety-zone pairs, colored per-pair: green = motion increases distance, red = motion decreases distance, yellow = no directional info.
-        * `distance_lines_collision` — nearest-point lines for colliding pairs (bright red, thicker).
-* **Status topic** (`~/status`):
-
-    * Publishes `SafetyPositionControllerStatus` (latched) at `status_publish_rate` Hz (and on events) with diagnostic fields: `min_collision_distance`, `distance_scale`, `effective_scale`, `worst_directional_derivative` (NaN when not evaluated), `num_pairs_in_safety_zone`, `manipulability`, plus safety bypass, E-stop, and mode flags. When `set_current_limits` is true, the message also carries the active per-joint current limits.
-* **E-Stop**:
-
-    * Subscribes to `~/safety_estop` (`std_msgs/Bool`).
-    * On activation → records current positions and *holds them* (no limit/collision checks) until E-Stop is released.
+  Motion therefore *flows around* an obstacle where a free direction exists, and blocks cleanly where none does. Distances and gradients come from `CollisionChecker` (Pinocchio + coal) using URDF + SRDF.
+* **Contact crawl** (`qp_contact_crawl_speed`): while any pair is inside the padding the velocity box is clamped, because sliding along curved geometry loses true distance faster than the linearised constraint predicts.
+* **Push-out and infeasibility handling**: a penetrating pair is given a capped separation demand (`qp_max_repulsion_speed`). Opposing demands that make the QP infeasible are relaxed in stages — deepest pair first, then "do not get worse" — and only then does the controller fall back to braking at the deceleration limit.
+* **Stall and park**: when the reference demands motion but the solution is ~zero for `qp_stall_timeout`, `stalled` is reported so an upstream planner can replan. After `stall_park_timeout` the controller **parks**: the reference in effect is abandoned and the limb holds even if the blockage clears, until a reference arrives that differs by more than `park_resume_reference_threshold`.
+* **Resting-joint hold** (`hold_unrequested_joints`, off by default): a joint whose reference is not asking it to move may not be recruited to flow around or push out of a collision. Intended for a flipper whose resting pose carries the robot.
+* **Unobservable-state watchdog** (`state_read_timeout`): joint states that stay unreadable, a collision state that cannot be assembled, or a joint that has left its command by more than twice `tracking_leash`, all rebase the pipeline onto the measured state and park.
+* **Collision debug visualization** (RViz markers on `~/debug_collision_geometry`, rate-limited by `collision_visualization_rate`), with separate namespaces for toggling:
+    * `collision_geometry` — all collision geometry objects (only with `debug_visualize_collisions`).
+    * `distance_lines_safe` — nearest-point lines for pairs outside the safety zone.
+    * `distance_lines_safety_zone` — safety-zone pairs, colored per pair: green = motion increases distance, red = decreases, yellow = no directional info.
+    * `distance_lines_collision` — colliding pairs (bright red, thicker).
+* **Status topic** (`~/status`): `SafetyPositionControllerStatus` (latched) at `status_publish_rate` and on events, carrying `min_collision_distance`, `num_pairs_in_safety_zone`, `manipulability`, the QP fields `qp_solved` / `qp_braking` / `qp_push_out_relaxed` / `qp_num_collision_constraints` / `qp_solve_time_us`, the `stalled` and `parked` flags, and the bypass / E-stop / mode flags. With `set_current_limits`, also the active per-joint current limits.
+* **QP introspection** (`~/qp_debug`, `publish_qp_debug`): per-cycle desired vs commanded velocity, the velocity box, per-constraint distance and achieved approach speed, solver state. Dynamically reconfigurable.
+* **E-Stop**: subscribes to `e_stop_topic` (`std_msgs/Bool`, default `~/safety_estop`). Engaging holds the positions latched at the engage edge, with no limit or collision checks. Releasing does **not** resume: the pipeline is rebased and parked, so the arm waits for a new reference. Intended for a *soft* stop; a hard stop that removes drive power faults the hardware and deactivates the controller instead.
 * **Safety Bypass Mode** (for folded arm positions):
 
-    * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) to temporarily disable collision checks and relax joint limits.
-    * Useful when driving the arm into folded positions where intentional collisions must be made.
-    * Adds configurable tolerance to joint limits (default 3%).
-    * Auto-disables after configurable timeout (default 60 seconds) for safety.
-    * **Note:** Joint wrapping for continuous joints remains **always active** even during bypass.
-* **Optional current-limit control**:
-
-    * Per-joint compliant/stiff current limits, written to `<joint>/current`.
-* **Debug joint state publishers**:
-
-    * If enabled, publishes incoming command references and outgoing commanded positions as `sensor_msgs/JointState`.
+    * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) drops collision checking and widens the joint limits by `safety_bypass_joint_limit_tolerance`.
+    * Lapses on its own after `safety_bypass_timeout`, enforced by the update loop.
+    * Cleared on **both** `on_activate` and `on_deactivate`: a bypass is granted to a controller someone is watching and must not be inherited by one that restarts after a fault.
+    * Velocity and acceleration bounds, and the tracking leash, still apply during a bypass — only collision checking and the strict limits are relaxed.
+* **Optional current-limit control**: per-joint compliant/stiff limits written to `<joint>/current`. Activation is refused if a pair is not finite, not positive, or if the compliant limit exceeds the stiff one.
+* **Debug joint state publishers**: incoming references and outgoing commands as `sensor_msgs/JointState`. Dynamically reconfigurable.
 
 
 ### Parameters (Safety Position Controller)
 
 | Parameter                          | Type       | Default | Description                                                                                                         |
 | ---------------------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
-| `joints`                           | `string[]` | `[]`    | Names of joints controlled. Must match URDF. *(effectively read-only; set via params at startup)*                   |
-| `unwrap_continuous_joints`         | `bool`     | `true`  | If `true`, continuous joints are unwrapped to stay close to the current angle.                                      |
-| `enforce_position_limits`          | `bool`     | `true`  | If `true`, clamps joint commands to URDF position limits.                                                           |
-| `check_self_collisions`            | `bool`     | `true`  | If `true`, performs self-collision checks and enables distance-based velocity scaling. *(read-only)*                 |
-| `collision_padding`                | `double`   | `0.01`  | Minimum allowed link-to-link distance [m]; distances ≤ padding are treated as collision. Bounds: [0.0, 1.0].       |
-| `collision_safety_zone`            | `double`   | `0.05`  | Outer safety zone distance [m]. Between `collision_padding` and this value, velocity is linearly scaled down. Must be > `collision_padding`. |
-| `directional_collision_scaling`    | `bool`     | `true`  | If `true`, velocity scaling near collisions is direction-aware: only motions that decrease any collision distance in the safety zone are slowed down. Motions moving away proceed at full speed. Requires `check_self_collisions`. |
-| `collision_cache_epsilon`          | `double`   | `1e-6`  | Threshold [rad] for reusing the previous collision result (skip recomputation if the pose change is below this value). |
-| `use_broadphase`                   | `bool`     | `true`  | If `true`, uses AABB-tree broadphase acceleration for self-collision distance queries (3–5× speedup). Only relevant when `check_self_collisions` is true. *(read-only)* |
-| `block_velocity_scaling`           | `double`   | `1.5`   | Scales maximum per-cycle motion: allowed step = `velocity_limit / update_rate * block_velocity_scaling`. Bounds: [0.01, 15.0]. Only active when `check_self_collisions` is true. |
-| `debug_visualize_collisions`       | `bool`     | `false` | If `true`, publishes collision debug markers for RViz (via `CollisionChecker`). Uses separate marker namespaces for toggling. |
-| `publish_collision_distances`      | `bool`     | `false` | If `true`, publishes lightweight distance-only markers for safety zone / collision pairs via a realtime publisher. Cheaper than `debug_visualize_collisions`. Ignored when full debug visualization is active. |
-| `set_current_limits`               | `bool`     | `false` | If `true`, enables writing `<joint>/current` limits for compliant/stiff modes. *(read-only)*                        |
-| `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint current limit in **compliant** mode [A].                                                                  |
-| `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint current limit in **stiff** mode [A].                                                                      |
-| `publish_debug_joint_states`       | `bool`     | `false` | If `true`, publishes debug `JointState` messages for incoming references and outgoing commands.                     |
-| `safety_bypass_timeout`            | `double`   | `60.0`  | Time in seconds after which safety bypass auto-disables. Bounds: [0.1, 600.0].                                     |
-| `safety_bypass_joint_limit_tolerance` | `double` | `0.03`  | Tolerance factor added to joint limits during bypass. E.g., 0.03 = 3% of the total joint range added to both sides. Bounds: [0.0, 1.0]. |
-| `manipulability_ee_frame`          | `string`   | `arm_end_link` | URDF frame used for the Yoshikawa manipulability index `w = sqrt(det(J·Jᵀ))` published in `~/status`. Empty string disables the computation. |
-| `status_publish_rate`              | `double`   | `10.0`  | Rate [Hz] at which `~/status` is published periodically (in addition to event-driven publishes). `0` disables the periodic timer. Bounds: [0.0, 100.0]. |
+| `joints`                           | `string[]` | `[]`    | Names of joints controlled. Must match URDF. *(read-only)*                                                          |
+| `check_self_collisions`            | `bool`     | `true`  | Enables self-collision damper constraints. Configuration is refused if enabled with zero collision pairs. *(read-only)* |
+| `use_broadphase`                   | `bool`     | `true`  | AABB-tree broadphase before narrow-phase GJK (3–5× speedup). *(read-only)*                                          |
+| `collision_padding`                | `double`   | `0.01`  | Minimum allowed link-to-link distance [m]. Bounds: [0.0, 1.0].                                                       |
+| `collision_safety_zone`            | `double`   | `0.05`  | Outer damper zone [m]; a pair inside it constrains the approach speed. Must be > `collision_padding`.                |
+| `collision_cache_epsilon`          | `double`   | `1e-6`  | Pose change [rad] below which the previous collision result is reused. Bounds: [0.0, 0.01].                          |
+| `acceleration_limits.*.limit`      | `double`   | `8.0`   | Per-joint speed-up limit [rad/s²]. Bounds: [0.001, 10000.0].                                                         |
+| `deceleration_scale`               | `double`   | `3.0`   | Braking limit = this × the acceleration limit, so stops stay snappy while re-acceleration is smooth. Bounds: [1.0, 100.0]. |
+| `default_velocity_limit`           | `double`   | `1.5`   | Fallback velocity limit [rad/s] for joints whose URDF gives none. Bounds: [0.001, 100.0].                            |
+| `qp_damper_xi`                     | `double`   | `2.0`   | Collision damper gain [1/s]. Bounds: [0.01, 100.0].                                                                  |
+| `qp_max_pair_constraints`          | `int`      | `10`    | Maximum collision pairs used as constraints per cycle (closest kept). Bounds: [1, 64].                               |
+| `qp_max_repulsion_speed`           | `double`   | `0.05`  | Cap [m/s] on the push-out speed demanded when a pair is inside the padding. Bounds: [0.0, 10.0].                     |
+| `qp_contact_crawl_speed`           | `double`   | `0.15`  | Velocity clamp [rad/s] while any pair is inside the padding. `0` disables. Bounds: [0.0, 100.0].                     |
+| `joint_deviation_limits.*.limit`   | `double`   | `0.25`  | Max deviation [rad] of the command from the leashed reference. One-sided: never demands catch-up. `0` disables for that joint. Bounds: [0.0, 100.0]. |
+| `reference_leash_time`             | `double`   | `0.3`   | Keeps the tracked target within `velocity_limit × this` of the command. Does not bound catch-up *speed*; it anchors the deviation boxes. Bounds: [0.0, 60.0]. |
+| `tracking_leash`                   | `double`   | `0.5`   | Anti-windup box [rad] on `\|command − measured\|`. Must exceed the hardware's nominal following lag or it throttles the commanded speed. Twice this counts as the joint having left its command. `0` disables. Bounds: [0.0, 10.0]. |
+| `hold_unrequested_joints`          | `bool`     | `false` | If `true`, a joint the reference is not moving is pinned and cannot be recruited for flow-around or push-out.        |
+| `hold_unrequested_velocity_threshold` | `double` | `0.01` | Desired-velocity magnitude [rad/s] below which a joint counts as "not requested". Bounds: [0.0001, 10.0].            |
+| `qp_stall_timeout`                 | `double`   | `1.0`   | Time [s] of demanded-but-absent motion after which `stalled` is reported. Bounds: [0.05, 600.0].                     |
+| `qp_stall_velocity_threshold`      | `double`   | `0.01`  | Velocity [rad/s] below which motion counts as stalled. Bounds: [0.0001, 10.0].                                       |
+| `stall_park_timeout`               | `double`   | `5.0`   | Stalled this long [s] → park: abandon the reference and hold until a new one. `0` disables. Bounds: [0.0, 3600.0].   |
+| `park_resume_reference_threshold`  | `double`   | `0.01`  | Per-joint reference change [rad] that counts as a new command and releases a park. Bounds: [0.0001, 10.0].           |
+| `state_read_timeout`               | `double`   | `0.1`   | Time [s] of unobservable safety state after which the pipeline is rebased and parked. Set to at least twice the control period. Bounds: [0.001, 10.0]. |
+| `e_stop_topic`                     | `string`   | `~/safety_estop` | Topic carrying the **soft** emergency stop. Subscribed transient-local and reliable, so a publisher must latch. *(read-only)* |
+| `set_current_limits`               | `bool`     | `false` | If `true`, claims and writes `<joint>/current`. *(read-only)*                                                        |
+| `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint limit [A] in compliant mode. Must be positive and ≤ `stiff_limit`. Bounds: (0.0, 30.0).                    |
+| `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint limit [A] in stiff mode. A Dynamixel holds this in a two-byte 0.001 A register, so ≥ 32.768 A does not fit and reaches the motor as **zero**. Bounds: (0.0, 30.0). |
+| `debug_visualize_collisions`       | `bool`     | `false` | Publish full collision geometry markers.                                                                            |
+| `publish_collision_distances`      | `bool`     | `false` | Publish distance lines only. Much cheaper; ignored when `debug_visualize_collisions` is true.                        |
+| `collision_visualization_rate`     | `double`   | `25.0`  | Marker rate [Hz]; `0` publishes every control cycle. Measured in ROS time, so under a simulation clock an outside tool sees this scaled by the real-time factor. Bounds: [0.0, 1000.0]. |
+| `publish_qp_debug`                 | `bool`     | `false` | Per-cycle QP introspection on `~/qp_debug`. *(dynamically reconfigurable)*                                          |
+| `publish_debug_joint_states`       | `bool`     | `false` | Debug `JointState` for references and commands. *(dynamically reconfigurable)*                                       |
+| `safety_bypass_timeout`            | `double`   | `60.0`  | Time [s] after which a bypass lapses. Bounds: [0.1, 600.0].                                                          |
+| `safety_bypass_joint_limit_tolerance` | `double` | `0.03` | Fraction of joint range added to both sides during a bypass. Bounds: [0.0, 1.0].                                     |
+| `manipulability_ee_frame`          | `string`   | `arm_end_link` | Frame for the Yoshikawa index `w = sqrt(det(J·Jᵀ))` in `~/status`. Empty disables it.                        |
+| `status_publish_rate`              | `double`   | `10.0`  | Rate [Hz] of periodic `~/status` publishes, in addition to event-driven ones. `0` disables the timer. Bounds: [0.0, 100.0]. |
 
-> **Note:** Parameters are read/updated at `on_activate()`. To apply runtime changes reliably, deactivate and reactivate the controller.
+> **Note:** except where marked dynamically reconfigurable, parameters are re-read at `on_activate()`. To apply a runtime change, deactivate and reactivate the controller. Read-only parameters need a reload.
 
 ---
 
@@ -96,16 +102,17 @@ A **safety layer for joint position commands**, usable both
 
 | Topic                        | Type                                | Used for                                                                     |
 | ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
-| `~/commands`                 | `std_msgs/Float64MultiArray`        | **Non-chained mode**: incoming position commands (one per joint).            |
-| `~/safety_estop`             | `std_msgs/Bool`                     | E-Stop control. `true` → latch and hold current positions; `false` → resume. |
+| `~/commands`                 | `std_msgs/Float64MultiArray`        | **Non-chained mode**: position commands, exactly one per joint. Any other length is refused. |
+| `e_stop_topic`               | `std_msgs/Bool`                     | Soft E-Stop. `true` → hold the latched positions; `false` → rebase and park until a new reference. Transient-local, reliable. |
 | `robot_description_semantic` | `std_msgs/String` (transient local) | SRDF XML for self-collision checking.                                        |
 
 **Publications**
 
 | Topic                           | Type                                    | Content                                                                | Condition |
 | ------------------------------- | --------------------------------------- | ---------------------------------------------------------------------- | --------- |
-| `~/status`                      | `SafetyPositionControllerStatus`        | Latched diagnostics: collision distances, scaling factors, safety state. | Always |
-| `~/debug_collision_geometry`    | `visualization_msgs/MarkerArray`        | Collision geometry, distance lines, colored by directional scaling.     | `debug_visualize_collisions = true` or `publish_collision_distances = true` |
+| `~/status`                      | `SafetyPositionControllerStatus`        | Latched diagnostics: collision distance, QP state, stall/park, mode flags. | Always |
+| `~/qp_debug`                    | `SafetyQpDebug`                         | Per-cycle desired vs commanded velocity, bounds, per-constraint distances, solver state. | `publish_qp_debug = true` |
+| `~/debug_collision_geometry`    | `visualization_msgs/MarkerArray`        | Collision geometry and distance lines, colored by approach direction.  | `debug_visualize_collisions = true` or `publish_collision_distances = true` |
 | `~/debug_in_joint_states`       | `sensor_msgs/JointState`                | Names = `joints`, positions = current **references** (input commands). | `publish_debug_joint_states = true` |
 | `~/debug_out_joint_states`      | `sensor_msgs/JointState`                | Names = `joints`, positions = final **commanded** joint positions.     | `publish_debug_joint_states = true` |
 
@@ -113,8 +120,8 @@ A **safety layer for joint position commands**, usable both
 
 | Service                    | Type               | Description                                                                                          |
 | -------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------- |
-| `~/enforce_current_limits` | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) compliant mode (switch between compliant/stiff current limits). Only available when `set_current_limits = true`. |
-| `~/bypass_safety_checks`   | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) safety bypass mode. Disables collision checks and relaxes joint limits. Auto-disables after `safety_bypass_timeout` seconds. Joint wrapping remains active. |
+| `~/enforce_current_limits` | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) compliant mode. Only available when `set_current_limits = true`. Not inherited across a restart: activation resets to stiff. |
+| `~/bypass_safety_checks`   | `std_srvs/SetBool` | Enable (`true`) or disable (`false`) the safety bypass. Lapses after `safety_bypass_timeout`, and is cleared on every activation and deactivation. Velocity, acceleration and tracking-leash bounds still apply while it is active. |
 
 ---
 
@@ -321,8 +328,6 @@ A **safety layer for joint position commands**, usable both
 | Parameter                          | Type       | Default | Description                                                                                                         |
 | ---------------------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
 | `joints`                           | `string[]` | `[]`    | Names of joints controlled. Must match URDF. *(effectively read-only; set via params at startup)*                   |
-| `unwrap_continuous_joints`         | `bool`     | `true`  | If `true`, continuous joints are unwrapped to stay close to the current angle.                                      |
-| `enforce_position_limits`          | `bool`     | `true`  | If `true`, clamps joint commands to URDF position limits.                                                           |
 | `check_self_collisions`            | `bool`     | `true`  | If `true`, performs a self-collision check on the **target** pose before sending commands.                          |
 | `collision_padding`                | `double`   | `0.0`   | Minimum allowed link-to-link distance [m]; distances ≤ padding are treated as collision.                            |
 | `collision_cache_epsilon`          | `double`   | `1e-6`  | Threshold for reusing the previous collision result (skip recomputation if the pose change is below this value).    |
@@ -510,8 +515,6 @@ ros2 topic echo /gripper_controller/is_grasped
   arm_safety_position_controller:
     ros__parameters:
       joints: [ arm_joint_1, arm_joint_2, arm_joint_3, arm_joint_4, arm_joint_5, arm_joint_6, arm_joint_7 ]
-      unwrap_continuous_joints: true
-      enforce_position_limits: true
       check_self_collisions: true
       collision_padding: 0.01
       collision_safety_zone: 0.05

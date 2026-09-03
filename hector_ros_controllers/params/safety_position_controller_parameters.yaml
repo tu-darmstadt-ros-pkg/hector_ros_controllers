@@ -5,16 +5,6 @@ safety_position_controller:
     description: Names of the joints to control. Must match the joints defined in the robot URDF.
     read_only: true
 
-  unwrap_continuous_joints:
-    type: bool
-    default_value: true
-    description: If true, continuous joints are unwrapped to maintain continuity between consecutive commands.
-
-  enforce_position_limits:
-    type: bool
-    default_value: true
-    description: If true, position commands are clamped to joint limits ±epsilon according to the URDF limits.
-
   check_self_collisions:
     type: bool
     default_value: true
@@ -31,7 +21,9 @@ safety_position_controller:
   collision_cache_epsilon:
     type: double
     default_value: 0.000001
-    description: Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true.
+    description: Epsilon in [rad] used to speed up self-collision checks by caching previous distance computations when 'check_self_collisions' is true. Keep it far below the smallest joint motion that can matter - a large value keeps serving a stale safe answer while the arm moves.
+    validation:
+      bounds<>: [0.0, 0.01]
 
   use_broadphase:
     type: bool
@@ -42,16 +34,6 @@ safety_position_controller:
       yielding a 3-5x speedup. Only relevant when 'check_self_collisions' is true.
     read_only: true
 
-  block_velocity_scaling:
-    type: double
-    default_value: 1.5
-    description: >
-      Scaling factor for velocity-limited stepping. The maximum per-cycle step is
-      velocity_limit / update_rate * block_velocity_scaling. Only active when
-      'check_self_collisions' is true.
-    validation:
-      bounds<>: [0.01, 15.0]
-
   collision_safety_zone:
     type: double
     default_value: 0.05
@@ -60,19 +42,219 @@ safety_position_controller:
       'collision_padding' and 'collision_safety_zone', joint velocities are linearly scaled
       down to zero. Must be strictly greater than 'collision_padding'.
 
-  directional_collision_scaling:
-    type: bool
-    default_value: true
+  acceleration_limits:
+    __map_joints:
+      limit:
+        type: double
+        default_value: 8.0
+        description: >
+          Per-joint acceleration limit (speed-up) in rad/s^2 (m/s^2 for prismatic).
+        validation:
+          bounds<>: [0.001, 10000.0]
+
+  deceleration_scale:
+    type: double
+    default_value: 3.0
     description: >
-      If true, velocity scaling near collisions is direction-aware: only motions
-      that decrease any collision distance in the safety zone are slowed down.
-      Motions moving away from all collisions proceed at full speed.
-      Requires 'check_self_collisions' to be true.
+      Deceleration limit = deceleration_scale * acceleration limit. Braking (for safety)
+      is allowed to be stronger than speed-up so collision stops stay snappy while
+      re-acceleration is smooth.
+    validation:
+      bounds<>: [1.0, 100.0]
+
+  qp_damper_xi:
+    type: double
+    default_value: 2.0
+    description: >
+      Collision velocity-damper gain in [1/s]: the allowed approach speed toward a
+      collision is qp_damper_xi * (distance - collision_padding) /
+      (collision_safety_zone - collision_padding).
+    validation:
+      bounds<>: [0.01, 100.0]
+
+  qp_max_pair_constraints:
+    type: int
+    default_value: 10
+    description: >
+      Maximum number of collision pairs used as QP constraints per cycle (the closest
+      pairs are kept). Bounds the QP size for real-time safety.
+    validation:
+      bounds<>: [1, 64]
+
+  qp_max_repulsion_speed:
+    type: double
+    default_value: 0.05
+    description: >
+      Cap in [m/s] on the active push-out speed the collision damper may request when a
+      pair is inside the collision padding.
+    validation:
+      bounds<>: [0.0, 10.0]
+
+  joint_deviation_limits:
+    __map_joints:
+      limit:
+        type: double
+        default_value: 0.25
+        description: >
+          Maximum allowed deviation in [rad] of the commanded joint position from the
+          (leashed) reference while flowing around collisions. Bounds how far EVERY link
+          may leave the upstream-validated path (per-joint box, one-sided: it never
+          demands catch-up, only prevents drifting further). 0 disables for that joint.
+        validation:
+          bounds<>: [0.0, 100.0]
+
+  qp_contact_crawl_speed:
+    type: double
+    default_value: 0.15
+    description: >
+      Velocity clamp in [rad/s] applied while any collision pair is inside the padding.
+      Tangential sliding on curved geometry sinks the true distance quadratically with
+      speed (linearization sag), so crawling near contact keeps the capped push-out
+      stronger than the sag. 0 disables.
+    validation:
+      bounds<>: [0.0, 100.0]
+
+  hold_unrequested_joints:
+    type: bool
+    default_value: false
+    description: >
+      If true, a joint whose reference is not asking it to move is FROZEN: the safety QP
+      may not recruit it to flow around or push out of a collision. Only joints that are
+      actually being commanded may move; the commanded joint is blocked (and eventually
+      reported as stalled) instead of a resting joint being pushed out of the way.
+      Intended for limbs whose resting pose carries a load - e.g. flippers that are
+      supporting the robot must not swing away just because another flipper is driven
+      into them. Costs the ability to auto-resolve a collision the operator is not
+      actively commanding out of.
+
+  hold_unrequested_velocity_threshold:
+    type: double
+    default_value: 0.01
+    description: >
+      Desired-velocity magnitude in [rad/s] below which a joint counts as 'not requested
+      to move' for 'hold_unrequested_joints'. A held joint decays to zero velocity at its
+      deceleration limit and is then pinned. Only relevant when
+      'hold_unrequested_joints' is true.
+    validation:
+      bounds<>: [0.0001, 10.0]
+
+  reference_leash_time:
+    type: double
+    default_value: 0.3
+    description: >
+      Per cycle the tracked target is clamped to within velocity_limit *
+      reference_leash_time of the current command. This does NOT bound the catch-up
+      SPEED: the desired velocity already saturates at the joint's velocity limit, and at
+      the default the braking term is far above it, so the clamp never lowers the
+      commanded speed. What it does is keep the leashed reference near the command, which
+      is what 'joint_deviation_limits' boxes are centred on. Set it to 0 only if those
+      boxes are 0 as well.
+    validation:
+      bounds<>: [0.0, 60.0]
+
+  tracking_leash:
+    type: double
+    default_value: 0.5
+    description: >
+      Anti-windup bound in [rad] on |commanded - measured| position per joint, enforced
+      as a position box inside the safety QP. If the hardware cannot follow (compliant
+      mode, contact, a blockage) the command stops at the bound under the normal
+      velocity and acceleration limits and the motion is reported as stalled, instead of
+      running ahead and storing energy; a joint that stays stuck therefore also parks once
+      'stall_park_timeout' elapses. Must exceed the hardware's nominal following lag by a
+      margin, otherwise the box throttles the commanded speed. A joint found further than
+      twice this bound from its command is treated as having left on its own (backdriven,
+      slipping, a re-homed encoder): the commanded configuration no longer describes the
+      robot, so the safety state counts as unobservable and 'state_read_timeout' applies.
+      For continuous joints twice this bound must stay below pi, since their lag is only
+      known modulo a full turn. 0 disables.
+    validation:
+      bounds<>: [0.0, 10.0]
+
+  qp_stall_timeout:
+    type: double
+    default_value: 1.0
+    description: >
+      Time in [s] after which 'stalled' is reported when the reference demands motion
+      but the QP output is (near) zero — e.g. blocked head-on by a collision constraint
+      so no flow-around direction exists. Upstream planners should treat this as a
+      request to replan.
+    validation:
+      bounds<>: [0.05, 600.0]
+
+  stall_park_timeout:
+    type: double
+    default_value: 5.0
+    description: >
+      If the commanded motion has been stalled for this long [s], the controller PARKS:
+      the current reference is considered abandoned and the limb holds position even if
+      the blocking obstacle later moves away (no unexpected delayed motion). Tracking
+      resumes only when the reference changes by more than
+      park_resume_reference_threshold on any joint, i.e. on a new command. Should be
+      larger than qp_stall_timeout. 0 disables stall-parking; an E-stop release or a
+      state-read timeout still parks regardless.
+    validation:
+      bounds<>: [0.0, 3600.0]
+
+  park_resume_reference_threshold:
+    type: double
+    default_value: 0.01
+    description: >
+      Per-joint reference change in [rad] relative to the reference latched at park time
+      that counts as a new command and releases the parked state.
+    validation:
+      bounds<>: [0.0001, 10.0]
+
+  qp_stall_velocity_threshold:
+    type: double
+    default_value: 0.01
+    description: >
+      Velocity threshold in [rad/s] below which the commanded motion counts as stalled
+      (while the desired velocity is above it).
+    validation:
+      bounds<>: [0.0001, 10.0]
+
+  state_read_timeout:
+    type: double
+    default_value: 0.1
+    description: >
+      Time in [s] of consecutive failed joint-state reads (busy handles of async
+      hardware components, non-finite values) after which the safety pipeline is
+      invalidated. The controller keeps holding the last command; when the states
+      recover it rebases to the measured position and PARKS until a new reference
+      arrives, instead of resuming the stale pre-failure motion. Shorter outages
+      only skip the affected cycles. Set it to at least twice the control period,
+      otherwise a single missed cycle escalates.
+    validation:
+      bounds<>: [0.001, 10.0]
+
+  default_velocity_limit:
+    type: double
+    default_value: 1.5
+    description: >
+      Fallback velocity limit in [rad/s] (or [m/s] for prismatic joints) for joints whose
+      URDF does not specify a velocity limit. Without this, such joints would be stepped
+      without any per-cycle bound and could jump to a far-away target in one cycle.
+    validation:
+      bounds<>: [0.001, 100.0]
 
   debug_visualize_collisions:
     type: bool
     default_value: false
     description: If true, the controller publishes visualization markers for potential self-collisions to help with debugging.
+
+  collision_visualization_rate:
+    type: double
+    default_value: 25.0
+    description: >
+      Rate in Hz at which the collision markers ('debug_visualize_collisions' /
+      'publish_collision_distances') are published. The markers go out over a reliable
+      publisher, so emitting them at the full control rate lets a slow subscriber (RViz)
+      throttle the publisher itself. 0 publishes every control cycle. Measured in ROS
+      time, so under a simulation clock the rate an outside tool observes is this one
+      scaled by the real-time factor.
+    validation:
+      bounds<>: [0.0, 1000.0]
 
   publish_collision_distances:
     type: bool
@@ -83,6 +265,14 @@ safety_position_controller:
       'debug_visualize_collisions' as it skips geometry markers and safe-pair lines.
       Uses a realtime publisher for non-blocking operation. Ignored if
       'debug_visualize_collisions' is true.
+
+  publish_qp_debug:
+    type: bool
+    default_value: false
+    description: >
+      If true, publishes per-cycle QP introspection on ~/qp_debug (per-joint desired vs
+      commanded velocity and bounds, per-constraint distance/required/achieved approach
+      speed, solver state). For PlotJuggler/debugging; dynamically reconfigurable.
 
   publish_debug_joint_states:
     type: bool
@@ -99,12 +289,29 @@ safety_position_controller:
     __map_joints:
       compliant_limit:
         type: double
-        description: Current limits for each joint in the group in Ampere. 'set_current_limits' must be true.
+        description: >
+          Current limit in Ampere written to the joint while compliant mode is on.
+          'set_current_limits' must be true. Must be positive and must not exceed
+          'stiff_limit': compliant mode is the one that should yield. Activation is
+          refused otherwise, because these values go to the motors unchanged.
         default_value: 3.0
+        validation:
+          gt<>: [0.0]
+          lt<>: [30.0]
       stiff_limit:
         type: double
         default_value: 5.0
-        description: Default current limit for each joint in the group in Ampere. Will be set if current interface requested but compliant mode is off.
+        description: >
+          Current limit in Ampere written to the joint while compliant mode is off. Set
+          it from the actuator's rating and never above it: a Dynamixel takes this in a
+          two-byte signed register of 0.001 A, so anything from 32.768 A up does not fit,
+          and the driver then keeps the last value that did - which before the first
+          write is zero, i.e. no torque at all. The upper bound here is the register's,
+          not any actuator's; the motor also rejects, silently over a sync write, a goal
+          above its own current limit.
+        validation:
+          gt<>: [0.0]
+          lt<>: [30.0]
 
   manipulability_ee_frame:
     type: string
@@ -121,6 +328,25 @@ safety_position_controller:
       and manipulability) is published. Set to 0 to only publish on events.
     validation:
       bounds<>: [0.0, 100.0]
+
+  e_stop_topic:
+    type: string
+    default_value: ~/safety_estop
+    description: >
+      Topic (std_msgs/Bool) carrying the SOFT emergency stop: a request to stop moving,
+      which this controller honours by holding the measured positions and abandoning the
+      reference in effect, so nothing moves again until a new one arrives. Point it at
+      the robot's soft e-stop, e.g.
+      'e_stop_manager/aggregated_state/emergency_stop_software'. The HARD stop needs no
+      entry here: it removes drive power, and the arm cannot move whatever is commanded.
+      Note that the hardware component only reports the fault once its reads have failed
+      consecutively for about half a second, so this controller keeps issuing commands
+      into an unpowered arm until then.
+      Subscribed transient local and reliable, matching the e-stop manager, which
+      publishes once per change and latches: the state in effect before this controller
+      subscribed is delivered on subscribe. A publisher on this topic MUST therefore be
+      transient local, which a plain 'ros2 topic pub' is not unless told to be.
+    read_only: true
 
   safety_bypass_timeout:
     type: double

@@ -23,6 +23,7 @@
   <depend>libfcl-dev</depend>
   <depend>pinocchio</depend>
   <depend>pluginlib</depend>
+  <depend>proxsuite</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>rclcpp_lifecycle</depend>

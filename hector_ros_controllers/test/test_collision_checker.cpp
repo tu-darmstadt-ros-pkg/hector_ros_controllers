@@ -22,6 +22,7 @@
 
 #include "safety_position_controller/collision_checker.hpp"
 
+#include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/multibody/data.hpp>
@@ -147,10 +148,9 @@ protected:
   void TearDown() override { node_.reset(); }
 
   /// Create a CollisionChecker and init with test URDF
-  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0,
-                                                 bool debug_viz = false )
+  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0 )
   {
-    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon, debug_viz );
+    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon );
     // Pass all joints as controlled so no filtering occurs (fair comparison with reference)
     std::vector<std::string> all_joints;
     for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
@@ -326,7 +326,7 @@ TEST_F( CollisionCheckerTest, NaNInputReturnsSafeResult )
 TEST_F( CollisionCheckerTest, PairFilteringPreserved )
 {
   // Create checker with only subset of joints
-  auto checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0, false );
+  auto checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
   std::vector<std::string> subset_joints = { "joint1", "joint2" };
   bool ok = checker->initFromXml( urdf_xml_, "", subset_joints );
   ASSERT_TRUE( ok );
@@ -342,6 +342,32 @@ TEST_F( CollisionCheckerTest, PairFilteringPreserved )
   auto result = checker->checkCollision( positions );
   EXPECT_GT( result.min_distance, 0.0 );
   EXPECT_FALSE( result.in_collision );
+}
+
+TEST_F( CollisionCheckerTest, ReinitializationRebuildsTheModel )
+{
+  // on_configure runs again after a cleanup or a failed activation, and re-initializes
+  // the same checker: the second parse must replace the model, not append to it.
+  auto checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
+  std::vector<std::string> all_joints;
+  for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
+    all_joints.push_back( ref_model_.names[jid] );
+  }
+  ASSERT_TRUE( checker->initFromXml( urdf_xml_, "", all_joints ) );
+
+  const int nv_first = checker->getNv();
+  const std::size_t pairs_first = checker->getNumCollisionPairs();
+  const std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+  const double distance_first = checker->checkCollision( positions ).min_distance;
+
+  ASSERT_TRUE( checker->initFromXml( urdf_xml_, "", all_joints ) );
+
+  EXPECT_EQ( checker->getNv(), nv_first );
+  EXPECT_EQ( checker->getNumCollisionPairs(), pairs_first );
+  const auto result = checker->checkCollision( positions );
+  EXPECT_FALSE( result.in_collision );
+  EXPECT_NEAR( result.min_distance, distance_first, 1e-10 );
 }
 
 // ---- Test 9: Collision with padding ----
@@ -361,6 +387,64 @@ TEST_F( CollisionCheckerTest, CollisionPaddingWorks )
   auto result_with_pad = checker_with_pad->checkCollision( positions );
   EXPECT_TRUE( result_with_pad.in_collision );
   EXPECT_NEAR( result_with_pad.min_distance, actual_dist, 1e-10 );
+}
+
+// ---- Test 9a: a non-finite configuration must fail SAFE, not open ----
+TEST_F( CollisionCheckerTest, NonFiniteConfigurationIsReportedAsCollision )
+{
+  auto checker = makeChecker( 0.0 );
+  Eigen::VectorXd q = Eigen::VectorXd::Zero( checker->neutralConfiguration().size() );
+  q[0] = std::numeric_limits<double>::quiet_NaN();
+
+  // Every "d < threshold" against NaN is false, so an unguarded check would answer
+  // "no collision, min_distance = DBL_MAX".
+  const auto &result = checker->checkCollisionQ( q );
+  EXPECT_TRUE( result.in_collision );
+  EXPECT_DOUBLE_EQ( result.min_distance, 0.0 );
+  EXPECT_TRUE( result.safety_zone_pairs.empty() );
+}
+
+// ---- Test 9b: an error result must not be served from the movement cache ----
+TEST_F( CollisionCheckerTest, TransientNonFiniteInputDoesNotPoisonTheCache )
+{
+  auto checker = makeChecker( 0.0, 1e-4 );
+
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.5 }, { "joint2", 0.3 }, { "joint3", -0.2 }, { "joint4", 0.0 } };
+
+  auto good = checker->checkCollision( positions );
+  ASSERT_FALSE( good.in_collision );
+
+  auto glitched = positions;
+  glitched["joint2"] = std::numeric_limits<double>::quiet_NaN();
+  auto unsafe = checker->checkCollision( glitched );
+  EXPECT_TRUE( unsafe.in_collision );
+
+  // The robot did not move, so the cache key still matches the pre-glitch check: the
+  // recovered input must be recomputed, not answered with the latched unsafe result.
+  auto recovered = checker->checkCollision( positions );
+  EXPECT_FALSE( recovered.in_collision );
+  EXPECT_DOUBLE_EQ( recovered.min_distance, good.min_distance );
+}
+
+// ---- Test 9c: a padding change must re-classify a cached configuration ----
+TEST_F( CollisionCheckerTest, PaddingUpdateInvalidatesTheCache )
+{
+  auto checker = makeChecker( 0.0, 1e-4 );
+
+  std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+
+  auto before = checker->checkCollision( positions );
+  ASSERT_FALSE( before.in_collision );
+  ASSERT_GT( before.min_distance, 0.0 );
+
+  // Raising the padding above the current clearance must re-classify the unchanged
+  // configuration instead of serving the result cached under the old padding.
+  checker->updateCollisionPadding( before.min_distance + 0.01 );
+  auto after = checker->checkCollision( positions );
+  EXPECT_TRUE( after.in_collision );
+  EXPECT_NEAR( after.min_distance, before.min_distance, 1e-10 );
 }
 
 // ---- Test 10: Multi-joint sweep ----
@@ -660,10 +744,9 @@ TEST_F( CollisionCheckerTest, PerformanceBenchmark )
 class CollisionCheckerBroadphaseTest : public CollisionCheckerTest
 {
 protected:
-  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0,
-                                                 bool debug_viz = false )
+  std::unique_ptr<CollisionChecker> makeChecker( double padding = 0.0, double cache_epsilon = 0.0 )
   {
-    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon, debug_viz );
+    auto checker = std::make_unique<CollisionChecker>( node_, padding, cache_epsilon );
     checker->setBroadphase( true );
     std::vector<std::string> all_joints;
     for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
@@ -782,7 +865,7 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForce )
   auto bf_checker = makeChecker();
   bf_checker->setBroadphase( false ); // force brute-force for comparison
   // Create broadphase checker
-  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0, false );
+  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
   bp_checker->setBroadphase( true );
   std::vector<std::string> all_joints;
   for ( pinocchio::JointIndex jid = 1; jid < ref_model_.joints.size(); ++jid ) {
@@ -859,11 +942,11 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForceAthena )
                                                 "arm_joint_4", "arm_joint_5", "arm_joint_6",
                                                 "arm_joint_7" };
 
-  auto bf_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0, false );
+  auto bf_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0 );
   bf_checker->setBroadphase( false ); // force brute-force for comparison
   ASSERT_TRUE( bf_checker->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
 
-  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0, false );
+  auto bp_checker = std::make_unique<CollisionChecker>( node_, 0.01, 0.0 );
   bp_checker->setBroadphase( true );
   ASSERT_TRUE( bp_checker->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
 
@@ -894,11 +977,315 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForceAthena )
   }
 }
 
+// ============================================================================
+// Safety-zone pair capping (QP support API)
+// ============================================================================
+
+TEST_F( CollisionCheckerTest, MaxSafetyZonePairsCapsAndSortsByDistance )
+{
+  auto checker = makeChecker();
+  // Large threshold → many pairs in the safety zone
+  checker->setSafetyZoneThreshold( 10.0 );
+  const std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.3 }, { "joint2", 0.7 }, { "joint3", -0.4 }, { "joint4", 0.2 } };
+
+  const auto uncapped = checker->checkCollision( positions );
+  ASSERT_GT( uncapped.safety_zone_pairs.size(), 2u );
+
+  // Pairs must be sorted by distance ascending, closest first
+  for ( size_t i = 1; i < uncapped.safety_zone_pairs.size(); ++i ) {
+    EXPECT_LE( uncapped.safety_zone_pairs[i - 1].distance, uncapped.safety_zone_pairs[i].distance );
+  }
+  EXPECT_NEAR( uncapped.safety_zone_pairs.front().distance, uncapped.min_distance, 1e-12 );
+
+  // Capping keeps only the closest pairs
+  checker->setMaxSafetyZonePairs( 2 );
+  const auto capped = checker->checkCollision( positions );
+  ASSERT_EQ( capped.safety_zone_pairs.size(), 2u );
+  EXPECT_EQ( capped.safety_zone_pairs[0].pair_index, uncapped.safety_zone_pairs[0].pair_index );
+  EXPECT_EQ( capped.safety_zone_pairs[1].pair_index, uncapped.safety_zone_pairs[1].pair_index );
+  EXPECT_NEAR( capped.min_distance, uncapped.min_distance, 1e-12 );
+}
+
+TEST_F( CollisionCheckerTest, FilterKeepsExactlyTheInfluenceablePairs )
+{
+  // The filter must keep a pair IFF the tree path between the two geometries crosses a
+  // controlled joint (their deepest controlled ancestors differ): kept = finger riding
+  // on the arm vs foreign obstacle; dropped = zero-gradient pairs (finger<->finger,
+  // base<->obstacle). Topology mirrors the athena arm/gripper/flipper.
+  const std::string urdf = R"(<?xml version="1.0"?>
+<robot name="test_finger_filter">
+  <link name="base_link">
+    <collision><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <link name="arm_link">
+    <collision><origin xyz="0 0 0.3"/><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <link name="finger_link">
+    <collision><origin xyz="0 0 0.15"/><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <link name="finger2_link">
+    <collision><origin xyz="0.1 0 0.15"/><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <link name="obstacle_link">
+    <collision><origin xyz="0.4 0 0.5"/><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <joint name="arm_joint" type="revolute">
+    <parent link="base_link"/><child link="arm_link"/>
+    <origin xyz="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1.0" velocity="1.0"/>
+  </joint>
+  <joint name="finger_joint" type="revolute">
+    <parent link="arm_link"/><child link="finger_link"/>
+    <origin xyz="0 0 0.4"/><axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1.0" velocity="1.0"/>
+  </joint>
+  <joint name="finger2_joint" type="revolute">
+    <parent link="arm_link"/><child link="finger2_link"/>
+    <origin xyz="0 0 0.4"/><axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1.0" velocity="1.0"/>
+  </joint>
+  <joint name="obstacle_joint" type="revolute">
+    <parent link="base_link"/><child link="obstacle_link"/>
+    <origin xyz="0 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>)";
+
+  auto checker = std::make_unique<CollisionChecker>( node_ );
+  // Only the arm joint is controlled — NOT the finger joints, NOT the obstacle joint.
+  ASSERT_TRUE( checker->initFromXml( urdf, "", { "arm_joint" } ) );
+
+  // Geometry names are '<link>_<idx>'; compare by link-name prefix.
+  auto has_pair = [&]( const std::string &link_a, const std::string &link_b ) {
+    auto matches = []( const std::string &geom, const std::string &link ) {
+      return geom.rfind( link + "_", 0 ) == 0;
+    };
+    for ( std::size_t k = 0; k < checker->getNumCollisionPairs(); ++k ) {
+      const auto [name_a, name_b] = checker->getPairNames( k );
+      if ( ( matches( name_a, link_a ) && matches( name_b, link_b ) ) ||
+           ( matches( name_a, link_b ) && matches( name_b, link_a ) ) ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // KEPT: pairs whose relative pose depends on the controlled arm joint
+  EXPECT_TRUE( has_pair( "finger_link", "obstacle_link" ) )
+      << "finger<->obstacle missing: descendant-link geometry was filtered out";
+  EXPECT_TRUE( has_pair( "finger2_link", "obstacle_link" ) );
+  EXPECT_TRUE( has_pair( "arm_link", "obstacle_link" ) );
+  EXPECT_TRUE( has_pair( "finger_link", "base_link" ) );
+  EXPECT_TRUE( has_pair( "arm_link", "base_link" ) );
+
+  // DROPPED: pairs the arm joint provably cannot influence
+  EXPECT_FALSE( has_pair( "finger_link", "finger2_link" ) )
+      << "same passive subtree: relative pose depends only on uncontrolled finger joints";
+  EXPECT_FALSE( has_pair( "base_link", "obstacle_link" ) ) << "fully outside the controlled chain";
+  // Geometry rigidly attached to the controlled chain itself moves WITH it: arm<->finger
+  // relative pose depends only on the uncontrolled finger joint
+  EXPECT_FALSE( has_pair( "arm_link", "finger_link" ) );
+
+  // And the kept finger<->obstacle pair must have a nonzero gradient w.r.t. arm_joint
+  checker->setSafetyZoneThreshold( 10.0 );
+  const std::unordered_map<std::string, double> positions = { { "arm_joint", 0.0 },
+                                                              { "finger_joint", 0.0 },
+                                                              { "finger2_joint", 0.0 },
+                                                              { "obstacle_joint", 0.0 } };
+  const auto result = checker->checkCollision( positions );
+  const int v_arm = checker->getJointVelocityIndex( "arm_joint" );
+  ASSERT_GE( v_arm, 0 );
+  bool found = false;
+  for ( const auto &pi : result.safety_zone_pairs ) {
+    const auto [name_a, name_b] = checker->getPairNames( pi.pair_index );
+    const bool is_finger =
+        name_a.rfind( "finger_link_", 0 ) == 0 || name_b.rfind( "finger_link_", 0 ) == 0;
+    const bool is_obstacle =
+        name_a.rfind( "obstacle_link_", 0 ) == 0 || name_b.rfind( "obstacle_link_", 0 ) == 0;
+    if ( is_finger && is_obstacle ) {
+      found = true;
+      EXPECT_GT( std::abs( pi.gradient[v_arm] ), 1e-6 )
+          << "arm joint cannot influence the finger<->obstacle distance?";
+    }
+  }
+  EXPECT_TRUE( found );
+}
+
+TEST_F( CollisionCheckerTest, PairCapPrefersDistinctLinkPairs )
+{
+  // Links with several collision geometries produce near-duplicate pairs. When the
+  // safety-zone cap is exceeded, distinct link pairs must be kept in preference to
+  // duplicates — otherwise a parked contact with many geometries can evict a genuinely
+  // different (e.g. approaching) contact from the constraint budget.
+  //
+  // Chain: base(1 sphere) - link1(2 spheres at z=0.20/0.24) - link2(1 sphere at z=0.5).
+  // Distances at q=0 (all radii 0.05):
+  //   base<->link1_0: 0.10 | base<->link1_1: 0.14 | link1_1<->link2: 0.16
+  //   link1_0<->link2: 0.20 | base<->link2: 0.40
+  const std::string urdf = R"(<?xml version="1.0"?>
+<robot name="test_multigeom">
+  <link name="base_link">
+    <collision><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <link name="link1">
+    <collision><origin xyz="0 0 0.20"/><geometry><sphere radius="0.05"/></geometry></collision>
+    <collision><origin xyz="0 0 0.24"/><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <link name="link2">
+    <collision><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/><child link="link1"/>
+    <origin xyz="0 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="1.0" velocity="1.0"/>
+  </joint>
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/><child link="link2"/>
+    <origin xyz="0 0 0.5"/><axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>)";
+
+  auto checker = std::make_unique<CollisionChecker>( node_ );
+  ASSERT_TRUE( checker->initFromXml( urdf, "", { "joint1", "joint2" } ) );
+  checker->setSafetyZoneThreshold( 10.0 );
+  const std::unordered_map<std::string, double> positions = { { "joint1", 0.0 }, { "joint2", 0.0 } };
+
+  // Uncapped: all 5 pairs
+  const auto uncapped = checker->checkCollision( positions );
+  ASSERT_EQ( uncapped.safety_zone_pairs.size(), 5u );
+
+  // Cap 3: naive closest-3 would keep {0.10, 0.14, 0.16} — two base<->link1 duplicates —
+  // and evict base<->link2 entirely. Dedup must keep the closest of EACH link pair:
+  // {0.10, 0.16, 0.40}.
+  checker->setMaxSafetyZonePairs( 3 );
+  const auto capped = checker->checkCollision( positions );
+  ASSERT_EQ( capped.safety_zone_pairs.size(), 3u );
+  EXPECT_NEAR( capped.safety_zone_pairs[0].distance, 0.10, 1e-6 );
+  EXPECT_NEAR( capped.safety_zone_pairs[1].distance, 0.16, 1e-6 );
+  EXPECT_NEAR( capped.safety_zone_pairs[2].distance, 0.40, 1e-6 );
+
+  // Cap 4: the freed slot is refilled with the closest duplicate (0.14), sorted order kept
+  checker->setMaxSafetyZonePairs( 4 );
+  const auto refilled = checker->checkCollision( positions );
+  ASSERT_EQ( refilled.safety_zone_pairs.size(), 4u );
+  EXPECT_NEAR( refilled.safety_zone_pairs[0].distance, 0.10, 1e-6 );
+  EXPECT_NEAR( refilled.safety_zone_pairs[1].distance, 0.14, 1e-6 );
+  EXPECT_NEAR( refilled.safety_zone_pairs[2].distance, 0.16, 1e-6 );
+  EXPECT_NEAR( refilled.safety_zone_pairs[3].distance, 0.40, 1e-6 );
+}
+
+TEST_F( CollisionCheckerTest, EveryPairGradientMatchesFiniteDifferences )
+{
+  // The broadphase callback computes nearest points in tree-traversal order; witness
+  // points that are not swapped back into pair-canonical order exactly negate the
+  // gradients. Validate every pair gradient against finite differences.
+  const std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.3 }, { "joint2", 0.7 }, { "joint3", -0.4 }, { "joint4", 0.2 } };
+  const double h = 1e-6;
+
+  auto checker = makeChecker( 0.0, 0.0 );
+  checker->setSafetyZoneThreshold( 10.0 ); // all pairs in the zone → all gradients
+  const auto result = checker->checkCollision( positions );
+  ASSERT_GT( result.safety_zone_pairs.size(), 3u );
+
+  for ( const auto &pair : result.safety_zone_pairs ) {
+    for ( const auto &[joint_name, value] : positions ) {
+      const int v_idx = checker->getJointVelocityIndex( joint_name );
+      ASSERT_GE( v_idx, 0 );
+
+      auto find_pair_distance = [&]( const CollisionResult &res ) {
+        for ( const auto &pi : res.safety_zone_pairs ) {
+          if ( pi.pair_index == pair.pair_index ) {
+            return pi.distance;
+          }
+        }
+        return std::numeric_limits<double>::quiet_NaN();
+      };
+
+      auto plus = positions;
+      auto minus = positions;
+      plus[joint_name] = value + h;
+      minus[joint_name] = value - h;
+      const double d_plus = find_pair_distance( checker->checkCollision( plus ) );
+      const double d_minus = find_pair_distance( checker->checkCollision( minus ) );
+      ASSERT_FALSE( std::isnan( d_plus ) || std::isnan( d_minus ) );
+
+      const double fd = ( d_plus - d_minus ) / ( 2.0 * h );
+      EXPECT_NEAR( pair.gradient[v_idx], fd, 1e-4 )
+          << "gradient mismatch, pair " << pair.pair_index << " joint " << joint_name;
+    }
+  }
+}
+
+TEST_F( CollisionCheckerTest, PenetrationGradientPointsOutward )
+{
+  // coal witness points satisfy p2 - p1 = min_distance * normal, i.e. anti-parallel to
+  // the separation normal when penetrating; the gradient must still point toward
+  // INCREASING distance or a QP push-out drives deeper in.
+  auto checker = makeChecker();
+  checker->setSafetyZoneThreshold( 0.05 );
+  const std::unordered_map<std::string, double> positions = {
+      { "joint1", 0.0 }, { "joint2", M_PI }, { "joint3", -M_PI / 2.0 }, { "joint4", 0.0 } };
+
+  const auto result = checker->checkCollision( positions );
+  ASSERT_TRUE( result.in_collision );
+
+  const CollisionResult::PairInfo *worst = nullptr;
+  for ( const auto &pi : result.safety_zone_pairs ) {
+    if ( pi.distance < 0.0 && ( !worst || pi.distance < worst->distance ) ) {
+      worst = &pi;
+    }
+  }
+  ASSERT_NE( worst, nullptr ) << "expected at least one penetrating pair with gradient";
+  ASSERT_GT( worst->gradient.norm(), 1e-9 );
+  const std::size_t pair_index = worst->pair_index;
+  const double d0 = worst->distance;
+
+  // Step along the gradient in joint space → the pair's distance must increase
+  const double h = 1e-4;
+  auto perturbed = positions;
+  for ( auto &[name, value] : perturbed ) {
+    const int vi = checker->getJointVelocityIndex( name );
+    if ( vi >= 0 && vi < worst->gradient.size() ) {
+      value += h * worst->gradient[vi];
+    }
+  }
+  const auto result2 = checker->checkCollision( perturbed );
+
+  double d1 = std::numeric_limits<double>::quiet_NaN();
+  for ( const auto &pi : result2.safety_zone_pairs ) {
+    if ( pi.pair_index == pair_index ) {
+      d1 = pi.distance;
+    }
+  }
+  ASSERT_FALSE( std::isnan( d1 ) );
+  EXPECT_GT( d1, d0 ) << "moving along the gradient must increase the pair distance";
+}
+
 // __gcov_dump is only available when compiled with --coverage.
 // Use a weak symbol so the call is a no-op in normal (non-coverage) builds.
 #if defined( __GNUC__ )
 extern "C" void __gcov_dump() __attribute__( ( weak ) );
 #endif
+
+// ---- Manipulability ----
+
+TEST_F( CollisionCheckerTest, ManipulabilityFrameIsResolvedUpFront )
+{
+  auto checker = makeChecker( 0.0 );
+  EXPECT_TRUE( checker->setManipulabilityFrame( "" ) ) << "empty disables it without failing";
+  EXPECT_FALSE( checker->setManipulabilityFrame( "not_a_frame" ) );
+  EXPECT_TRUE( checker->setManipulabilityFrame( "link4" ) );
+  EXPECT_DOUBLE_EQ( checker->computeManipulability(), 0.0 ) << "no collision check has run yet";
+
+  // Yoshikawa's sqrt(det(J J^T)) is structurally zero while the model has fewer than six
+  // DoF, so this four-joint URDF can only pin the frame handling, not a non-zero index.
+  const std::unordered_map<std::string, double> positions{ { "joint1", 0.3 }, { "joint2", 0.4 } };
+  checker->checkCollision( positions );
+  EXPECT_DOUBLE_EQ( checker->computeManipulability(), 0.0 );
+}
 
 int main( int argc, char **argv )
 {

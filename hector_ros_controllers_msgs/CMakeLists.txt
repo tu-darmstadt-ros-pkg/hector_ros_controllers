@@ -9,6 +9,7 @@ find_package(action_msgs REQUIRED)
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
   "msg/SafetyPositionControllerStatus.msg"
+  "msg/SafetyQpDebug.msg"
   "msg/SafetyForwardControllerStatus.msg"
   "msg/SyncStatus.msg"
   "action/DriveFlipperGroup.action"

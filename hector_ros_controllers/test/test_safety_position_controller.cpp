@@ -1,5 +1,8 @@
 #include "test_helpers.hpp"
 
+#include <shared_mutex>
+#include <thread>
+
 // __gcov_dump is only available when compiled with --coverage.
 // Use a weak symbol so the call is a no-op in normal (non-coverage) builds.
 #if defined( __GNUC__ )
@@ -8,61 +11,18 @@ extern "C" void __gcov_dump() __attribute__( ( weak ) );
 
 using SafetyPositionControllerStatus =
     hector_ros_controllers_msgs::msg::SafetyPositionControllerStatus;
+
+namespace
+{
+/// Arm the safety bypass directly, with a deadline far enough out that it cannot lapse
+/// during a test. The service path is exercised separately.
+void armBypassOn( safety_position_controller::SafetyPositionController &controller )
+{
+  controller.safety_bypass_deadline_.store(
+      ( std::chrono::steady_clock::now() + std::chrono::hours( 1 ) ).time_since_epoch().count() );
+}
+} // namespace
 using SPC = safety_position_controller::SafetyPositionController;
-
-// ============================================================================
-// Static method tests (no fixture needed)
-// ============================================================================
-
-TEST( SafetyPositionControllerStatic, UnwrapToNearestBasic )
-{
-  // Target near current - no wrapping needed
-  EXPECT_NEAR( SPC::unwrap_to_nearest( 0.0, 0.1 ), 0.1, 1e-9 );
-  EXPECT_NEAR( SPC::unwrap_to_nearest( 0.0, -0.1 ), -0.1, 1e-9 );
-
-  // Wrapping: current=3.0, target=-3.0 -> should unwrap to near 3.0 (adding 2*pi)
-  double result = SPC::unwrap_to_nearest( 3.0, -3.0 );
-  EXPECT_NEAR( result, -3.0 + 2 * M_PI, 1e-9 );
-}
-
-TEST( SafetyPositionControllerStatic, UnwrapToNearestMultiRevolutions )
-{
-  // current at 10.0 rad, target at 0.1 -> should unwrap near 10.0
-  double result = SPC::unwrap_to_nearest( 10.0, 0.1 );
-  double expected = 0.1 + std::round( ( 10.0 - 0.1 ) / ( 2 * M_PI ) ) * ( 2 * M_PI );
-  EXPECT_NEAR( result, expected, 1e-9 );
-  // Result should be within pi of the current position
-  EXPECT_LT( std::abs( result - 10.0 ), M_PI );
-}
-
-TEST( SafetyPositionControllerStatic, UnwrapToNearestNegative )
-{
-  // current at -10.0, target 0.0 -> should unwrap near -10.0
-  double result = SPC::unwrap_to_nearest( -10.0, 0.0 );
-  double expected = 0.0 + std::round( ( -10.0 - 0.0 ) / ( 2 * M_PI ) ) * ( 2 * M_PI );
-  EXPECT_NEAR( result, expected, 1e-9 );
-}
-
-TEST( SafetyPositionControllerStatic, GetSignedDistanceBasic )
-{
-  EXPECT_NEAR( SPC::get_signed_distance( 0.0, 0.0 ), 0.0, 1e-9 );
-  EXPECT_NEAR( SPC::get_signed_distance( 0.0, 1.0 ), 1.0, 1e-9 );
-  EXPECT_NEAR( SPC::get_signed_distance( 0.0, -1.0 ), -1.0, 1e-9 );
-  EXPECT_NEAR( SPC::get_signed_distance( 1.0, 2.0 ), 1.0, 1e-9 );
-}
-
-TEST( SafetyPositionControllerStatic, GetSignedDistanceWrapping )
-{
-  // From 3.0 to -3.0: shortest path is positive ~0.28 rad
-  double dist = SPC::get_signed_distance( 3.0, -3.0 );
-  EXPECT_NEAR( dist, 2 * M_PI - 6.0, 1e-9 );
-  EXPECT_GT( dist, 0.0 );
-
-  // From 0 to pi+0.1: shortest should be negative (wrap around)
-  dist = SPC::get_signed_distance( 0.0, M_PI + 0.1 );
-  EXPECT_NEAR( dist, -( 2 * M_PI - M_PI - 0.1 ), 1e-9 );
-  EXPECT_LT( dist, 0.0 );
-}
 
 // ============================================================================
 // Fixture for full controller tests
@@ -95,7 +55,8 @@ public:
 
   void initController( const std::vector<std::string> &joints = {},
                        bool check_self_collisions = false, bool set_current_limits = false,
-                       const std::string &urdf_file = "test_robot.urdf" )
+                       const std::string &urdf_file = "test_robot.urdf",
+                       const std::vector<rclcpp::Parameter> &extra_params = {} )
   {
     auto j = joints.empty() ? controlled_joints_ : joints;
     const auto urdf = hector_test::loadUrdfFile( urdf_file );
@@ -110,10 +71,7 @@ public:
     rclcpp::NodeOptions opts;
     std::vector<rclcpp::Parameter> overrides = {
         rclcpp::Parameter( "joints", j ),
-        rclcpp::Parameter( "unwrap_continuous_joints", true ),
-        rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", check_self_collisions ),
-        rclcpp::Parameter( "block_velocity_scaling", 1.5 ),
         rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", set_current_limits ),
         rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
@@ -123,6 +81,7 @@ public:
         rclcpp::Parameter( "collision_cache_epsilon", 0.000001 ),
         rclcpp::Parameter( "debug_visualize_collisions", false ),
     };
+    overrides.insert( overrides.end(), extra_params.begin(), extra_params.end() );
     opts.parameter_overrides( overrides );
     params.node_options = opts;
 
@@ -186,6 +145,30 @@ public:
     }
     FAIL() << "Joint '" << joint << "' not found in all_joint_names_";
   }
+
+  // Mock hardware that follows the position command exactly.
+  void followCommands()
+  {
+    for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+      setStateValue( controlled_joints_[i], hw_cmd_values_[i] );
+    }
+  }
+
+  // Full chainable update. Unlike callUpdate() this also runs
+  // update_reference_from_subscribers(), i.e. the non-chained "~/commands" path.
+  controller_interface::return_type callFullUpdate()
+  {
+    rclcpp::Time now( 0, 0, RCL_ROS_TIME );
+    rclcpp::Duration period( std::chrono::milliseconds( 10 ) );
+    return controller_->update( now, period );
+  }
+
+  void sendCommand( const std::vector<double> &positions )
+  {
+    auto msg = std::make_shared<safety_position_controller::CmdType>();
+    msg->data = positions;
+    controller_->rt_command_ptr_.writeFromNonRT( msg );
+  }
 };
 
 // ============================================================================
@@ -204,7 +187,7 @@ TEST_F( SafetyPositionControllerTest, OnInitSucceeds )
 // Enforce Limits Tests
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevolute )
+TEST_F( SafetyPositionControllerTest, ReferenceAbovePositionLimitIsClamped )
 {
   initController();
   configureController();
@@ -225,7 +208,7 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevolute )
   EXPECT_LE( hw_cmd_values_[1], 1.5 );
 }
 
-TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevoluteLower )
+TEST_F( SafetyPositionControllerTest, ReferenceBelowPositionLimitIsClamped )
 {
   initController();
   configureController();
@@ -245,7 +228,7 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsClampsRevoluteLower )
   EXPECT_GE( hw_cmd_values_[1], -1.5 );
 }
 
-TEST_F( SafetyPositionControllerTest, EnforceLimitsUnwrapsContinuous )
+TEST_F( SafetyPositionControllerTest, ContinuousJointTakesShortestPath )
 {
   // Use joints including joint4 (continuous)
   std::vector<std::string> j = { "joint1", "joint4" };
@@ -261,40 +244,17 @@ TEST_F( SafetyPositionControllerTest, EnforceLimitsUnwrapsContinuous )
   setStateValue( "joint1", 0.0 );
 
   controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.1; // will be unwrapped
+  controller_->reference_interfaces_[1] = 0.1; // equivalent to 0.1 + 4*pi
 
   callUpdate();
 
-  // After unwrap, cmd should be closer to 10.0 than to 0.1
+  // The shortest path stays near 10.0 instead of unwinding to 0.1
   EXPECT_GT( hw_cmd_values_[1], 5.0 );
 }
 
 // ============================================================================
 // Velocity Limiting Tests (no collision fixture — collision checks disabled)
 // ============================================================================
-
-TEST_F( SafetyPositionControllerTest, NoVelocityLimitingWithoutCollisionChecks )
-{
-  // When check_self_collisions=false, velocity limiting is not applied
-  initController(); // check_self_collisions=false by default
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-
-  // Large jump within joint limits
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Without collision checks, no velocity limiting → full step passes through
-  EXPECT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 );
-}
 
 // ============================================================================
 // E-Stop Tests
@@ -330,8 +290,10 @@ TEST_F( SafetyPositionControllerTest, EstopEngageHoldsPositions )
   EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
 }
 
-TEST_F( SafetyPositionControllerTest, EstopReleaseInvalidatesReferences )
+TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
 {
+  // An E-stop abandons whatever was being tracked. On release the arm must hold even
+  // though the upstream controller keeps writing the pre-E-stop target every cycle.
   initController();
   configureController();
   setupHardwareInterfaces();
@@ -340,18 +302,427 @@ TEST_F( SafetyPositionControllerTest, EstopReleaseInvalidatesReferences )
   activateController();
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
   controller_->reference_interfaces_[1] = 0.0;
   controller_->reference_interfaces_[2] = 0.0;
 
-  sendEstop( true );
-  callUpdate();
-  sendEstop( false );
-  callUpdate();
-
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) );
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
   }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
+
+  sendEstop( true );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  const double position_at_estop = hw_cmd_values_[0];
+
+  sendEstop( false );
+  for ( int i = 0; i < 50; ++i ) {
+    controller_->reference_interfaces_[0] = 1.0; // upstream keeps commanding it
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
+        << "the pre-E-stop target must stay abandoned (cycle " << i << ")";
+  }
+
+  // A changed reference is a new command and releases the hold.
+  for ( int i = 0; i < 20; ++i ) {
+    controller_->reference_interfaces_[0] = 1.1;
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
+{
+  // These go straight to the motors as an ampere ceiling. A compliant limit above the
+  // stiff one means the mode meant to make the arm yield pushes harder than the one
+  // meant to hold it, which is backwards exactly when a person is likely to be near it.
+  initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true, "test_robot.urdf",
+                  { rclcpp::Parameter( "current_limits.joint1.compliant_limit", 9.0 ),
+                    rclcpp::Parameter( "current_limits.joint1.stiff_limit", 3.0 ) } );
+  configureController();
+
+  auto cj = controlled_joints_;
+  hw_state_values_.assign( controller_->all_joint_names_.size(), 0.0 );
+  hw_cmd_values_.assign( cj.size() * 2, 0.0 );
+  cmd_ifaces_.clear();
+  state_ifaces_.clear();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "position", &hw_cmd_values_[i] ) );
+  }
+  for ( size_t i = 0; i < cj.size(); ++i ) {
+    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        cj[i], "current", &hw_cmd_values_[cj.size() + i] ) );
+  }
+  for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
+    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
+        controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+  }
+#pragma GCC diagnostic pop
+  controller_->command_interfaces_.clear();
+  controller_->state_interfaces_.clear();
+  for ( auto &ci : cmd_ifaces_ ) {
+    controller_->command_interfaces_.emplace_back( ci, []() { } );
+  }
+  for ( auto &si : state_ifaces_ ) { controller_->state_interfaces_.emplace_back( si ); }
+
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR )
+      << "a compliant limit above the stiff one must not reach the motors";
+
+  // A limit of zero is no torque at all, and the parameter bound is exclusive, so the
+  // two agree rather than one advertising a value the other refuses.
+  controller_->params_.current_limits.joints_map.at( "joint1" ).compliant_limit = 0.0;
+  controller_->params_.current_limits.joints_map.at( "joint1" ).stiff_limit = 5.0;
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR )
+      << "a zero current ceiling would leave the joint limp";
+
+  controller_->params_.current_limits.joints_map.at( "joint1" ).compliant_limit =
+      std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR )
+      << "not a number is refused too; the parameter bound already rejects it, this is "
+         "the second line of defence for a value written straight into params_";
+
+  controller_->params_.current_limits.joints_map.at( "joint1" ).compliant_limit = 3.0;
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::SUCCESS )
+      << "a usable pair activates";
+  EXPECT_FALSE( controller_->in_compliant_mode_.load() )
+      << "compliant mode must not be inherited across an activation";
+}
+
+TEST_F( SafetyPositionControllerTest, BypassDoesNotSurviveALifecycleTransition )
+{
+  // The bypass drops collision checking and widens the joint limits. It is a deliberate,
+  // supervised act on a controller someone is watching, so it must not be inherited by a
+  // controller that has since been stopped and started again - which is exactly what
+  // happens after a hardware fault, when nobody is expecting an arm to come back
+  // unguarded.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_TRUE( bypass_service_mock_ );
+
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = true;
+  auto req_header = std::make_shared<rmw_request_id_t>();
+  EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
+      .Times( ::testing::AnyNumber() );
+  bypass_service_mock_->handle_request( req_header, request );
+  ASSERT_TRUE( controller_->bypass_active() );
+
+  ASSERT_EQ( controller_->on_deactivate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::SUCCESS );
+  EXPECT_FALSE( controller_->bypass_active() ) << "deactivation must not leave a bypass armed";
+  EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 ) << "and no deadline may survive";
+
+  // The service answers in every state, so arm one while INACTIVE: activation is the
+  // call that has to refuse to inherit it, and it must do so whether or not a
+  // deactivation preceded it.
+  bypass_service_mock_->handle_request( req_header, request );
+  ASSERT_TRUE( controller_->bypass_active() );
+  activateController();
+  EXPECT_FALSE( controller_->bypass_active() )
+      << "a freshly activated controller must check collisions";
+  EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 );
+}
+
+TEST_F( SafetyPositionControllerTest, ArmingAndClearingABypassCannotStrandItArmed )
+{
+  // The bypass is armed on an executor thread and cleared on the control thread. Held as
+  // a flag beside a deadline, those two could interleave into armed-with-no-deadline,
+  // which nothing would ever expire: collision checking off until somebody noticed. One
+  // atomic makes that state unrepresentable, so hammer both sides and assert the
+  // invariant rather than trusting the ordering.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_TRUE( bypass_service_mock_ );
+
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = true;
+  auto req_header = std::make_shared<rmw_request_id_t>();
+  EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
+      .Times( ::testing::AnyNumber() );
+
+  std::atomic<bool> stop{ false };
+  std::thread arming( [&]() {
+    while ( !stop.load() ) { bypass_service_mock_->handle_request( req_header, request ); }
+  } );
+  for ( int i = 0; i < 5000; ++i ) {
+    controller_->clear_bypass();
+    // Armed always means a deadline that some later cycle can act on.
+    ASSERT_TRUE( !controller_->bypass_active() || controller_->safety_bypass_deadline_.load() != 0 )
+        << "a bypass must never be armed without a deadline (iteration " << i << ")";
+  }
+  stop.store( true );
+  arming.join();
+
+  controller_->clear_bypass();
+  EXPECT_FALSE( controller_->bypass_active() );
+}
+
+TEST_F( SafetyPositionControllerTest, BypassLapsesOnItsOwn )
+{
+  // An unattended bypass must not last. The deadline is enforced by the update loop, so
+  // the cycle that ends it is already checking collisions again.
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "safety_bypass_timeout", 0.1 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_TRUE( bypass_service_mock_ );
+
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = true;
+  auto req_header = std::make_shared<rmw_request_id_t>();
+  EXPECT_CALL( *bypass_service_mock_, send_response( ::testing::_, ::testing::_ ) )
+      .Times( ::testing::AnyNumber() );
+  bypass_service_mock_->handle_request( req_header, request );
+  ASSERT_TRUE( controller_->bypass_active() );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->bypass_active() ) << "still within the timeout";
+
+  std::this_thread::sleep_for( std::chrono::milliseconds( 150 ) );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->bypass_active() ) << "the timeout must end it";
+  EXPECT_EQ( controller_->safety_bypass_deadline_.load(), 0 );
+}
+
+TEST_F( SafetyPositionControllerTest, WrongSizedCommandIsRejectedWhole )
+{
+  // A short array used to be applied as a prefix, leaving the joints it did not mention
+  // on their previous targets: half of one command mixed with half of an older one. An
+  // oversized array was truncated just as quietly. The sender cannot tell either case
+  // from success, so refuse the whole message and keep the last good reference.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_FALSE( controller_->is_in_chained_mode() );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 0.2, -0.1, 0.3 } );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 );
+  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
+  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+
+  sendCommand( { 0.9 } ); // too short
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 ) << "no prefix may be applied";
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+
+  sendCommand( { 0.9, 0.9, 0.9, 0.9 } ); // too long
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 ) << "no truncation may be applied";
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+
+  sendCommand( {} ); // empty
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 );
+
+  sendCommand( { 0.4, 0.5, 0.6 } ); // the right size is still accepted
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.4 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], 0.5 );
+  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.6 );
+}
+
+TEST_F( SafetyPositionControllerTest, RejectedCommandCannotReleaseAPark )
+{
+  // Releasing a park needs a reference that differs from the abandoned one, and a
+  // refused command leaves the reference untouched. A publisher sending the wrong
+  // number of joints therefore cannot restart the limb - which is the point: it is not
+  // commanding this controller, and the previous behaviour of applying its first few
+  // values would have moved the arm on a command nobody could have meant. Fixing the
+  // publisher restores control; nothing else has to be restarted.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 0.5, 0.0, 0.0 } );
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+
+  sendEstop( true );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  sendEstop( false );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  ASSERT_TRUE( controller_->pipeline_->parked() );
+  const double parked_at = hw_cmd_values_[0];
+
+  sendCommand( { 0.9, 0.9 } ); // wrong size: not a command to this controller
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_TRUE( controller_->pipeline_->parked() ) << "a refused command releases nothing";
+    ASSERT_NEAR( hw_cmd_values_[0], parked_at, 1e-6 );
+  }
+
+  sendCommand( { 0.9, 0.0, 0.0 } ); // a correctly sized one does
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_FALSE( controller_->pipeline_->parked() );
+  EXPECT_GT( hw_cmd_values_[0], parked_at + 1e-4 ) << "control returns once the sender is fixed";
+}
+
+TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
+{
+  // The controller has to listen where the robot's e-stop actually is. On Athena that
+  // is the SOFT stop, whose "please stop" the arm can honour by holding position; the
+  // hard stop cuts power, faults the hardware and deactivates every controller, so no
+  // controller-side handling would run for it anyway.
+  const std::string topic = "e_stop_manager/aggregated_state/emergency_stop_software";
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "e_stop_topic", topic ) } );
+
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
+                   controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+                   topic ) != nullptr )
+      << "the configured topic must be the one subscribed";
+
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
+                   controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+                   "test_safety_position/safety_estop" ) == nullptr )
+      << "the default topic must not also be subscribed";
+}
+
+TEST_F( SafetyPositionControllerTest, EstopSubscriptionKeepsTheLatchedState )
+{
+  // The e-stop manager publishes its aggregated state once per change and latches it
+  // (RELIABLE, TRANSIENT_LOCAL). A volatile subscriber that joins after the operator
+  // engaged the stop is told nothing and runs as if none were in effect, so the
+  // durability here is load bearing, not a default.
+  initController();
+  const auto sub = rtest::findSubscription<std_msgs::msg::Bool>(
+      controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+      "test_safety_position/safety_estop" );
+  ASSERT_TRUE( sub != nullptr );
+
+  const auto qos = sub->get_actual_qos();
+  EXPECT_EQ( qos.durability(), rclcpp::DurabilityPolicy::TransientLocal )
+      << "a volatile subscriber would miss a stop engaged before it subscribed";
+  EXPECT_EQ( qos.reliability(), rclcpp::ReliabilityPolicy::Reliable );
+  // An engage and the release after it can be delivered together while the executor is
+  // busy; a depth of one would let the release overwrite the unread engage.
+  EXPECT_GT( qos.depth(), 1u ) << "the engage must survive until its callback runs";
+}
+
+TEST_F( SafetyPositionControllerTest, EstopPulseBetweenCyclesIsHonored )
+{
+  // A stalled executor can deliver the engage and the release back to back, so the
+  // update loop never samples the engaged level. The engage must still abandon the
+  // pre-E-stop target instead of cancelling out against the release.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
+
+  // Both messages land between two update cycles.
+  controller_->note_estop_request( true );
+  controller_->note_estop_request( false );
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  const double position_at_estop = hw_cmd_values_[0];
+  EXPECT_TRUE( controller_->estop_engaged_.load() ) << "the latched engage must produce one cycle";
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  followCommands();
+  EXPECT_FALSE( controller_->estop_engaged_.load() )
+      << "the latch must be consumed, so the release is seen on the next cycle";
+
+  for ( int i = 0; i < 50; ++i ) {
+    controller_->reference_interfaces_[0] = 1.0; // upstream keeps commanding it
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
+        << "the pulse must abandon the pre-E-stop target (cycle " << i << ")";
+  }
+}
+
+TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewCommandOnCommandTopic )
+{
+  // Same contract in non-chained mode. The "~/commands" message stays in the realtime
+  // buffer and is re-read every cycle, so the hold cannot rely on clearing references.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_FALSE( controller_->is_in_chained_mode() );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 1.0, 0.0, 0.0 } );
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the command";
+
+  sendEstop( true );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  const double position_at_estop = hw_cmd_values_[0];
+
+  sendEstop( false );
+  for ( int i = 0; i < 50; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
+        << "the buffered command must stay abandoned (cycle " << i << ")";
+  }
+
+  sendCommand( { 1.1, 0.0, 0.0 } );
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
 }
 
 // ============================================================================
@@ -376,7 +747,7 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassServiceEnables )
 
   bypass_service_mock_->handle_request( req_header, request );
 
-  EXPECT_TRUE( controller_->safety_bypass_active_.load() );
+  EXPECT_TRUE( controller_->bypass_active() );
 }
 
 TEST_F( SafetyPositionControllerTest, SafetyBypassServiceDisables )
@@ -387,7 +758,7 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassServiceDisables )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
 
   // First enable
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   auto req_header = std::make_shared<rmw_request_id_t>();
   req_header->sequence_number = 2L;
@@ -398,15 +769,46 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassServiceDisables )
 
   bypass_service_mock_->handle_request( req_header, request );
 
-  EXPECT_FALSE( controller_->safety_bypass_active_.load() );
+  EXPECT_FALSE( controller_->bypass_active() );
 }
 
 // ============================================================================
 // NaN Handling
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, NaNReferenceSkipsWriting )
+TEST_F( SafetyPositionControllerTest, NaNReferenceHoldsAtCurrentPosition )
 {
+  // NaN references demand zero velocity: the controller holds the (rebased) commanded
+  // position instead of tracking anything — the joints must not move.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  setStateValue( "joint1", 0.4 );
+  setStateValue( "joint2", -0.2 );
+  setStateValue( "joint3", 0.1 );
+
+  controller_->reference_interfaces_[0] = std::numeric_limits<double>::quiet_NaN();
+  controller_->reference_interfaces_[1] = std::numeric_limits<double>::quiet_NaN();
+  controller_->reference_interfaces_[2] = std::numeric_limits<double>::quiet_NaN();
+
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], 0.4, 1e-6 );
+    EXPECT_NEAR( hw_cmd_values_[1], -0.2, 1e-6 );
+    EXPECT_NEAR( hw_cmd_values_[2], 0.1, 1e-6 );
+  }
+}
+
+TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
+{
+  // A reference that becomes NaN means "no target" and must make the joint brake to a
+  // stop and hold. It must NOT keep tracking the target that was valid before: the
+  // reference interfaces are reset to NaN on an E-stop release and on activation, and
+  // resuming the old target there would be unexpected delayed motion.
   initController();
   configureController();
   setupHardwareInterfaces();
@@ -415,23 +817,76 @@ TEST_F( SafetyPositionControllerTest, NaNReferenceSkipsWriting )
   activateController();
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
 
-  controller_->reference_interfaces_[0] = std::numeric_limits<double>::quiet_NaN();
-  controller_->reference_interfaces_[1] = std::numeric_limits<double>::quiet_NaN();
-  controller_->reference_interfaces_[2] = std::numeric_limits<double>::quiet_NaN();
+  // Move toward the target for a while; the mock hardware follows the command exactly.
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_when_invalidated = hw_cmd_values_[0];
+  ASSERT_GT( cmd_when_invalidated, 0.0 ) << "should have started moving toward the target";
+  ASSERT_LT( cmd_when_invalidated, 1.0 ) << "should not have arrived yet";
 
-  // Set command values to known value to verify they don't change
-  hw_cmd_values_[0] = 99.0;
-  hw_cmd_values_[1] = 99.0;
-  hw_cmd_values_[2] = 99.0;
+  // Upstream stops commanding: all references become NaN.
+  for ( auto &ref : controller_->reference_interfaces_ ) {
+    ref = std::numeric_limits<double>::quiet_NaN();
+  }
 
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
+  for ( int i = 0; i < 100; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
 
-  // Commands should NOT have been overwritten (NaN skip path)
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 99.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], 99.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 99.0 );
+  // joint1: v_max = 1.0 rad/s, a_dec = deceleration_scale(3) * 8 rad/s^2 = 24 rad/s^2.
+  // Braking distance is at most v^2 / (2 * a_dec) ~= 0.021 rad; allow a few cycles slack.
+  constexpr double kBrakingDistance = 1.0 / ( 2.0 * 24.0 ) + 0.03;
+  EXPECT_NEAR( hw_cmd_values_[0], cmd_when_invalidated, kBrakingDistance )
+      << "NaN reference must brake and hold instead of tracking the stale target";
+  EXPECT_LT( hw_cmd_values_[0], 0.9 ) << "the abandoned target must never be reached";
+}
+
+TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
+{
+  // After a deactivate/activate cycle the references are NaN again. The processed
+  // reference derived from them must be invalidated too, otherwise the controller keeps
+  // driving toward the target from before the deactivation.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+
+  deactivateController();
+  activateController();
+
+  // Fresh activation: references are NaN and nothing new is commanded.
+  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+    ASSERT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) );
+  }
+  const double position_at_activation = hw_state_values_[0];
+
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+    EXPECT_NEAR( hw_cmd_values_[0], position_at_activation, 1e-6 )
+        << "reactivated controller must hold, not resume the pre-deactivation target "
+           "(cycle "
+        << i << ")";
+  }
 }
 
 // ============================================================================
@@ -456,7 +911,6 @@ TEST_F( SafetyPositionControllerTest, StatusPublishesCorrectFields )
   EXPECT_FALSE( captured.current_limits_enabled );
   EXPECT_FALSE( captured.collision_check_enabled ); // disabled in params
   EXPECT_FALSE( captured.estop_engaged );
-  EXPECT_TRUE( captured.position_limits_enforced );
 }
 
 TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopEngage )
@@ -512,8 +966,10 @@ TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopRelease )
 
 TEST_F( SafetyPositionControllerTest, StatusReflectsCollisionCheckEnabled )
 {
-  // Init with collisions enabled
-  initController( {}, /*check_self_collisions=*/true );
+  // Collision checking needs a model with collision geometry: configuring it against a
+  // model with no checkable pair is refused, because the check would pass everything.
+  initController( {}, /*check_self_collisions=*/true, /*set_current_limits=*/false,
+                  "test_robot_collision.urdf" );
   configureController();
   setupHardwareInterfaces();
   findMocks();
@@ -542,7 +998,7 @@ TEST_F( SafetyPositionControllerTest, StatusReflectsSafetyBypassActive )
 
   // The bypass publish happens in the service callback, not in update.
   // Simulate what the service callback does: set active + publish.
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
   controller_->publish_status();
   EXPECT_TRUE( captured.safety_bypass_active );
 }
@@ -579,12 +1035,52 @@ TEST_F( SafetyPositionControllerTest, RepeatedActivateDeactivateCycles )
 
     deactivateController();
 
-    // Verify state is reset after deactivation
-    EXPECT_FALSE( controller_->estop_active_.load() );
+    // The engaged E-stop is cleared; the subscriptions outlive the activation
     EXPECT_FALSE( controller_->estop_engaged_.load() );
-    EXPECT_TRUE( controller_->estop_subscriber_ == nullptr );
-    EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
+    EXPECT_TRUE( controller_->estop_subscriber_ != nullptr );
+    EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
   }
+}
+
+TEST_F( SafetyPositionControllerTest, EventStatusReportsTheCurrentCycle )
+{
+  // The status timer never fires in these tests, which is exactly the documented
+  // status_publish_rate=0 mode: what an event publishes is all a consumer ever sees.
+  // An E-stop release parks the pipeline within the same cycle, so the message the
+  // release publishes must already report that.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+
+  SafetyPositionControllerStatus captured;
+  int publishes = 0;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).WillRepeatedly( [&]( const auto &msg ) {
+    captured = msg;
+    ++publishes;
+  } );
+
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+
+  sendEstop( true );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( captured.estop_engaged );
+
+  sendEstop( false );
+  const int publishes_before_release = publishes;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  ASSERT_GT( publishes, publishes_before_release ) << "the release must publish a status";
+  EXPECT_FALSE( captured.estop_engaged );
+  EXPECT_TRUE( captured.parked ) << "the release parks the pipeline in this very cycle";
 }
 
 TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
@@ -607,12 +1103,10 @@ TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
   EXPECT_TRUE( controller_->estop_engaged_.load() );
 
   deactivateController();
-  // After deactivation, estop should be cleared
-  EXPECT_FALSE( controller_->estop_active_.load() );
   EXPECT_FALSE( controller_->estop_engaged_.load() );
 
+  sendEstop( false );
   activateController();
-  // Controller should be in clean state
   EXPECT_FALSE( controller_->estop_engaged_.load() );
 
   // References should be NaN (fresh activation)
@@ -630,11 +1124,330 @@ TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
   EXPECT_GT( std::abs( hw_cmd_values_[0] ), 0.0 );
 }
 
+TEST_F( SafetyPositionControllerTest, EstopSurvivesReactivation )
+{
+  // estop_active_ tracks the external safety signal, so restarting the controller must
+  // not silently release it: the first cycle after activation re-engages the hold.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  setStateValue( "joint1", 0.5 );
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  sendEstop( true );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  ASSERT_TRUE( controller_->estop_engaged_.load() );
+
+  deactivateController();
+  EXPECT_TRUE( controller_->estop_active_.load() ) << "the E-stop request must survive";
+
+  activateController();
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->estop_engaged_.load() )
+      << "a still-active E-stop must re-engage instead of resuming motion";
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
+}
+
+TEST_F( SafetyPositionControllerTest, BusyStateHandleSkipsTheCycleWithoutFailing )
+{
+  // An async hardware component can hold a handle's lock while the controller reads it.
+  // A missed try_lock is contention, not a fault: returning ERROR makes the controller
+  // manager deactivate this controller and every controller in its chain.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  {
+    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+    EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+        << "a busy state handle must not fail the update";
+    EXPECT_DOUBLE_EQ( hw_cmd_values_[0], cmd_before ) << "the cycle is skipped, not guessed";
+  }
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_GT( hw_cmd_values_[0], cmd_before ) << "tracking resumes once the handle is free";
+}
+
+TEST_F( SafetyPositionControllerTest, NonFiniteJointStateHoldsPositionAndIsNeverCommanded )
+{
+  // A broken encoder must never become a command. The pipeline seeds its integration
+  // state from the measured position and the tracking leash pulls the command toward it,
+  // while only NaN was filtered on the way out - so an infinity reached the hardware.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  for ( const double bad :
+        { std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+          std::numeric_limits<double>::quiet_NaN() } ) {
+    setStateValue( "joint1", bad );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    ASSERT_TRUE( std::isfinite( hw_cmd_values_[0] ) )
+        << "non-finite feedback must never be commanded";
+    ASSERT_DOUBLE_EQ( hw_cmd_values_[0], cmd_before )
+        << "the cycle is skipped: no motion without valid feedback";
+  }
+
+  setStateValue( "joint1", cmd_before );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_GT( hw_cmd_values_[0], cmd_before ) << "tracking resumes once feedback is valid again";
+}
+
+TEST_F( SafetyPositionControllerTest, ProlongedBusyStateHandleParksOnRecovery )
+{
+  // A single missed try_lock is contention and skips the cycle; a handle that stays
+  // busy past state_read_timeout is a fault. The pipeline must be invalidated so that
+  // recovery rebases to the measured state and PARKS: resuming the pre-failure
+  // reference from a stale velocity state could jump-start a long-stopped arm.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  StatusMsgType captured;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
+      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  {
+    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+    // default state_read_timeout is 0.1 s = 10 cycles at the 100 Hz test rate
+    for ( int i = 0; i < 20; ++i ) {
+      ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+      EXPECT_DOUBLE_EQ( hw_cmd_values_[0], cmd_before ) << "cycles are skipped while busy";
+    }
+  }
+
+  // Recovery: the pre-failure reference (still 1.0) is abandoned, the limb holds
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "recovery after a prolonged state-read failure must park";
+  EXPECT_TRUE( captured.parked )
+      << "the recovery park is an event and must be published (event-only mode consumers)";
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], cmd_before, 1e-9 ) << "parked limb must hold, not resume";
+  }
+
+  // A NEW reference releases the park and is tracked again
+  controller_->reference_interfaces_[0] = 0.1;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->pipeline_->parked() );
+  const double resume_start = hw_cmd_values_[0];
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  EXPECT_GT( hw_cmd_values_[0], resume_start ) << "tracking must resume toward the new reference";
+}
+
+TEST_F( SafetyPositionControllerTest, ProlongedNonFiniteJointStateParksOnRecovery )
+{
+  // The dead-encoder variant of the prolonged failure: non-finite reads accumulate into
+  // the same escalation as busy handles.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  setStateValue( "joint1", std::numeric_limits<double>::quiet_NaN() );
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+
+  setStateValue( "joint1", cmd_before );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "recovery after prolonged non-finite feedback must park";
+}
+
+TEST_F( SafetyPositionControllerTest, ProlongedMeasurementDivergenceParksOnRecovery )
+{
+  // A joint that leaves on its own (backdriven, slipping, a re-homed encoder) is not
+  // something the command may chase: the self-collision check runs at the commanded
+  // configuration, so a command that keeps steering a robot which is somewhere else is
+  // validating a fiction. A lasting divergence must rebase onto the measured state and
+  // park, exactly as an unreadable joint state does.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  const double cmd_before = hw_cmd_values_[0];
+  ASSERT_GT( cmd_before, 0.0 );
+
+  // Being blocked is not divergence: the command leads by at most the leash and the
+  // joint keeps being pushed, which is what a loaded flipper needs.
+  for ( int i = 0; i < 20; ++i ) {
+    setStateValue( "joint1", 0.0 ); // hardware refuses to follow
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    ASSERT_FALSE( controller_->pipeline_->parked() ) << "a blocked joint must keep pushing";
+  }
+
+  // The joint being dragged well past the leash is. Default tracking_leash is 0.5, so
+  // 1.5 rad away is past the bound the leash can explain.
+  for ( int i = 0; i < 20; ++i ) {
+    setStateValue( "joint1", -1.5 );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+  setStateValue( "joint1", -1.5 );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "a lasting divergence must rebase and park, not keep steering a stale model";
+
+  // Parked at the measured state, and the pre-divergence reference stays abandoned.
+  for ( int i = 0; i < 10; ++i ) {
+    setStateValue( "joint1", -1.5 );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], -1.5, 1e-6 ) << "held at where the joint actually is";
+  }
+}
+
+TEST_F( SafetyPositionControllerTest, EstopPulseDuringStateReadOutageIsHonored )
+{
+  // An E-stop must not need working joint-state reads: an engage (or a whole
+  // engage+release pulse) inside a read outage previously fell through the skip-cycle
+  // early return and was lost — the arm resumed the pre-outage reference untouched.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 );
+
+  {
+    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+    sendEstop( true );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_TRUE( controller_->estop_engaged_.load() )
+        << "the engage edge must not wait for joint states";
+    sendEstop( false );
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_FALSE( controller_->estop_engaged_.load() );
+  }
+
+  // The E-stop abandoned the reference: recovery must hold and park, not resume the
+  // pre-outage target.
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "the release must park like any E-stop release";
+  const double held = hw_cmd_values_[0];
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    EXPECT_NEAR( hw_cmd_values_[0], held, 1e-9 ) << "the abandoned reference must not be resumed";
+  }
+}
+
+TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 1.0;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  std::unique_lock<std::shared_mutex> busy( cmd_ifaces_[0]->get_mutex() );
+  EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+      << "a busy command handle must not fail the update";
+}
+
 // ============================================================================
 // Chained Mode Tests
 // ============================================================================
 
-TEST_F( SafetyPositionControllerTest, ChainedModeInvalidatesReferences )
+TEST_F( SafetyPositionControllerTest, SwitchingChainedModeInvalidatesReferences )
 {
   initController();
   configureController();
@@ -643,46 +1456,47 @@ TEST_F( SafetyPositionControllerTest, ChainedModeInvalidatesReferences )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  // Set valid references
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 2.0;
-  controller_->reference_interfaces_[2] = 3.0;
+  for ( const bool chained : { true, false } ) {
+    controller_->reference_interfaces_[0] = 1.0;
+    controller_->reference_interfaces_[1] = 2.0;
+    controller_->reference_interfaces_[2] = 3.0;
 
-  // Switching to chained mode should invalidate all references
-  controller_->on_set_chained_mode( true );
-  EXPECT_TRUE( controller_->is_chained_ );
+    controller_->on_set_chained_mode( chained );
 
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
-        << "reference_interfaces_[" << i << "] should be NaN after switching to chained mode";
+    for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+      EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
+          << "reference_interfaces_[" << i << "] must be NaN after switching to "
+          << ( chained ? "chained" : "unchained" ) << " mode";
+    }
   }
 }
 
-TEST_F( SafetyPositionControllerTest, UnchainedModeInvalidatesReferences )
+TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
 {
+  // Both reference inputs live for the whole controller lifetime. Re-creating them per
+  // activation left "~/commands" without a subscription after the first deactivation.
   initController();
   configureController();
   setupHardwareInterfaces();
   findMocks();
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
+  deactivateController();
+  activateController();
 
-  // Start in chained mode
-  controller_->on_set_chained_mode( true );
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  EXPECT_TRUE( rtest::findSubscription<safety_position_controller::CmdType>(
+      node_name, node_name + "/commands" ) );
+  EXPECT_TRUE(
+      rtest::findSubscription<std_msgs::msg::Bool>( node_name, node_name + "/safety_estop" ) );
 
-  // Set valid references
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 2.0;
-  controller_->reference_interfaces_[2] = 3.0;
-
-  // Switching to unchained mode should also invalidate references
-  controller_->on_set_chained_mode( false );
-  EXPECT_FALSE( controller_->is_chained_ );
-
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
-        << "reference_interfaces_[" << i << "] should be NaN after switching to unchained mode";
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  sendCommand( { 0.5, 0.0, 0.0 } );
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    followCommands();
   }
+  EXPECT_GT( hw_cmd_values_[0], 0.0 ) << "the command topic must still reach the hardware";
 }
 
 // ============================================================================
@@ -722,10 +1536,7 @@ public:
 
     std::vector<rclcpp::Parameter> overrides = {
         rclcpp::Parameter( "joints", cj ),
-        rclcpp::Parameter( "unwrap_continuous_joints", true ),
-        rclcpp::Parameter( "enforce_position_limits", true ),
         rclcpp::Parameter( "check_self_collisions", true ),
-        rclcpp::Parameter( "block_velocity_scaling", 3.0 ), // max allowed scaling
         rclcpp::Parameter( "collision_safety_zone", 0.05 ),
         rclcpp::Parameter( "set_current_limits", false ),
         rclcpp::Parameter( "safety_bypass_timeout", 60.0 ),
@@ -842,7 +1653,6 @@ TEST_F( SafetyPositionControllerCollisionTest, NoCollisionAllowsMovement )
   EXPECT_EQ( ret, controller_interface::return_type::OK );
 
   // Commands should be applied (possibly limited by block_if_too_far but non-zero)
-  // With high block_velocity_scaling=100, step limit is generous
   EXPECT_GT( std::abs( hw_cmd_values_[0] ), 0.0 );
 }
 
@@ -885,7 +1695,7 @@ TEST_F( SafetyPositionControllerCollisionTest, CollisionBypassSkipsCheck )
   activateController();
 
   // Enable safety bypass -> collision check skipped
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   // Start at safe position
   for ( auto &v : hw_state_values_ ) v = 0.0;
@@ -1002,287 +1812,9 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointCollisionDetected 
 // Velocity Limiting & Distance-Based Scaling Tests (collision fixture)
 // ============================================================================
 
-TEST_F( SafetyPositionControllerCollisionTest, VelocityLimitingWithCollisionChecks )
-{
-  // Override block_velocity_scaling to a known low value
-  initWithCollisions( {}, "test_robot_collision.urdf",
-                      { rclcpp::Parameter( "block_velocity_scaling", 1.5 ) } );
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // First cycle: last_min_distance_ = max -> distance_scale = 1.0 (full speed)
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5; // large jump
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // max_step = velocity_limit / update_rate * block_velocity_scaling = 1.0/100 * 1.5 = 0.015
-  double max_step = 1.0 / kUpdateRate * 1.5;
-  EXPECT_NEAR( hw_cmd_values_[0], max_step, 1e-6 );
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DistanceBasedScalingReducesVelocity )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ to halfway in the safety zone
-  // collision_padding=0.0, collision_safety_zone=0.05
-  // d=0.025 -> scale = (0.025 - 0.0) / (0.05 - 0.0) = 0.5
-  controller_->last_min_distance_ = 0.025;
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5; // large jump
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // max_step = velocity_limit / update_rate * block_velocity_scaling * distance_scale
-  // = 1.0 / 100 * 3.0 * 0.5 = 0.015
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5;
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 );
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DistanceScaleZeroHoldsPosition )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ to exactly at collision_padding (0.0) -> scale = 0
-  controller_->last_min_distance_ = 0.0;
-
-  setStateValue( "joint1", 0.3 );
-  setStateValue( "joint2", 0.0 );
-  setStateValue( "joint3", 0.0 );
-
-  controller_->reference_interfaces_[0] = 0.5; // wants to move
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // With distance_scale=0, apply_velocity_limits should hold at current position.
-  // The collision check at the held position should be safe (straight chain at [0.3,0,0]).
-  // So the final written command should be the velocity-limited position (= current = 0.3).
-  EXPECT_NEAR( hw_cmd_values_[0], 0.3, 1e-6 );
-}
-
 // ============================================================================
 // Directional Collision Scaling Tests
 // ============================================================================
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_AwayNotScaled )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ halfway in safety zone -> distance_scale = 0.5
-  controller_->last_min_distance_ = 0.025;
-
-  // Create a fake safety zone pair with a gradient that says joint1 positive = moving away
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.025;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  // Gradient: positive for joint1's velocity index means positive motion increases distance
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  fake_pair.gradient[v_idx_j1] = 1.0; // moving joint1 positively moves AWAY
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  // Current position: all zero
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-
-  // Command positive joint1 motion (away from collision)
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Since motion is away from collision, effective_scale should be 1.0 (not 0.5)
-  // max_step = velocity_limit / update_rate * block_velocity_scaling * 1.0
-  // = 1.0 / 100 * 3.0 = 0.03
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  EXPECT_NEAR( hw_cmd_values_[0], full_max_step, 1e-6 )
-      << "Motion away from collision should not be scaled down";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_TowardIsScaled )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set last_min_distance_ halfway in safety zone -> distance_scale = 0.5
-  controller_->last_min_distance_ = 0.025;
-
-  // Create a fake safety zone pair: joint1 positive = moving TOWARD collision
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.025;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  fake_pair.gradient[v_idx_j1] = -1.0; // moving joint1 positively moves TOWARD collision
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5; // positive = toward collision
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Motion toward collision -> effective_scale = distance_scale = 0.5
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5;
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
-      << "Motion toward collision should be scaled down";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_AtPaddingCanEscape )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // At collision padding: distance_scale = 0.0
-  controller_->last_min_distance_ = 0.0;
-
-  // Create a safety zone pair: moving joint1 positive = AWAY from collision
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.0;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  fake_pair.gradient[v_idx_j1] = 1.0; // away
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  setStateValue( "joint1", 0.3 );
-  setStateValue( "joint2", 0.0 );
-  setStateValue( "joint3", 0.0 );
-
-  // Command motion away
-  controller_->reference_interfaces_[0] = 0.5; // away from collision
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // Even though distance_scale=0, directional scaling overrides to 1.0
-  // because motion is away from collision
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_cmd = 0.3 + full_max_step; // current + max step
-  EXPECT_NEAR( hw_cmd_values_[0], expected_cmd, 1e-6 )
-      << "Robot should be able to escape when moving away from collision at padding boundary";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_TwoPairsOneWorsening )
-{
-  initWithCollisions();
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  controller_->last_min_distance_ = 0.025;
-
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  ASSERT_GE( v_idx_j1, 0 );
-  int nv = controller_->collision_checker_->getNv();
-
-  // Pair 1: joint1 positive = AWAY
-  CollisionResult::PairInfo pair1;
-  pair1.pair_index = 0;
-  pair1.distance = 0.025;
-  pair1.gradient = Eigen::VectorXd::Zero( nv );
-  pair1.gradient[v_idx_j1] = 1.0; // away
-
-  // Pair 2: joint1 positive = TOWARD
-  CollisionResult::PairInfo pair2;
-  pair2.pair_index = 1;
-  pair2.distance = 0.03;
-  pair2.gradient = Eigen::VectorXd::Zero( nv );
-  pair2.gradient[v_idx_j1] = -0.5; // toward
-
-  controller_->last_safety_zone_pairs_ = { pair1, pair2 };
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // One pair says away, one says toward → worst case is toward → scaling applied
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5; // distance_scale = 0.5
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
-      << "With any pair worsening, motion should be scaled conservatively";
-}
-
-TEST_F( SafetyPositionControllerCollisionTest, DirectionalScaling_DisabledByParam )
-{
-  initWithCollisions( {}, "test_robot_collision.urdf",
-                      { rclcpp::Parameter( "directional_collision_scaling", false ) } );
-  configureWithSrdf();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  controller_->last_min_distance_ = 0.025;
-
-  // Even with gradient saying "away", scaling should still be applied (param disabled)
-  CollisionResult::PairInfo fake_pair;
-  fake_pair.pair_index = 0;
-  fake_pair.distance = 0.025;
-  fake_pair.gradient = Eigen::VectorXd::Zero( controller_->collision_checker_->getNv() );
-  int v_idx_j1 = controller_->collision_checker_->getJointVelocityIndex( "joint1" );
-  fake_pair.gradient[v_idx_j1] = 1.0; // away
-  controller_->last_safety_zone_pairs_ = { fake_pair };
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  callUpdate();
-
-  // With directional scaling disabled, should use distance_scale=0.5 even though moving away
-  double full_max_step = 1.0 / kUpdateRate * 3.0;
-  double expected_step = full_max_step * 0.5;
-  EXPECT_NEAR( hw_cmd_values_[0], expected_step, 1e-6 )
-      << "With directional scaling disabled, should always use distance-based scale";
-}
 
 // ============================================================================
 // Current Limits Tests
@@ -1411,7 +1943,10 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
+  // Start close to the limit so per-cycle velocity stepping (active also during bypass)
+  // does not dominate the test: joint2 max step = 2.0/100 * 1.5 = 0.03.
   for ( auto &v : hw_state_values_ ) v = 0.0;
+  setStateValue( "joint2", 1.5 );
 
   // joint2 upper limit is 1.5, range = 3.0, tolerance = 3% -> 0.09 extra
   // Without bypass: command beyond 1.5 should clamp to 1.5
@@ -1423,7 +1958,7 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
   EXPECT_LE( hw_cmd_values_[1], 1.5 ) << "Without bypass, should clamp to upper limit";
 
   // Enable bypass
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   controller_->reference_interfaces_[0] = 0.0;
   controller_->reference_interfaces_[1] = 1.55;
@@ -1431,11 +1966,20 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
 
   callUpdate();
 
-  // With bypass (tolerance = 3% of range 3.0 = 0.09), upper limit becomes 1.59
-  // 1.55 is within [1.5, 1.59] so it should pass through
+  // With bypass (tolerance = 3% of range 3.0 = 0.09), upper limit becomes 1.59.
+  // Bypass keeps velocity/acceleration limits active, so 1.55 is approached smoothly
+  // over multiple cycles rather than jumped to.
+  for ( int i = 0; i < 100 && hw_cmd_values_[1] <= 1.5; ++i ) {
+    setStateValue( "joint2", hw_cmd_values_[1] );
+    callUpdate();
+  }
   EXPECT_GT( hw_cmd_values_[1], 1.5 )
       << "With bypass, commands slightly beyond normal limits should be allowed";
-  EXPECT_NEAR( hw_cmd_values_[1], 1.55, 1e-6 );
+  for ( int i = 0; i < 100; ++i ) {
+    setStateValue( "joint2", hw_cmd_values_[1] );
+    callUpdate();
+  }
+  EXPECT_NEAR( hw_cmd_values_[1], 1.55, 1e-4 );
 }
 
 // ============================================================================
@@ -1476,6 +2020,25 @@ TEST_F( SafetyPositionControllerCollisionTest, ActivateFailsWhenSafetyZoneEquals
   EXPECT_EQ( cb, controller_interface::CallbackReturn::ERROR );
 }
 
+TEST_F( SafetyPositionControllerCollisionTest, NarrowSafetyZoneStillActivates )
+{
+  // The tunneling check compares a joint step [rad] against the zone width [m], which
+  // only lines up at a ~1 m lever arm — a conservative heuristic that must warn, not
+  // block activation (every deployed Athena config trips it).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "collision_safety_zone", 0.015 ),
+                        rclcpp::Parameter( "collision_padding", 0.0 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+
+  rclcpp_lifecycle::State inactive( lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE,
+                                    "inactive" );
+  auto cb = controller_->on_activate( inactive );
+  EXPECT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
+}
+
 // ============================================================================
 // Safety Bypass Skips Collision And Allows Relaxed Limits
 // ============================================================================
@@ -1489,7 +2052,7 @@ TEST_F( SafetyPositionControllerCollisionTest, BypassSkipsCollisionButAllowsRela
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  controller_->safety_bypass_active_.store( true );
+  armBypassOn( *controller_ );
 
   // Start at a colliding configuration
   setStateValue( "joint1", 0.0 );
@@ -1530,7 +2093,7 @@ TEST_F( SafetyPositionControllerCollisionTest, InfInputDetectedAsCollision )
   controller_->reference_interfaces_[2] = 0.0;
 
   // First need to call update so collision checker sees the inf
-  // The inf will be clamped by enforce_limits (joint1 has limits [-pi, pi])
+  // The inf is clamped to the position limits (joint1 has limits [-pi, pi])
   // But the collision checker receives cc_positions which includes the clamped value
   // So this tests the controller's overall handling — commands should still be safe
   auto ret = callUpdate();
@@ -1584,9 +2147,273 @@ TEST_F( SafetyPositionControllerTest, EstopHoldsAcrossMultipleCycles )
 // Collision test: distance-based scaling status fields
 // ============================================================================
 
-TEST_F( SafetyPositionControllerCollisionTest, StatusReportsDistanceScalingFields )
+// ============================================================================
+// Safety QP behavior
+// ============================================================================
+
+namespace
 {
+// kUpdateRate = 100 → dt = 0.01. Defaults: acceleration limit 8 rad/s²,
+// deceleration_scale 3 → decel 24 rad/s². URDF velocity limits: joint1=1.0,
+// joint2=2.0, joint3=1.5.
+constexpr double kDt = 0.01;
+constexpr double kAccPerCycle = 8.0 * kDt;       // max speed-up per cycle
+constexpr double kDecPerCycle = 3.0 * 8.0 * kDt; // max brake per cycle
+} // namespace
+
+TEST_F( SafetyPositionControllerCollisionTest, TransientUncontrolledJointGlitchDoesNotLatchCollision )
+{
+  // A one-cycle NaN on an UNCONTROLLED joint (joint4 has a state interface but is not
+  // commanded) must not freeze the arm. With the movement cache enabled, a latched
+  // "assume collision" result served for the unchanged configuration would zero the
+  // tracking demand forever: the arm never moves, so the cache would never invalidate.
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "collision_cache_epsilon", 1e-6 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // Settle at a collision-free target so the configuration is stationary.
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+  for ( int cycle = 0; cycle < 300; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  ASSERT_NEAR( hw_cmd_values_[0], 0.5, 1e-4 );
+
+  // One glitched cycle: the collision state is unobservable -> brake, latch nothing.
+  setStateValue( "joint4", std::numeric_limits<double>::quiet_NaN() );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_EQ( controller_->collision_observer_->lastMinDistance(), std::numeric_limits<double>::max() )
+      << "an unobservable cycle must not report the pre-glitch distance as current";
+  setStateValue( "joint4", 0.0 );
+
+  // A new reference after the recovery must be tracked again.
+  controller_->reference_interfaces_[0] = 0.2;
+  for ( int cycle = 0; cycle < 300; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  EXPECT_NEAR( hw_cmd_values_[0], 0.2, 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, ProlongedUncontrolledJointOutageParksOnRecovery )
+{
+  // joint4 is observed for collision checking but not controlled, so it never reaches
+  // read_current_positions(). A dead encoder there makes the collision state
+  // unobservable: the arm brakes, and on recovery it must park rather than jump-start
+  // toward the still-live reference — the same contract as a controlled-joint outage.
   initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  int publishes = 0;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).WillRepeatedly( [&publishes]( auto & ) {
+    ++publishes;
+  } );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  ASSERT_GT( hw_cmd_values_[0], 0.0 );
+
+  // default state_read_timeout is 0.1 s = 10 cycles at the 100 Hz test rate
+  setStateValue( "joint4", std::numeric_limits<double>::quiet_NaN() );
+  publishes = 0;
+  for ( int i = 0; i < 15; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    setStateValue( "joint1", hw_cmd_values_[0] );
+  }
+  EXPECT_LE( publishes, 2 ) << "the fault is an event, not a per-cycle publish";
+
+  // A loaded limb sags away from its command while the fault lasts. Rebasing onto the
+  // measurement every cycle would turn the hold into "follow the sag".
+  const double held_during_outage = hw_cmd_values_[0];
+  for ( int i = 0; i < 20; ++i ) {
+    setStateValue( "joint1", hw_cmd_values_[0] - 0.05 ); // simulated sag under gravity
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    ASSERT_NEAR( hw_cmd_values_[0], held_during_outage, 1e-9 )
+        << "the command must hold, not follow the measurement (cycle " << i << ")";
+  }
+  setStateValue( "joint1", held_during_outage );
+  setStateValue( "joint4", 0.0 );
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->pipeline_->parked() )
+      << "an uncontrolled-joint outage must park on recovery like a controlled one";
+  EXPECT_NEAR( hw_cmd_values_[0], held_during_outage, 1e-9 )
+      << "the hold must not have drifted toward the (sagging) measurement";
+
+  publishes = 0;
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+  EXPECT_EQ( publishes, 0 ) << "the recovery park publishes once, not every cycle";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeRampsAndReachesTarget )
+{
+  // End-to-end regression for the jump bug: a far target is approached with bounded
+  // velocity AND bounded acceleration, and is still reached (later).
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // joint1 rotates the whole chain about z → no collision along the way
+  controller_->reference_interfaces_[0] = 0.5;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  double prev_cmd = 0.0, prev_v = 0.0, max_dv = 0.0, max_v = 0.0;
+  int reached_at = -1;
+  for ( int cycle = 0; cycle < 300; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    const double cmd = hw_cmd_values_[0];
+    const double v = ( cmd - prev_cmd ) / kDt;
+    max_dv = std::max( max_dv, std::abs( v - prev_v ) );
+    max_v = std::max( max_v, std::abs( v ) );
+    prev_cmd = cmd;
+    prev_v = v;
+    // hardware follows the command
+    setStateValue( "joint1", cmd );
+    if ( reached_at < 0 && std::abs( cmd - 0.5 ) < 1e-4 ) {
+      reached_at = cycle;
+    }
+  }
+
+  EXPECT_GE( reached_at, 50 ) << "cannot be faster than the velocity limit";
+  EXPECT_GT( reached_at, 0 ) << "target never reached";
+  EXPECT_LE( max_v, 1.0 + 1e-6 ) << "velocity limit violated";
+  EXPECT_LE( max_dv, kDecPerCycle + 1e-6 ) << "acceleration limit violated";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeStopsAtCollisionAndReportsStall )
+{
+  // Command straight into a self-collision: the damper must stop the motion at the
+  // boundary (no penetration of the commanded configuration) and report 'stalled'.
+  initWithCollisions();
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // joint2 = pi folds link4 into link1 → collision on the way
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = M_PI;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int cycle = 0; cycle < 500; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+    // The commanded configuration must never penetrate (padding = 0 in this fixture;
+    // small negative tolerance for the linearization sag on curved geometry)
+    ASSERT_GT( controller_->collision_observer_->lastMinDistance(), -5e-3 )
+        << "commanded configuration in collision at cycle " << cycle;
+  }
+
+  EXPECT_TRUE( controller_->pipeline_->stalled() ) << "head-on block must be reported as stalled";
+  EXPECT_LT( hw_cmd_values_[1], M_PI - 0.1 ) << "should have stopped before the fold";
+  EXPECT_GT( hw_cmd_values_[1], 0.1 ) << "should have moved toward the target first";
+
+  // ---- Bypass: the fold must proceed, but still velocity/acceleration limited ----
+  armBypassOn( *controller_ );
+
+  const double stalled_cmd = hw_cmd_values_[1];
+  double prev_cmd = stalled_cmd, prev_v = 0.0, max_dv = 0.0, max_v = 0.0;
+  for ( int cycle = 0; cycle < 500; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    const double cmd = hw_cmd_values_[1];
+    const double v = ( cmd - prev_cmd ) / kDt;
+    max_dv = std::max( max_dv, std::abs( v - prev_v ) );
+    max_v = std::max( max_v, std::abs( v ) );
+    prev_cmd = cmd;
+    prev_v = v;
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+
+  EXPECT_GT( hw_cmd_values_[1], stalled_cmd + 0.5 ) << "bypass should allow the fold to proceed";
+  EXPECT_LE( max_v, 2.0 + 1e-6 ) << "velocity limit must hold during bypass (joint2 limit 2.0)";
+  EXPECT_LE( max_dv, kDecPerCycle + 1e-6 )
+      << "acceleration limit must hold during bypass (the original jump bug)";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeParksAfterStallAndResumesOnNewReference )
+{
+  // A limb stalled past stall_park_timeout must abandon the stale reference and hold
+  // position (no delayed motion when the blockage clears), resuming only on a NEW
+  // command (reference change).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "stall_park_timeout", 2.0 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+
+  // joint2 = pi folds into a self-collision → the QP stalls at the boundary
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = M_PI;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int cycle = 0; cycle < 600 && !controller_->pipeline_->parked(); ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+  ASSERT_TRUE( controller_->pipeline_->parked() ) << "did not park within 600 cycles";
+  EXPECT_TRUE( controller_->pipeline_->stalled() );
+
+  // While parked: tracking demand is zeroed even though the reference is still far away
+  // — the guarantee that clearing the blockage cannot cause delayed motion.
+  const double parked_cmd = hw_cmd_values_[1];
+  for ( int cycle = 0; cycle < 100; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+    EXPECT_LT( controller_->pipeline_->qpInput().v_des.cwiseAbs().maxCoeff(), 1e-9 );
+  }
+  EXPECT_TRUE( controller_->pipeline_->parked() );
+  EXPECT_NEAR( hw_cmd_values_[1], parked_cmd, 1e-6 ) << "parked limb must not creep";
+
+  // A NEW reference (retract away from the collision) releases the park and is tracked
+  controller_->reference_interfaces_[1] = 0.3;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->pipeline_->parked() );
+
+  for ( int cycle = 0; cycle < 500; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+  EXPECT_NEAR( hw_cmd_values_[1], 0.3, 1e-3 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, ParkEventPublishesTheParkedState )
+{
+  // The park event is the only status publication in status_publish_rate=0 mode, so it
+  // has to carry this cycle's state and not the snapshot from before the pipeline ran.
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "stall_park_timeout", 2.0 ) } );
   configureWithSrdf();
   setupHardwareInterfaces();
   findMocks();
@@ -1597,19 +2424,79 @@ TEST_F( SafetyPositionControllerCollisionTest, StatusReportsDistanceScalingField
 
   activateController();
 
-  // Set last_min_distance_ halfway in safety zone
-  controller_->last_min_distance_ = 0.025;
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.0;
+  controller_->reference_interfaces_[1] = M_PI; // folds into a self-collision
+  controller_->reference_interfaces_[2] = 0.0;
+
+  for ( int cycle = 0; cycle < 600 && !controller_->pipeline_->parked(); ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < 3; ++j ) { setStateValue( controlled_joints_[j], hw_cmd_values_[j] ); }
+  }
+  ASSERT_TRUE( controller_->pipeline_->parked() ) << "did not park within 600 cycles";
+  EXPECT_TRUE( captured.stalled );
+  EXPECT_TRUE( captured.parked ) << "the park event must publish parked=true";
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeJointDeviationBoxWiring )
+{
+  // The per-joint deviation box must be centered on the LEASHED reference and widened
+  // to include the current command (one-sided: prevents drifting, never pulls).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "joint_deviation_limits.joint1.limit", 0.1 ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.01;
+  controller_->reference_interfaces_[0] = 0.5; // leash: v_max(1.0) * 0.3 s → leashed ref 0.3
   controller_->reference_interfaces_[1] = 0.0;
   controller_->reference_interfaces_[2] = 0.0;
 
-  callUpdate();
-  controller_->publish_status();
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
 
-  EXPECT_TRUE( captured.collision_check_enabled );
-  EXPECT_NEAR( captured.distance_scale, 0.5, 1e-6 );
+  // joint1 (limit 0.1): box = [min(0.3-0.1, cmd~0), 0.3+0.1] = [0.0, 0.4]
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_hi[0], 0.4, 1e-6 );
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_lo[0], 0.0, 1e-6 );
+  // joint2 (default limit 0.25, ref 0): box = [-0.25, 0.25] within URDF [-pi, pi]
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_hi[1], 0.25, 1e-6 );
+  EXPECT_NEAR( controller_->pipeline_->qpInput().q_lo[1], -0.25, 1e-6 );
+}
+
+TEST_F( SafetyPositionControllerCollisionTest, QpModeWorksWithoutCollisionChecker )
+{
+  // check_self_collisions=false: no collision constraints, but
+  // velocity/acceleration/position limits still apply (pure smoothing mode).
+  initWithCollisions( {}, "test_robot_collision.urdf",
+                      { rclcpp::Parameter( "check_self_collisions", false ) } );
+  configureWithSrdf();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  EXPECT_TRUE( controller_->collision_checker_ == nullptr );
+
+  for ( auto &v : hw_state_values_ ) v = 0.0;
+  controller_->reference_interfaces_[0] = 0.3;
+  controller_->reference_interfaces_[1] = 0.0;
+  controller_->reference_interfaces_[2] = 0.0;
+
+  double prev_cmd = 0.0, prev_v = 0.0, max_dv = 0.0;
+  for ( int cycle = 0; cycle < 200; ++cycle ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    const double cmd = hw_cmd_values_[0];
+    const double v = ( cmd - prev_cmd ) / kDt;
+    max_dv = std::max( max_dv, std::abs( v - prev_v ) );
+    prev_cmd = cmd;
+    prev_v = v;
+    setStateValue( "joint1", cmd );
+  }
+
+  EXPECT_NEAR( hw_cmd_values_[0], 0.3, 1e-4 );
+  EXPECT_LE( max_dv, kDecPerCycle + 1e-6 );
 }
 
 // ============================================================================

@@ -1,0 +1,102 @@
+#pragma once
+
+#include <cstddef>
+#include <limits>
+#include <string>
+#include <vector>
+
+#include <Eigen/Core>
+
+#include <safety_position_controller/collision_checker.hpp>
+#include <safety_position_controller/safety_pipeline.hpp>
+
+namespace safety_position_controller
+{
+
+/**
+ * @brief Per-cycle collision observation for the safety pipeline.
+ *
+ * Wraps the CollisionChecker interaction: assembles the check configuration (measured
+ * positions for uncontrolled joints, commanded for controlled ones), runs the distance
+ * check, caches the results and converts safety-zone pairs into pipeline candidates.
+ * Tracks the not-in-collision → in-collision edge so a steady collision is reported
+ * once per episode (the edge state resets silently whenever the collision state stops
+ * being observed). Reports flags instead of logging.
+ */
+class CollisionObserver
+{
+public:
+  struct Snapshot {
+    /// Observation for SafetyPipeline::step(); pairs point into this observer.
+    SafetyPipeline::CollisionObservation observation;
+    bool collision_started{ false }; ///< edge: entered collision this cycle (warn once)
+  };
+
+  /**
+   * @param checker non-owning; may be null (observations are then never active)
+   * @param all_joint_names all non-fixed joints, in state-interface order
+   * @param controlled_joints the controlled joints (commanded positions overlay)
+   * @param joint_v_index controlled joint index → collision-model velocity-space index
+   */
+  CollisionObserver( CollisionChecker *checker, std::vector<std::string> all_joint_names,
+                     std::vector<std::string> controlled_joints, std::vector<int> joint_v_index );
+
+  /// Reset caches and the collision edge state (on activation).
+  void reset();
+
+  /**
+   * @brief Run the collision check at the commanded configuration.
+   * When @p checks_active is false (bypass / checks disabled), resets the edge state
+   * and caches instead.
+   * @param checks_active whether collision checking should run this cycle
+   * @param measured_positions positions in all_joint_names order; the controlled joints
+   * are overlaid with @p commanded_positions
+   * @param state_valid false when a measured position could not be read: the safety
+   * state is unobservable, so no check runs (reported back in the observation)
+   * @param commanded_positions commanded configuration of the controlled joints
+   * @param safety_zone_threshold outer zone distance for gradient requests [m]
+   */
+  Snapshot observe( bool checks_active, const std::vector<double> &measured_positions,
+                    bool state_valid, const Eigen::VectorXd &commanded_positions,
+                    double safety_zone_threshold );
+
+  /// Per-pair gradient · velocity for the marker coloring (green = moving apart), one
+  /// entry per collision pair; all NaN without a valid observation. Valid until the
+  /// next call.
+  const std::vector<double> &directionalInfo( const Eigen::VectorXd &velocity );
+
+  /// Joints the collision model does not represent (unknown, or an unsupported DoF
+  /// layout): their positions stay at the model's neutral value in every check.
+  const std::vector<std::string> &unmodeledJoints() const { return unmodeled_joints_; }
+
+  double lastMinDistance() const { return last_min_distance_; }
+  std::size_t lastMinDistancePairIndex() const { return last_min_distance_pair_index_; }
+  /// Safety-zone pairs of the last observation, empty when there were none. Points into
+  /// the checker's latched result and stays valid until the next observe().
+  const std::vector<CollisionResult::PairInfo> &lastSafetyZonePairs() const;
+
+private:
+  /// Clear the per-observation caches (distances, pair pointer, collision edge).
+  void clearObservation();
+
+  CollisionChecker *checker_; ///< non-owning
+  std::vector<std::string> all_joint_names_;
+  std::vector<std::string> controlled_joints_;
+  std::vector<int> joint_v_index_;
+
+  // Configuration-vector slots resolved once at construction: the per-cycle check needs
+  // no name lookups.
+  std::vector<CollisionChecker::JointQSlot> measured_slots_;  ///< per all_joint_names_
+  std::vector<CollisionChecker::JointQSlot> commanded_slots_; ///< per controlled_joints_
+  Eigen::VectorXd q_;                                         ///< check configuration
+  std::vector<SafetyPipeline::PairCandidate> pair_candidates_;
+  std::vector<double> directional_; ///< workspace for directionalInfo()
+  std::vector<std::string> unmodeled_joints_;
+  const std::vector<CollisionResult::PairInfo> *last_safety_zone_pairs_{ nullptr };
+  double last_min_distance_{ std::numeric_limits<double>::max() };
+  std::size_t last_min_distance_pair_index_{ std::numeric_limits<std::size_t>::max() };
+  bool was_in_collision_{ false };
+  bool observed_{ false }; ///< last observe() produced a valid collision state
+};
+
+} // namespace safety_position_controller

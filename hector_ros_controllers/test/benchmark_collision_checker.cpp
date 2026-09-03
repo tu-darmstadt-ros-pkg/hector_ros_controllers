@@ -1,6 +1,6 @@
 //
 // Google Benchmark for CollisionChecker using the real Athena robot.
-// Compares single-pass (debug_viz ON) vs two-pass (debug_viz OFF) performance.
+// Compares the brute-force and broadphase distance paths.
 //
 #include <benchmark/benchmark.h>
 
@@ -114,9 +114,9 @@ struct BenchmarkState {
     }
   }
 
-  std::unique_ptr<CollisionChecker> makeChecker( double padding, bool debug_viz )
+  std::unique_ptr<CollisionChecker> makeChecker( double padding )
   {
-    auto checker = std::make_unique<CollisionChecker>( node, padding, 0.0, debug_viz );
+    auto checker = std::make_unique<CollisionChecker>( node, padding, 0.0 );
     checker->setBroadphase( false ); // brute-force baseline
     bool ok = checker->initFromXml( urdf_xml, srdf_xml, ARM_JOINTS );
     if ( !ok )
@@ -124,9 +124,9 @@ struct BenchmarkState {
     return checker;
   }
 
-  std::unique_ptr<CollisionChecker> makeBroadphaseChecker( double padding, bool debug_viz )
+  std::unique_ptr<CollisionChecker> makeBroadphaseChecker( double padding )
   {
-    auto checker = std::make_unique<CollisionChecker>( node, padding, 0.0, debug_viz );
+    auto checker = std::make_unique<CollisionChecker>( node, padding, 0.0 );
     checker->setBroadphase( true );
     bool ok = checker->initFromXml( urdf_xml, srdf_xml, ARM_JOINTS );
     if ( !ok )
@@ -135,13 +135,13 @@ struct BenchmarkState {
   }
 };
 
-// ---- Benchmark: Two-pass (debug_viz OFF) with random configs ----
-void BM_CollisionChecker_TwoPass( benchmark::State &state )
+// ---- Benchmark: brute force with random configs ----
+void BM_CollisionChecker( benchmark::State &state )
 {
   auto &bs = BenchmarkState::instance();
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
-  auto checker = bs.makeChecker( padding, /*debug_viz=*/false );
+  auto checker = bs.makeChecker( padding );
   checker->setSafetyZoneThreshold( safety_zone );
 
   std::size_t i = 0;
@@ -154,28 +154,7 @@ void BM_CollisionChecker_TwoPass( benchmark::State &state )
   state.SetItemsProcessed( static_cast<int64_t>( state.iterations() ) );
   state.counters["pairs"] = static_cast<double>( checker->getNumCollisionPairs() );
 }
-BENCHMARK( BM_CollisionChecker_TwoPass )->Unit( benchmark::kMicrosecond );
-
-// ---- Benchmark: Single-pass (debug_viz ON) with random configs ----
-void BM_CollisionChecker_SinglePass( benchmark::State &state )
-{
-  auto &bs = BenchmarkState::instance();
-  constexpr double padding = 0.01;
-  constexpr double safety_zone = 0.05;
-  auto checker = bs.makeChecker( padding, /*debug_viz=*/true );
-  checker->setSafetyZoneThreshold( safety_zone );
-
-  std::size_t i = 0;
-  for ( auto _ : state ) {
-    const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config );
-    benchmark::DoNotOptimize( result );
-    ++i;
-  }
-  state.SetItemsProcessed( static_cast<int64_t>( state.iterations() ) );
-  state.counters["pairs"] = static_cast<double>( checker->getNumCollisionPairs() );
-}
-BENCHMARK( BM_CollisionChecker_SinglePass )->Unit( benchmark::kMicrosecond );
+BENCHMARK( BM_CollisionChecker )->Unit( benchmark::kMicrosecond );
 
 // Generate configs with small random perturbations around a base pose (defeats cache)
 std::vector<std::unordered_map<std::string, double>>
@@ -190,13 +169,13 @@ generatePerturbedConfigs( const std::unordered_map<std::string, double> &base, s
   return configs;
 }
 
-// ---- Benchmark: Two-pass with perturbed folded poses (near collision) ----
-void BM_CollisionChecker_TwoPass_Folded( benchmark::State &state )
+// ---- Benchmark: brute force, perturbed folded poses (near collision) ----
+void BM_CollisionChecker_Folded( benchmark::State &state )
 {
   auto &bs = BenchmarkState::instance();
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
-  auto checker = bs.makeChecker( padding, /*debug_viz=*/false );
+  auto checker = bs.makeChecker( padding );
   checker->setSafetyZoneThreshold( safety_zone );
   auto configs = generatePerturbedConfigs( POSES[0].positions, 500 );
 
@@ -208,34 +187,14 @@ void BM_CollisionChecker_TwoPass_Folded( benchmark::State &state )
   }
   state.SetItemsProcessed( static_cast<int64_t>( state.iterations() ) );
 }
-BENCHMARK( BM_CollisionChecker_TwoPass_Folded )->Unit( benchmark::kMicrosecond );
+BENCHMARK( BM_CollisionChecker_Folded )->Unit( benchmark::kMicrosecond );
 
-// ---- Benchmark: Single-pass with perturbed folded poses (near collision) ----
-void BM_CollisionChecker_SinglePass_Folded( benchmark::State &state )
-{
-  auto &bs = BenchmarkState::instance();
-  constexpr double padding = 0.01;
-  constexpr double safety_zone = 0.05;
-  auto checker = bs.makeChecker( padding, /*debug_viz=*/true );
-  checker->setSafetyZoneThreshold( safety_zone );
-  auto configs = generatePerturbedConfigs( POSES[0].positions, 500 );
-
-  std::size_t i = 0;
-  for ( auto _ : state ) {
-    auto result = checker->checkCollision( configs[i % configs.size()] );
-    benchmark::DoNotOptimize( result );
-    ++i;
-  }
-  state.SetItemsProcessed( static_cast<int64_t>( state.iterations() ) );
-}
-BENCHMARK( BM_CollisionChecker_SinglePass_Folded )->Unit( benchmark::kMicrosecond );
-
-// ---- Benchmark: Two-pass, no safety zone (distance-only, no gradients) ----
+// ---- Benchmark: brute force, no safety zone (distance-only, no gradients) ----
 void BM_CollisionChecker_DistanceOnly( benchmark::State &state )
 {
   auto &bs = BenchmarkState::instance();
   constexpr double padding = 0.01;
-  auto checker = bs.makeChecker( padding, /*debug_viz=*/false );
+  auto checker = bs.makeChecker( padding );
 
   std::size_t i = 0;
   for ( auto _ : state ) {
@@ -251,13 +210,13 @@ BENCHMARK( BM_CollisionChecker_DistanceOnly )->Unit( benchmark::kMicrosecond );
 
 // ======== Broadphase variants ========
 
-// ---- Benchmark: Broadphase two-pass (debug_viz OFF) with random configs ----
-void BM_Broadphase_TwoPass( benchmark::State &state )
+// ---- Benchmark: broadphase with random configs ----
+void BM_Broadphase( benchmark::State &state )
 {
   auto &bs = BenchmarkState::instance();
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
-  auto checker = bs.makeBroadphaseChecker( padding, /*debug_viz=*/false );
+  auto checker = bs.makeBroadphaseChecker( padding );
   checker->setSafetyZoneThreshold( safety_zone );
 
   std::size_t i = 0;
@@ -270,36 +229,15 @@ void BM_Broadphase_TwoPass( benchmark::State &state )
   state.SetItemsProcessed( static_cast<int64_t>( state.iterations() ) );
   state.counters["pairs"] = static_cast<double>( checker->getNumCollisionPairs() );
 }
-BENCHMARK( BM_Broadphase_TwoPass )->Unit( benchmark::kMicrosecond );
+BENCHMARK( BM_Broadphase )->Unit( benchmark::kMicrosecond );
 
-// ---- Benchmark: Broadphase single-pass (debug_viz ON) with random configs ----
-void BM_Broadphase_SinglePass( benchmark::State &state )
+// ---- Benchmark: broadphase, perturbed folded poses (near collision) ----
+void BM_Broadphase_Folded( benchmark::State &state )
 {
   auto &bs = BenchmarkState::instance();
   constexpr double padding = 0.01;
   constexpr double safety_zone = 0.05;
-  auto checker = bs.makeBroadphaseChecker( padding, /*debug_viz=*/true );
-  checker->setSafetyZoneThreshold( safety_zone );
-
-  std::size_t i = 0;
-  for ( auto _ : state ) {
-    const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config );
-    benchmark::DoNotOptimize( result );
-    ++i;
-  }
-  state.SetItemsProcessed( static_cast<int64_t>( state.iterations() ) );
-  state.counters["pairs"] = static_cast<double>( checker->getNumCollisionPairs() );
-}
-BENCHMARK( BM_Broadphase_SinglePass )->Unit( benchmark::kMicrosecond );
-
-// ---- Benchmark: Broadphase two-pass with perturbed folded poses (near collision) ----
-void BM_Broadphase_TwoPass_Folded( benchmark::State &state )
-{
-  auto &bs = BenchmarkState::instance();
-  constexpr double padding = 0.01;
-  constexpr double safety_zone = 0.05;
-  auto checker = bs.makeBroadphaseChecker( padding, /*debug_viz=*/false );
+  auto checker = bs.makeBroadphaseChecker( padding );
   checker->setSafetyZoneThreshold( safety_zone );
   auto configs = generatePerturbedConfigs( POSES[0].positions, 500 );
 
@@ -311,14 +249,14 @@ void BM_Broadphase_TwoPass_Folded( benchmark::State &state )
   }
   state.SetItemsProcessed( static_cast<int64_t>( state.iterations() ) );
 }
-BENCHMARK( BM_Broadphase_TwoPass_Folded )->Unit( benchmark::kMicrosecond );
+BENCHMARK( BM_Broadphase_Folded )->Unit( benchmark::kMicrosecond );
 
 // ---- Benchmark: Broadphase distance-only (no gradients) ----
 void BM_Broadphase_DistanceOnly( benchmark::State &state )
 {
   auto &bs = BenchmarkState::instance();
   constexpr double padding = 0.01;
-  auto checker = bs.makeBroadphaseChecker( padding, /*debug_viz=*/false );
+  auto checker = bs.makeBroadphaseChecker( padding );
 
   std::size_t i = 0;
   for ( auto _ : state ) {

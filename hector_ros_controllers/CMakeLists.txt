@@ -28,6 +28,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     pluginlib
     coal
     pinocchio
+    proxsuite
     rclcpp
     rclcpp_action
     rclcpp_lifecycle
@@ -71,9 +72,15 @@ add_library(
   src/sync_group_velocity_to_position_controller.cpp
   src/sync_group_velocity_to_position_controller_actions.cpp
   src/self_collision_avoidance_controller.cpp
-  src/safety_position_controller.cpp
-  src/gripper_position_effort_controller.cpp
-  src/collision_checker.cpp)
+  src/safety_position_controller/safety_position_controller.cpp
+  src/safety_position_controller/safety_pipeline.cpp
+  src/safety_position_controller/safety_qp_limiter.cpp
+  src/safety_position_controller/joint_info.cpp
+  src/safety_position_controller/collision_observer.cpp
+  src/safety_position_controller/safety_diagnostics.cpp
+  src/safety_position_controller/collision_checker.cpp
+  src/safety_position_controller/collision_visualizer.cpp
+  src/gripper_position_effort_controller.cpp)
 
 target_compile_features(controllers PUBLIC cxx_std_17)
 
@@ -85,6 +92,7 @@ target_link_libraries(
   controllers
   PUBLIC coal::coal
          pinocchio::pinocchio
+         proxsuite::proxsuite
          sync_group_velocity_to_position_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
@@ -92,7 +100,11 @@ target_link_libraries(
          gripper_position_effort_controller_parameters)
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
-# Link fcl and its ccd backend explicitly
+
+# fcl-config.cmake only sets FCL_LIBRARIES (uppercase), so
+# ament_target_dependencies() cannot pick it up. Link the imported targets
+# explicitly - without ccd, dlopen() of this plugin fails with "undefined
+# symbol: ccd_points_on_sphere_len".
 target_link_libraries(controllers PUBLIC fcl ccd)
 ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
@@ -145,6 +157,7 @@ if(BUILD_TESTING)
     pluginlib::pluginlib
     ${srdfdom_TARGETS}
     coal::coal
+    fcl
     pinocchio::pinocchio
     ad_kinematics::ad_kinematics
     sync_group_velocity_to_position_controller_parameters
@@ -161,6 +174,15 @@ if(BUILD_TESTING)
     test_collision_checker ${PROJECT_NAME}::controllers_test_doubles
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_collision_checker PRIVATE ${DEFS})
+
+  ament_add_gmock(test_collision_visualizer test/test_collision_visualizer.cpp)
+  target_include_directories(
+    test_collision_visualizer PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                      ${PROJECT_SOURCE_DIR}/test)
+  target_link_libraries(
+    test_collision_visualizer ${PROJECT_NAME}::controllers_test_doubles
+    ament_index_cpp::ament_index_cpp)
+  target_compile_definitions(test_collision_visualizer PRIVATE ${DEFS})
 
   ament_add_gmock(test_safety_forward_controller
                   test/test_safety_forward_controller.cpp)
@@ -182,7 +204,44 @@ if(BUILD_TESTING)
     ament_index_cpp::ament_index_cpp)
   target_compile_definitions(test_safety_position_controller PRIVATE ${DEFS})
 
+  # Pure unit test for the URDF joint-info parsing (no ROS runtime, no test
+  # doubles)
+  ament_add_gmock(test_joint_info test/test_joint_info.cpp
+                  src/safety_position_controller/joint_info.cpp)
+  target_include_directories(test_joint_info
+                             PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(test_joint_info ${srdfdom_TARGETS})
+  target_compile_features(test_joint_info PRIVATE cxx_std_17)
+
+  # Pure unit test for the safety QP (no ROS runtime, no test doubles)
+  ament_add_gmock(test_safety_qp_limiter test/test_safety_qp_limiter.cpp
+                  src/safety_position_controller/safety_qp_limiter.cpp)
+  target_include_directories(test_safety_qp_limiter
+                             PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(test_safety_qp_limiter proxsuite::proxsuite)
+  target_compile_features(test_safety_qp_limiter PRIVATE cxx_std_17)
+
+  # Pure unit test for the safety pipeline (no ROS runtime, no test doubles)
+  ament_add_gmock(
+    test_safety_pipeline test/test_safety_pipeline.cpp
+    src/safety_position_controller/safety_pipeline.cpp
+    src/safety_position_controller/safety_qp_limiter.cpp)
+  target_include_directories(test_safety_pipeline
+                             PRIVATE ${PROJECT_SOURCE_DIR}/include)
+  target_link_libraries(test_safety_pipeline proxsuite::proxsuite)
+  target_compile_features(test_safety_pipeline PRIVATE cxx_std_17)
+
   find_package(ament_cmake_google_benchmark REQUIRED)
+  ament_add_google_benchmark(
+    benchmark_safety_qp_limiter test/benchmark_safety_qp_limiter.cpp
+    src/safety_position_controller/safety_qp_limiter.cpp)
+  if(TARGET benchmark_safety_qp_limiter)
+    target_include_directories(benchmark_safety_qp_limiter
+                               PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_link_libraries(benchmark_safety_qp_limiter proxsuite::proxsuite)
+    target_compile_features(benchmark_safety_qp_limiter PRIVATE cxx_std_17)
+  endif()
+
   ament_add_google_benchmark(benchmark_collision_checker
                              test/benchmark_collision_checker.cpp)
   if(TARGET benchmark_collision_checker)
