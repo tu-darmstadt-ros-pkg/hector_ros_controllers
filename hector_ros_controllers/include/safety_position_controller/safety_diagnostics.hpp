@@ -71,8 +71,10 @@ public:
                             const std::vector<double> &processed_reference );
 
   /// Debug joint-state echo of the incoming references / outgoing commands (if enabled).
-  void publishJointStateIn( const std::vector<double> &positions );
-  void publishJointStateOut( const std::vector<double> &positions );
+  /// Debug echo of the references this cycle, in the controller's interface kind.
+  void publishJointStateIn( const std::vector<double> &values );
+  /// Debug echo of the commands written this cycle, in the controller's interface kind.
+  void publishJointStateOut( const std::vector<double> &values );
 
   /// Human-readable per-joint blocked-direction analysis (used in the stall warning).
   std::string formatBlockedDirections( const SafetyPipeline &pipeline ) const;
@@ -86,6 +88,9 @@ public:
                                     double max_distance, std::size_t fallback_pair_index ) const;
 
 private:
+  /// Debug joint state carrying `values` in the field the interface kind names.
+  sensor_msgs::msg::JointState jointStateMessage( const std::vector<double> &values ) const;
+
   /// Trivially-copyable view of the status fields written from the controller update
   /// thread; see updateSnapshot() for the synchronization contract.
   struct StatusSnapshot {

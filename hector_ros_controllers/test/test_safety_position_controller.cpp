@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <sensor_msgs/msg/joint_state.hpp>
+
 #include <shared_mutex>
 #include <thread>
 
@@ -101,7 +103,8 @@ public:
     ASSERT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
   }
 
-  void setupHardwareInterfaces( const std::vector<std::string> &joints = {} )
+  void setupHardwareInterfaces( const std::vector<std::string> &joints = {},
+                                const std::string &command_interface = "position" )
   {
     auto cj = joints.empty() ? controlled_joints_ : joints;
 
@@ -117,7 +120,7 @@ public:
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     for ( size_t i = 0; i < cj.size(); ++i ) {
       cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-          cj[i], "position", &hw_cmd_values_[i] ) );
+          cj[i], command_interface, &hw_cmd_values_[i] ) );
     }
     for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
       state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
@@ -168,6 +171,9 @@ public:
     auto msg = std::make_shared<safety_position_controller::CmdType>();
     msg->data = positions;
     controller_->rt_command_ptr_.writeFromNonRT( msg );
+    // What the ~/commands subscriber does: the realtime buffer cannot report that a
+    // message is new, and in velocity mode that is what decides whether it still counts.
+    controller_->command_is_fresh_.store( true );
   }
 };
 
@@ -2502,6 +2508,316 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeWorksWithoutCollisionChecke
 // ============================================================================
 // main
 // ============================================================================
+
+// ============================================================================
+// Velocity mode: velocity references in, velocity commands out
+// ============================================================================
+
+namespace
+{
+const std::vector<rclcpp::Parameter> kVelocityMode{
+    rclcpp::Parameter( "interface_type", "velocity" ) };
+} // namespace
+
+TEST_F( SafetyPositionControllerTest, VelocityModeExportsAndClaimsVelocityInterfaces )
+{
+  initController( {}, false, false, "test_robot.urdf", kVelocityMode );
+  configureController();
+
+  const auto commands = controller_->command_interface_configuration();
+  EXPECT_THAT( commands.names,
+               ::testing::ElementsAre( "joint1/velocity", "joint2/velocity", "joint3/velocity" ) );
+  // The states stay positions: the collision check and the rebase both need to know
+  // where the robot is, which a velocity tells nobody.
+  const auto states = controller_->state_interface_configuration();
+  EXPECT_THAT( states.names, ::testing::Each( ::testing::EndsWith( "/position" ) ) );
+
+  const auto refs = controller_->on_export_reference_interfaces();
+  ASSERT_EQ( refs.size(), controlled_joints_.size() );
+  for ( const auto &ref : refs ) { EXPECT_EQ( ref.get_interface_name(), "velocity" ); }
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeDropsTheBoundsThatNeedAPositionTarget )
+{
+  initController( {}, false, false, "test_robot.urdf", kVelocityMode );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // The defaults are all non-zero, so this is the parameters being ignored, not unset.
+  ASSERT_GT( controller_->params_.tracking_leash, 0.0 );
+  ASSERT_GT( controller_->params_.reference_leash_time, 0.0 );
+  const auto &config = controller_->pipeline_->config();
+  EXPECT_EQ( config.tracking_leash, 0.0 );
+  EXPECT_EQ( config.reference_leash_time, 0.0 );
+  EXPECT_THAT( config.deviation_limits, ::testing::Each( 0.0 ) );
+  EXPECT_TRUE( config.velocity_mode );
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeWritesTheCommandedVelocity )
+{
+  initController( {}, false, false, "test_robot.urdf", kVelocityMode );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  std::vector<double> position( controlled_joints_.size(), 0.0 );
+  for ( int i = 0; i < 100; ++i ) {
+    controller_->reference_interfaces_[0] = 0.5;
+    controller_->reference_interfaces_[1] = 0.0;
+    controller_->reference_interfaces_[2] = 0.0;
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    for ( size_t j = 0; j < position.size(); ++j ) {
+      position[j] += hw_cmd_values_[j] * 0.01; // the hardware integrates
+      setStateValue( controlled_joints_[j], position[j] );
+    }
+  }
+  EXPECT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 ) << "the written command is a velocity";
+  EXPECT_NEAR( hw_cmd_values_[1], 0.0, 1e-9 );
+  // One second at 0.5 rad/s, less the distance the ramp to it costs: v^2 / (2 * a_acc).
+  // The tolerance is the half step the discrete ramp gains over that integral, v * dt / 2.
+  EXPECT_NEAR( position[0], 0.5 * 1.0 - 0.5 * 0.5 / ( 2.0 * 8.0 ), 0.5 * 0.01 );
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeConsumesTheReferenceEveryCycle )
+{
+  // Writing the reference interfaces and calling update_and_write_commands IS the
+  // chained path. A demand that is not renewed must not be executed twice.
+  initController( {}, false, false, "test_robot.urdf", kVelocityMode );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  controller_->reference_interfaces_[0] = 0.5;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_GT( hw_cmd_values_[0], 0.0 ) << "the demand is executed on the cycle it arrives";
+  EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[0] ) );
+
+  // Upstream goes silent: the joint brakes instead of running on.
+  double previous = hw_cmd_values_[0];
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    ASSERT_LE( hw_cmd_values_[0], previous + 1e-9 ) << "cycle " << i;
+    previous = hw_cmd_values_[0];
+  }
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 );
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeTopicCommandAgesOut )
+{
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "interface_type", "velocity" ),
+                    rclcpp::Parameter( "velocity_command_timeout", 0.2 ) } );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  ASSERT_FALSE( controller_->is_in_chained_mode() );
+
+  // The message is applied on the cycle it arrives and for the whole timeout after it,
+  // and not one cycle longer. Counting the cycle the command first falls pins the
+  // timeout itself; asserting "moving early, stopped later" would pass for any of them.
+  sendCommand( { 0.5, 0.0, 0.0 } );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  }
+  ASSERT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 ) << "still at speed while the demand counts";
+
+  // Braking takes 0.24 rad/s off the command on the very cycle the demand lapses, so the
+  // drop is unmistakable while staying clear of the solver's own slack around 0.5.
+  int lapsed_at = -1;
+  for ( int i = 21; i < 60 && lapsed_at < 0; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+    if ( hw_cmd_values_[0] < 0.4 ) {
+      lapsed_at = i;
+    }
+  }
+  EXPECT_EQ( lapsed_at, 20 + 1 ) << "0.2 s at 100 Hz is 20 cycles of demand after arrival";
+  for ( int i = 0; i < 10; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  }
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 );
+
+  // A new message revives it.
+  sendCommand( { 0.5, 0.0, 0.0 } );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  EXPECT_GT( hw_cmd_values_[0], 0.0 );
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeSubCycleTimeoutStillTimesOut )
+{
+  // Asking for a timeout shorter than the control period must not round down to the
+  // value that means "no timeout": the stricter request would fail open.
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "interface_type", "velocity" ),
+                    rclcpp::Parameter( "velocity_command_timeout", 0.004 ) } );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  sendCommand( { 0.5, 0.0, 0.0 } );
+  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "the message is applied on the cycle it arrives";
+  for ( int i = 0; i < 20; ++i ) {
+    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
+  }
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 );
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeEstopWritesZeroAndParksUntilTheDemandRestarts )
+{
+  initController( {}, false, false, "test_robot.urdf", kVelocityMode );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  // The joint has to actually travel: holding a velocity servo at a recorded position
+  // would write that position as a velocity, which is only harmless while it is zero.
+  std::vector<double> position( controlled_joints_.size(), 0.0 );
+  const auto drive = [&]( const double demand, const int cycles ) {
+    for ( int i = 0; i < cycles; ++i ) {
+      controller_->reference_interfaces_[0] = demand;
+      controller_->reference_interfaces_[1] = 0.0;
+      controller_->reference_interfaces_[2] = 0.0;
+      ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+      for ( size_t j = 0; j < position.size(); ++j ) {
+        position[j] += hw_cmd_values_[j] * 0.01;
+        setStateValue( controlled_joints_[j], position[j] );
+      }
+    }
+  };
+
+  drive( 0.5, 20 );
+  ASSERT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 );
+  ASSERT_GT( position[0], 0.05 ) << "the joint has moved away from zero";
+
+  // There is no position to hold a velocity servo at: stopping is commanding zero.
+  sendEstop( true );
+  drive( 0.5, 1 );
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 );
+  drive( 0.5, 10 );
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 );
+
+  // Released with the stick still held: parked, so nothing moves until it is let go.
+  sendEstop( false );
+  drive( 0.5, 30 );
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 ) << "a held demand must not restart the motion";
+
+  drive( 0.0, 1 );
+  drive( 0.5, 20 );
+  EXPECT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 ) << "letting go and asking again resumes";
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeUnreadableStateWritesZero )
+{
+  // In position mode a skipped cycle leaves the last command, which is a hold. The same
+  // silence leaves a velocity servo running, so the command has to be taken back.
+  initController( {}, false, false, "test_robot.urdf", kVelocityMode );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( int i = 0; i < 20; ++i ) {
+    controller_->reference_interfaces_[0] = 0.5;
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+  ASSERT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 );
+
+  setStateValue( "joint1", std::numeric_limits<double>::quiet_NaN() );
+  controller_->reference_interfaces_[0] = 0.5;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 );
+  EXPECT_NEAR( hw_cmd_values_[1], 0.0, 1e-9 );
+
+  // Recovered well inside state_read_timeout, so nothing was invalidated: the next
+  // command still has to start from the stop that was just written, not from the speed
+  // the pipeline last solved for.
+  setStateValue( "joint1", 0.0 );
+  controller_->reference_interfaces_[0] = 0.5;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_LE( hw_cmd_values_[0], 8.0 * 0.01 + 1e-9 ) << "one acceleration step, not a jump";
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeDebugJointStatesCarryVelocities )
+{
+  // A velocity plotted in the position field reads as a joint sitting at 0.5 rad, which
+  // is exactly the kind of debug output that sends someone hunting the wrong bug.
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "interface_type", "velocity" ),
+                    rclcpp::Parameter( "publish_debug_joint_states", true ) } );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  auto in_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      node_name, node_name + "/debug_in_joint_states" );
+  auto out_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      node_name, node_name + "/debug_out_joint_states" );
+  ASSERT_TRUE( in_mock );
+  ASSERT_TRUE( out_mock );
+  sensor_msgs::msg::JointState in_msg;
+  sensor_msgs::msg::JointState out_msg;
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  EXPECT_CALL( *in_mock, publish( ::testing::_ ) )
+      .Times( ::testing::AtLeast( 1 ) )
+      .WillRepeatedly( ::testing::SaveArg<0>( &in_msg ) );
+  EXPECT_CALL( *out_mock, publish( ::testing::_ ) )
+      .Times( ::testing::AtLeast( 1 ) )
+      .WillRepeatedly( ::testing::SaveArg<0>( &out_msg ) );
+  activateController();
+
+  for ( int i = 0; i < 20; ++i ) {
+    controller_->reference_interfaces_[0] = 0.5;
+    controller_->reference_interfaces_[1] = 0.0;
+    controller_->reference_interfaces_[2] = 0.0;
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+
+  EXPECT_TRUE( in_msg.position.empty() );
+  ASSERT_EQ( in_msg.velocity.size(), controlled_joints_.size() );
+  EXPECT_NEAR( in_msg.velocity[0], 0.5, 1e-9 );
+
+  EXPECT_TRUE( out_msg.position.empty() );
+  ASSERT_EQ( out_msg.velocity.size(), controlled_joints_.size() );
+  EXPECT_NEAR( out_msg.velocity[0], 0.5, 1e-6 );
+}
+
+TEST_F( SafetyPositionControllerTest, VelocityModeDeactivationStopsTheJoints )
+{
+  // Command interfaces are released without being reset, so whatever is left in them is
+  // what the hardware keeps doing — for a velocity servo, moving.
+  initController( {}, false, false, "test_robot.urdf", kVelocityMode );
+  configureController();
+  setupHardwareInterfaces( {}, "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  for ( int i = 0; i < 20; ++i ) {
+    controller_->reference_interfaces_[0] = 0.5;
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  }
+  ASSERT_NEAR( hw_cmd_values_[0], 0.5, 1e-6 );
+
+  deactivateController();
+  EXPECT_NEAR( hw_cmd_values_[0], 0.0, 1e-9 );
+  EXPECT_NEAR( hw_cmd_values_[1], 0.0, 1e-9 );
+  EXPECT_NEAR( hw_cmd_values_[2], 0.0, 1e-9 );
+}
 
 int main( int argc, char **argv )
 {

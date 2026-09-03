@@ -40,6 +40,12 @@ using CmdType = std_msgs::msg::Float64MultiArray;
  * A per-joint NaN reference means "no target": it demands zero velocity, so the joint
  * brakes to a smooth stop and holds.
  *
+ * The "interface_type" parameter selects what a reference means and what is written:
+ * joint positions, or joint velocities with the hardware integrating. Velocity references
+ * are consumed every cycle and the topic ages out after "velocity_command_timeout", so a
+ * demand never outlives the sender making it; any cycle that cannot run the pipeline
+ * writes zero velocity, since a velocity servo does not stop by being left alone.
+ *
  * - Enforces joint position/velocity limits; continuous joints take the shortest path.
  * - Optional self-collision check via CollisionChecker (URDF + SRDF).
  * - Optional current-limit control (stiff/compliant) toggled by service.
@@ -76,8 +82,9 @@ public:
   on_activate( const rclcpp_lifecycle::State &previous_state ) override;
 
   /**
-   * @brief Deactivate controller; stops the status timer and clears the engaged E-stop.
-   * The subscriptions live for the whole controller lifetime.
+   * @brief Deactivate controller; stops the joints in velocity mode, stops the status
+   * timer and clears the engaged E-stop. The subscriptions live for the whole controller
+   * lifetime.
    * @param previous_state lifecycle state (unused)
    * @return SUCCESS
    */
@@ -86,7 +93,7 @@ public:
 
   /**
    * @brief Request command interfaces.
-   * - Always: <joint>/position
+   * - Always: <joint>/<interface_type>
    * - Optional: <joint>/current (if current-limit control enabled)
    */
   controller_interface::InterfaceConfiguration command_interface_configuration() const override;
@@ -98,7 +105,7 @@ public:
   controller_interface::InterfaceConfiguration state_interface_configuration() const override;
 
   /**
-   * @brief Export per-joint reference interfaces (position) for chaining.
+   * @brief Export per-joint reference interfaces (of interface_type) for chaining.
    * @return vector of CommandInterface referencing internal reference buffers
    */
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
@@ -142,12 +149,13 @@ private:
   bool read_current_positions();
 
   /**
-   * @brief Write per-joint position commands (non-finite entries are skipped).
-   * A handle locked by another thread is logged and left unwritten: the hardware then
-   * keeps the previous command.
-   * @param commands commanded positions (size == params_.joints.size())
+   * @brief Write per-joint commands in the configured interface kind (non-finite entries
+   * are skipped). A handle locked by another thread is logged and left unwritten: the
+   * hardware then keeps the previous command.
+   * @param commands commanded positions, or velocities in velocity mode (size ==
+   * params_.joints.size())
    */
-  void write_position_commands( const std::vector<double> &commands );
+  void write_commands( const std::vector<double> &commands );
 
   /// Write current-limit commands (stiff/compliant) if the interfaces were claimed.
   void write_current_limits();
@@ -216,6 +224,9 @@ private:
 
   // ---- Configuration / mode ----
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
+  /// params_.interface_type == "velocity": the reference is a joint velocity demand and
+  /// velocities are written. Read-only parameter, resolved once in on_init.
+  bool velocity_mode_{ false };
 
   // ---- E-stop ----
   /// Last requested E-stop state. Tracks the external safety signal and therefore
@@ -270,6 +281,9 @@ private:
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> current_positions_; ///< latest measured positions
   std::vector<double> hold_positions_;    ///< positions to hold during E-stop
+  /// Written whenever a cycle produces no command of its own and velocity mode leaves
+  /// the joints moving otherwise (E-stop, unreadable state).
+  std::vector<double> zero_commands_;
   /// Latest measured positions of ALL joints (aligned with all_joint_names_), read once
   /// per cycle so the pipeline and the collision check see the same robot.
   std::vector<double> all_positions_;
@@ -299,6 +313,11 @@ private:
   // Non-chained command input
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;
   rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
+  /// A message arrived since the update loop last looked. The buffer itself cannot say
+  /// that, and a velocity demand must not outlive the sender making it.
+  std::atomic<bool> command_is_fresh_{ false };
+  long command_age_cycles_{ 0 };     ///< cycles since the last ~/commands message
+  long command_timeout_cycles_{ 0 }; ///< velocity_command_timeout in cycles; 0 disables
 
   // E-stop input
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_subscriber_;

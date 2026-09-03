@@ -135,6 +135,9 @@ void SafetyDiagnostics::maybePublishQpDebug( const SafetyPipeline &pipeline,
   msg.box_ub.resize( n );
   msg.q_cmd.resize( n );
   msg.q_ref.resize( n );
+  msg.v_ref.resize( n );
+  const bool velocity_reference = params_.interface_type == "velocity";
+  const double unused = std::numeric_limits<double>::quiet_NaN();
   for ( size_t i = 0; i < n; ++i ) {
     const auto idx = static_cast<Eigen::Index>( i );
     msg.v_des[i] = qp_input.v_des[idx];
@@ -142,7 +145,8 @@ void SafetyDiagnostics::maybePublishQpDebug( const SafetyPipeline &pipeline,
     msg.box_lb[i] = pipeline.limiter().lastBoxLower()[idx];
     msg.box_ub[i] = pipeline.limiter().lastBoxUpper()[idx];
     msg.q_cmd[i] = pipeline.commandedPositions()[idx];
-    msg.q_ref[i] = processed_reference[i];
+    msg.q_ref[i] = velocity_reference ? unused : processed_reference[i];
+    msg.v_ref[i] = velocity_reference ? processed_reference[i] : unused;
   }
 
   const auto num_cc = static_cast<size_t>( qp_result.num_collision_constraints );
@@ -178,28 +182,36 @@ void SafetyDiagnostics::maybePublishQpDebug( const SafetyPipeline &pipeline,
   qp_debug_pub_->publish( msg );
 }
 
-void SafetyDiagnostics::publishJointStateIn( const std::vector<double> &positions )
+void SafetyDiagnostics::publishJointStateIn( const std::vector<double> &values )
 {
   if ( !debug_js_enabled_.load( std::memory_order_relaxed ) ) {
     return;
   }
-  sensor_msgs::msg::JointState msg;
-  msg.header.stamp = node_->now();
-  msg.name = params_.joints;
-  msg.position = positions;
-  debug_in_js_pub_->publish( msg );
+  debug_in_js_pub_->publish( jointStateMessage( values ) );
 }
 
-void SafetyDiagnostics::publishJointStateOut( const std::vector<double> &positions )
+void SafetyDiagnostics::publishJointStateOut( const std::vector<double> &values )
 {
   if ( !debug_js_enabled_.load( std::memory_order_relaxed ) ) {
     return;
   }
+  debug_out_js_pub_->publish( jointStateMessage( values ) );
+}
+
+sensor_msgs::msg::JointState
+SafetyDiagnostics::jointStateMessage( const std::vector<double> &values ) const
+{
   sensor_msgs::msg::JointState msg;
   msg.header.stamp = node_->now();
   msg.name = params_.joints;
-  msg.position = positions;
-  debug_out_js_pub_->publish( msg );
+  // The controller's references and commands are whatever its interface kind says they
+  // are; putting velocities in the position field would plot as a joint at 0.5 rad.
+  if ( params_.interface_type == "velocity" ) {
+    msg.velocity = values;
+  } else {
+    msg.position = values;
+  }
+  return msg;
 }
 
 std::string SafetyDiagnostics::formatBlockedDirections( const SafetyPipeline &pipeline ) const

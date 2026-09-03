@@ -1,8 +1,10 @@
 # SafetyPositionController
 
-Chained position controller that projects the incoming reference onto a safe motion:
-bounded velocity/acceleration, position-limit braking, self-collision velocity dampers
-with flow-around (ProxQP), per-joint deviation boxes, and a stall/park state machine.
+Chained controller that projects the incoming reference onto a safe motion: bounded
+velocity/acceleration, position-limit braking, self-collision velocity dampers with
+flow-around (ProxQP), per-joint deviation boxes, and a stall/park state machine. The
+`interface_type` parameter decides whether it takes and writes joint positions or joint
+velocities; see [Interface kind](#interface-kind).
 
 ## Components
 
@@ -35,20 +37,22 @@ flowchart TB
     OBS -->|"CollisionObservation<br/>(pairs, in_collision, state_valid)"| P2["SafetyPipeline::step()<br/>project gradients → damper rows,<br/>QP solve, integrate"]
     QP[SafetyQpLimiter] --> P2
     SPM[StallParkMonitor] --> P2
-    P2 -->|commanded positions| W[write_position_commands]
+    P2 -->|"commanded positions or velocities"| W[write_commands]
     P2 -->|"events (stalled / parked / resumed)"| CTRL["controller: logs + publish_status"]
     P2 -.->|introspection getters| DIAG["SafetyDiagnostics<br/>~/status, ~/qp_debug"]
     OBS -.->|min distance, pairs| DIAG
 ```
 
-The E-stop path bypasses all of this: the controller holds the latched positions and
-calls `pipeline->invalidate()`, so on release the pipeline rebases to the measured state
-and parks — the arm holds until the reference changes by more than
-`park_resume_reference_threshold`.
+The E-stop path bypasses all of this: the controller holds the latched positions (zero
+velocity in velocity mode) and calls `pipeline->invalidate()`, so on release the pipeline
+rebases to the measured state and parks — the arm holds until a new reference arrives, one
+that differs from the abandoned target by more than `park_resume_reference_threshold`, or
+a demand that was let go and made again.
 
 Two more routes reach that same rebase-and-park, both through `note_state_unobservable()`
 and its `state_read_timeout`: joint states that stay unreadable, and a joint that has left
-its command by more than twice `tracking_leash` (`SafetyPipeline::measurementDiverged()`).
+its command by more than twice `tracking_leash` (`SafetyPipeline::measurementDiverged()`,
+position mode only — a velocity command is not something a joint can fall behind).
 The second one matters because the collision check runs at the *commanded* configuration:
 once the robot is somewhere else, that check is validating a pose the robot has left. It is
 also what keeps a continuous joint's wrapped lag from reaching pi, where it would name the
@@ -66,6 +70,49 @@ update loop enforces, and is cleared on every activation and deactivation.
 - **Marker appearance** (colors, namespaces, what is drawn): `collision_visualizer.cpp`.
 - **New status/debug output**: `safety_diagnostics.cpp` + the msg definitions in `hector_ros_controllers_msgs`.
 - **Parameters**: `params/safety_position_controller_parameters.yaml` (generate_parameter_library), plumbed into `SafetyPipeline::Config` in `setup_pipeline_on_activate()`.
+- **Interface kind**: `SafetyPipeline::Config::velocity_mode` for the cycle behavior, `velocity_mode_` in the controller for interfaces, writes and reference lifetime.
+
+## Interface kind
+
+`interface_type` selects, for the references it exports and the command interfaces it
+claims, `position` (the default) or `velocity`. The state interfaces are positions in both
+cases: the collision check and the safety boxes need to know where the robot is.
+
+| | `position` | `velocity` |
+|---|---|---|
+| A reference means | go here | move at this rate |
+| Written to the hardware | the commanded position | the commanded velocity |
+| Who integrates | the pipeline (`cmd_`) | the hardware |
+| Checked configuration | the command about to be written | the measurement plus one step |
+| Reference leash, deviation boxes, tracking leash | active | dropped, with a warning if configured |
+| A reference that stops being updated | is reached and held | is consumed, so the joint brakes |
+| A cycle the pipeline cannot run | leaves the last command, which holds | writes zero velocity |
+| Park released by | a target that differs from the abandoned one | letting the demand go and asking again |
+| A joint jammed by something the QP cannot see | stalls and parks | keeps pushing while the demand is held |
+
+The last row is a consequence of the row above it, not an oversight. Stall is reported when
+the commanded motion is near zero although the reference asks for it, and in position mode
+the tracking leash is what drove the command to zero against a joint that could not follow.
+Without it, a mechanical blockage nothing in the model knows about leaves the commanded
+velocity untouched, so it is the operator holding the demand who decides how long the joint
+pushes. Blockages the QP does see - collisions, position limits - still stall and park in
+both modes.
+
+The three bounds are dropped because each of them relates the command to a position target:
+a velocity reference has none, and the hardware integrating means the command cannot run
+ahead of the joint in the first place. Leaving them on would not bound anything - a box
+around a command that is re-centred on the measurement every cycle is empty - but their
+braking envelope would silently cap the speed at `sqrt(2 * a_dec * limit)`.
+
+Velocity references are consumed (set to `NaN`) at the end of every cycle. A chained
+reference is a value that stays where it was written, and a demand that stays put is a
+sender that stopped and a joint that does not; consuming it means an upstream that goes
+silent brakes on the next cycle. The `~/commands` path re-applies its last message for
+`velocity_command_timeout` and then lets it lapse. Both leave the demand at "no target",
+which brakes at the deceleration limit rather than cutting the command to zero.
+
+There is no position hold in velocity mode: zero demand is zero velocity, and the joint
+stays wherever it stopped, less whatever gravity backdrives.
 
 ## Reference input
 

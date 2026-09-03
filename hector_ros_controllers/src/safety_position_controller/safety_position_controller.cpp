@@ -62,6 +62,10 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
         } );
   }
 
+  // Read-only, so it cannot change under the control loop; cached to keep string
+  // comparisons out of every cycle.
+  velocity_mode_ = params_.interface_type == "velocity";
+
   if ( params_.check_self_collisions ) {
     collision_checker_ = std::make_unique<CollisionChecker>( node, params_.collision_padding,
                                                              params_.collision_cache_epsilon );
@@ -125,8 +129,13 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
 
   // Non-chained command subscriber (RT buffer)
   joints_command_subscriber_ = node->create_subscription<CmdType>(
-      "~/commands", rclcpp::SystemDefaultsQoS(),
-      [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
+      "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
+        rt_command_ptr_.writeFromNonRT( msg );
+        // The buffer keeps handing out the last message forever. In velocity mode that
+        // would replay a demand the sender has stopped making, so the update loop ages
+        // it out and this is the only signal that it must start over.
+        command_is_fresh_.store( true, std::memory_order_relaxed );
+      } );
 
   // Transient local, matching the e-stop manager, which publishes its aggregated state
   // once per change and latches it: a volatile subscriber joining afterwards is told
@@ -190,6 +199,7 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   joint_index_.assign( n, -1 );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   hold_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  zero_commands_.assign( n, 0.0 );
   all_positions_.assign( all_joint_names_.size(), std::numeric_limits<double>::quiet_NaN() );
 
   if ( !gather_joint_indices() ) {
@@ -291,13 +301,14 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_ );
 
   RCLCPP_INFO( get_node()->get_logger(),
-               "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
+               "SafetyPositionController config: interface=%s, joints=%zu, collisions=%s, "
+               "broadphase=%s, "
                "padding=%.4f, safety_zone=%.4f, cache_eps=%.1e, debug_viz=%s, "
                "publish_distances=%s, hold_unrequested=%s",
-               params_.joints.size(), params_.check_self_collisions ? "ON" : "OFF",
-               params_.use_broadphase ? "ON" : "OFF", params_.collision_padding,
-               params_.collision_safety_zone, params_.collision_cache_epsilon,
-               params_.debug_visualize_collisions ? "ON" : "OFF",
+               params_.interface_type.c_str(), params_.joints.size(),
+               params_.check_self_collisions ? "ON" : "OFF", params_.use_broadphase ? "ON" : "OFF",
+               params_.collision_padding, params_.collision_safety_zone,
+               params_.collision_cache_epsilon, params_.debug_visualize_collisions ? "ON" : "OFF",
                params_.publish_collision_distances ? "ON" : "OFF",
                params_.hold_unrequested_joints ? "ON" : "OFF" );
 
@@ -314,7 +325,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   // check order of command interfaces
   // TODO: if this fails use command interface reordering function or indexing as for state interfaces
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
-    if ( command_interfaces_[i].get_name() != params_.joints[i] + "/position" ) {
+    if ( command_interfaces_[i].get_name() != params_.joints[i] + "/" + params_.interface_type ) {
       RCLCPP_ERROR( get_node()->get_logger(), "Command interfaces are not in the expected order." );
       return controller_interface::CallbackReturn::ERROR;
     }
@@ -328,6 +339,14 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   // drop commands received while inactive
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  command_is_fresh_.store( false, std::memory_order_relaxed );
+  command_age_cycles_ = 0;
+  // Never rounds down to zero, which is the value that disables the timeout: asking for
+  // a stricter one than the control period must not turn it off.
+  command_timeout_cycles_ =
+      params_.velocity_command_timeout > 0.0
+          ? std::max( 1L, std::lround( params_.velocity_command_timeout * get_update_rate() ) )
+          : 0L;
   state_read_failure_time_ = 0.0;
   park_on_recovery_pending_ = false;
   last_manipulability_ = 0.0;
@@ -351,6 +370,13 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
+  // The one cycle that never comes back. The command interfaces are still ours here, and
+  // are released without being reset, so a velocity left behind is a joint that keeps
+  // running with nobody left to stop it. (A position left behind is a hold, which is why
+  // this never had to be said before.)
+  if ( velocity_mode_ ) {
+    write_commands( zero_commands_ );
+  }
   status_timer_.reset();
   estop_engaged_.store( false, std::memory_order_relaxed );
   // A bypass is granted for as long as someone is watching this controller run. It must
@@ -365,7 +391,9 @@ SafetyPositionController::command_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration conf;
   conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/position" ); }
+  for ( const auto &j : params_.joints ) {
+    conf.names.emplace_back( j + "/" + params_.interface_type );
+  }
   if ( params_.set_current_limits ) {
     for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/current" ); }
   }
@@ -392,7 +420,7 @@ SafetyPositionController::on_export_reference_interfaces()
 
   for ( size_t i = 0; i < n; ++i ) {
     const std::string resource_name = controller_name + "/" + params_.joints[i];
-    refs.emplace_back( resource_name, hardware_interface::HW_IF_POSITION, &reference_interfaces_[i] );
+    refs.emplace_back( resource_name, params_.interface_type, &reference_interfaces_[i] );
   }
   return refs;
 }
@@ -424,6 +452,25 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
                           "Ignoring a command for %zu joints; this controller has %zu.",
                           data.size(), n_expected );
     return controller_interface::return_type::OK;
+  }
+
+  if ( velocity_mode_ ) {
+    // A velocity demand is only valid while it is being made. The buffer cannot say when
+    // the sender stopped, so the last message ages out and the references are then left
+    // where the previous cycle consumed them: no demand, which brakes at the
+    // deceleration limit rather than running on.
+    if ( command_is_fresh_.exchange( false, std::memory_order_relaxed ) ) {
+      command_age_cycles_ = 0;
+    } else if ( command_timeout_cycles_ > 0 ) {
+      if ( command_age_cycles_ >= command_timeout_cycles_ ) {
+        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(),
+                              throttle_logging_msg,
+                              "No velocity command for %.2f s; braking to a stop.",
+                              params_.velocity_command_timeout );
+        return controller_interface::return_type::OK;
+      }
+      ++command_age_cycles_;
+    }
   }
 
   for ( size_t i = 0; i < n_expected; ++i ) { reference_interfaces_[i] = data[i]; }
@@ -468,19 +515,33 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
   }
 
   if ( estop_active ) {
-    // Record the hold from the first read that succeeds — normally the engage cycle
-    // itself; during a read outage (the engage must not wait for one) the first valid
-    // read after it. Once recorded, no state read is needed to keep holding.
-    if ( std::any_of( hold_positions_.begin(), hold_positions_.end(),
-                      []( const double p ) { return !std::isfinite( p ); } ) &&
-         read_current_positions() ) {
-      hold_positions_ = current_positions_;
-    }
     pipeline_->invalidate();
-    write_position_commands( hold_positions_ );
+    if ( velocity_mode_ ) {
+      // A velocity servo has no position to be held at: the stop IS the zero demand, and
+      // the hardware decelerates on its own profile.
+      write_commands( zero_commands_ );
+    } else {
+      // Record the hold from the first read that succeeds — normally the engage cycle
+      // itself; during a read outage (the engage must not wait for one) the first valid
+      // read after it. Once recorded, no state read is needed to keep holding.
+      if ( std::any_of( hold_positions_.begin(), hold_positions_.end(),
+                        []( const double p ) { return !std::isfinite( p ); } ) &&
+           read_current_positions() ) {
+        hold_positions_ = current_positions_;
+      }
+      write_commands( hold_positions_ );
+    }
   } else if ( !read_current_positions() ) {
-    // A handle is locked by another thread (async hardware). Skipping the cycle leaves
-    // the previous position command in place, which is what re-writing it would do.
+    // A handle is locked by another thread (async hardware), or an encoder reads
+    // non-finite. In position mode skipping the cycle leaves the previous command in
+    // place, which is what re-writing it would do; a velocity command left in place
+    // keeps the joint moving, so it has to be taken back. The pipeline is told, or the
+    // first recovered cycle would accelerate from the velocity it last solved for
+    // instead of from the stop the hardware was just given.
+    if ( velocity_mode_ ) {
+      write_commands( zero_commands_ );
+      pipeline_->noteCommandedStop();
+    }
     // The safety state is unobservable, so this counts toward the same watchdog as a
     // failed collision-state read below.
     note_state_unobservable( period );
@@ -505,6 +566,14 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
                                 last_manipulability_ );
   if ( status_event ) {
     publish_status();
+  }
+
+  // A chained reference is a value that stays put, but a velocity demand that stays put
+  // is a sender that stopped and a joint that does not. Consumed here, after everything
+  // has read it, so an upstream that goes silent brakes on the very next cycle; the
+  // non-chained path re-applies its message while it is fresh.
+  if ( velocity_mode_ ) {
+    for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
   }
   return controller_interface::return_type::OK;
 }
@@ -594,13 +663,16 @@ bool SafetyPositionController::read_current_positions()
   return true;
 }
 
-void SafetyPositionController::write_position_commands( const std::vector<double> &commands )
+void SafetyPositionController::write_commands( const std::vector<double> &commands )
 {
+  if ( command_interfaces_.size() < params_.joints.size() ) {
+    return; // called outside an activation that claimed them
+  }
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( std::isfinite( commands[i] ) && !command_interfaces_[i].set_value( commands[i] ) ) {
       RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
-                            "Position command interface of '%s' is busy; command not written.",
-                            params_.joints[i].c_str() );
+                            "The %s command interface of '%s' is busy; command not written.",
+                            params_.interface_type.c_str(), params_.joints[i].c_str() );
     }
   }
   diagnostics_->publishJointStateOut( commands );
@@ -643,6 +715,27 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   cfg.park_resume_threshold = params_.park_resume_reference_threshold;
   cfg.stall_park.stall_timeout = params_.qp_stall_timeout;
   cfg.stall_park.park_timeout = params_.stall_park_timeout;
+  cfg.velocity_mode = velocity_mode_;
+
+  if ( velocity_mode_ ) {
+    std::string ignored;
+    if ( std::any_of( cfg.deviation_limits.begin(), cfg.deviation_limits.end(),
+                      []( const double limit ) { return limit > 0.0; } ) ) {
+      ignored += " joint_deviation_limits";
+    }
+    if ( params_.reference_leash_time > 0.0 ) {
+      ignored += " reference_leash_time";
+    }
+    if ( params_.tracking_leash > 0.0 ) {
+      ignored += " tracking_leash";
+    }
+    if ( !ignored.empty() ) {
+      RCLCPP_WARN( get_node()->get_logger(),
+                   "Ignoring%s: they bound the commanded position against a target, and a "
+                   "velocity reference has none.",
+                   ignored.c_str() );
+    }
+  }
 
   // Tunneling check: if one full-speed step can cross the whole braking zone, the damper
   // may be skipped over between two collision checks. Comparing the joint step [rad]
@@ -760,9 +853,9 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
   }
 
   // ---- Write ----
-  const auto &qp_cmd = pipeline_->commandedPositions();
-  for ( size_t i = 0; i < n; ++i ) { qp_cmd_std_[i] = qp_cmd[static_cast<Eigen::Index>( i )]; }
-  write_position_commands( qp_cmd_std_ );
+  const auto &qp_out = velocity_mode_ ? pipeline_->velocity() : pipeline_->commandedPositions();
+  for ( size_t i = 0; i < n; ++i ) { qp_cmd_std_[i] = qp_out[static_cast<Eigen::Index>( i )]; }
+  write_commands( qp_cmd_std_ );
 
   // RViz markers, colored by whether the motion moves each pair apart. Only after a
   // real check: the visualizer draws the checker's latched state, which would otherwise

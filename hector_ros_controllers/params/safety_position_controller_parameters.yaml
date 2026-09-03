@@ -5,6 +5,38 @@ safety_position_controller:
     description: Names of the joints to control. Must match the joints defined in the robot URDF.
     read_only: true
 
+  interface_type:
+    type: string
+    default_value: position
+    description: >
+      Kind of the exported reference AND of the claimed command interface. 'position': the
+      reference is a joint target and positions are written (the hardware holds them).
+      'velocity': the reference is a joint velocity demand and velocities are written, so
+      the hardware integrates. In velocity mode there is no target to lead toward and no
+      command that can run ahead of the joint, hence 'joint_deviation_limits',
+      'reference_leash_time' and 'tracking_leash' have nothing to bound and are ignored;
+      a cycle the safety pipeline cannot run writes zero velocity instead of leaving the
+      previous command in place, because a velocity servo would keep going.
+    read_only: true
+    validation:
+      one_of<>: [[position, velocity]]
+
+  velocity_command_timeout:
+    type: double
+    default_value: 0.5
+    description: >
+      Time in [s] after which a '~/commands' message stops being applied when
+      'interface_type' is 'velocity' and the controller is NOT chained. The demand then
+      falls away and the joints brake at their deceleration limit, so a sender that dies
+      mid-motion does not leave the last velocity running. Chained references carry no
+      freshness of their own and are consumed every cycle instead, which brakes within one
+      cycle of an upstream that stops writing - which also means a chained velocity
+      upstream must run at the controller manager's rate, not slower. 0 disables the
+      timeout; any other value is at least one cycle. Ignored in position mode, where a
+      target that is no longer updated is simply reached and held.
+    validation:
+      bounds<>: [0.0, 60.0]
+
   check_self_collisions:
     type: bool
     default_value: true
@@ -200,8 +232,12 @@ safety_position_controller:
     type: double
     default_value: 0.01
     description: >
-      Per-joint reference change in [rad] relative to the reference latched at park time
-      that counts as a new command and releases the parked state.
+      What counts as the new command that releases a parked limb. In position mode: a
+      per-joint reference change in [rad] relative to the reference latched at park time.
+      In velocity mode a demand cannot be compared to a target, since a held stick keeps
+      sending the abandoned one; the limb is released by letting go and asking again, and
+      this is the demand magnitude in [rad/s] that counts as either - below it the stick
+      reads as released, above it as asking.
     validation:
       bounds<>: [0.0001, 10.0]
 
