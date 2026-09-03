@@ -33,6 +33,16 @@ SafetyPipeline::SafetyPipeline( Config config )
     throw std::invalid_argument( "SafetyPipeline: joint_v_index size mismatch" );
   }
 
+  if ( config_.velocity_mode ) {
+    // The reference is the demand itself and the hardware integrates it: there is no
+    // target to lead toward, no upstream-validated path to deviate from and no command
+    // that could run ahead of the joint. Dropped here rather than ignored at every use,
+    // so config() reports the bounds that are actually in force.
+    config_.reference_leash_time = 0.0;
+    config_.tracking_leash = 0.0;
+    std::fill( config_.deviation_limits.begin(), config_.deviation_limits.end(), 0.0 );
+  }
+
   // A continuous joint's lag is only known modulo a full turn, so the divergence bound
   // has to be reachable before the wrapped lag could alias into the wrong half turn.
   if ( config_.tracking_leash > 0.0 && kDivergenceLeashFactor * config_.tracking_leash >= M_PI ) {
@@ -73,10 +83,18 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     vel_.setZero();
     monitor_.resetStall();
     state_valid_ = true;
+  } else if ( config_.velocity_mode ) {
+    // The hardware integrates the commanded velocity, so the command follows the joint
+    // instead of leading it. One step is added because the collision check runs at this
+    // configuration: it then describes where the robot is going rather than where it was.
+    for ( std::size_t i = 0; i < n; ++i ) {
+      const auto idx = static_cast<Eigen::Index>( i );
+      cmd_[idx] = measured[i] + vel_[idx] * config_.dt;
+    }
   }
   if ( park_pending_ ) {
     monitor_.park();
-    parked_reference_ = reference_;
+    latchPark();
     park_pending_ = false;
   }
 
@@ -97,6 +115,19 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     } else {
       input_.q_lo[idx] = -std::numeric_limits<double>::infinity();
       input_.q_hi[idx] = std::numeric_limits<double>::infinity();
+    }
+
+    if ( config_.velocity_mode ) {
+      // The reference is the desired velocity. Everything below it bounds a position
+      // relationship that does not exist here; the position limits above, the velocity
+      // and acceleration boxes and the collision rows all still apply.
+      const double v_max = config_.qp.v_max[idx];
+      const double v_ref =
+          std::isfinite( reference[i] ) ? std::clamp( reference[i], -v_max, v_max ) : 0.0;
+      ref_leashed_[idx] = cmd_[idx];
+      input_.v_des[idx] = v_ref;
+      wants_motion_ |= std::abs( v_ref ) > config_.stall_velocity_threshold;
+      continue;
     }
 
     double diff = 0.0;
@@ -158,6 +189,8 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
   // ---- Parked: the latched reference is abandoned; hold until a NEW command ----
   bool resumed_from_park = false;
   if ( monitor_.parked() ) {
+    // A velocity demand is released by letting go and asking again (see isNewReference).
+    demand_released_ = demand_released_ || !demandsMotion( reference );
     if ( isNewReference( reference ) ) {
       monitor_.releasePark();
       resumed_from_park = true;
@@ -231,14 +264,18 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
   // ---- Solve, integrate, clamp ----
   const SafetyQpResult &result = limiter_->solve( input_ );
   vel_ = result.v;
-  cmd_ += vel_ * config_.dt;
+  if ( !config_.velocity_mode ) {
+    // In velocity mode the hardware integrates; cmd_ is rebased onto the measurement in
+    // prepare() and stays the configuration the collision check ran at.
+    cmd_ += vel_ * config_.dt;
+  }
 
   // ---- Stall detection: reference demands motion but the QP output is ~zero ----
   Events events;
   const bool moving = vel_.cwiseAbs().maxCoeff() > config_.stall_velocity_threshold;
   events.stall = monitor_.update( wants_motion_, moving, config_.dt );
   if ( events.stall.parked ) {
-    parked_reference_ = reference_;
+    latchPark();
   }
   return events;
 }
@@ -252,8 +289,32 @@ void SafetyPipeline::holdAll()
   }
 }
 
+void SafetyPipeline::latchPark()
+{
+  parked_reference_ = reference_;
+  demand_released_ = false;
+}
+
+bool SafetyPipeline::demandsMotion( const std::vector<double> &reference ) const
+{
+  for ( std::size_t i = 0; i < config_.joints.size(); ++i ) {
+    // Non-finite means "no demand" (same as prepare()), so an inf glitch cannot count as
+    // asking again and release a park.
+    if ( std::isfinite( reference[i] ) && std::abs( reference[i] ) > config_.park_resume_threshold ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool SafetyPipeline::isNewReference( const std::vector<double> &reference ) const
 {
+  if ( config_.velocity_mode ) {
+    // A velocity reference is a demand, not a target: a held stick keeps sending the
+    // same abandoned command, and comparing its value would resume on any wobble. The
+    // operator has to let go and ask again.
+    return demand_released_ && demandsMotion( reference );
+  }
   for ( std::size_t i = 0; i < config_.joints.size(); ++i ) {
     const double ref = reference[i];
     // Non-finite means "no target" (same as prepare()): an inf glitch must not count as

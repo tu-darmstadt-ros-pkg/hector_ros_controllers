@@ -21,6 +21,12 @@ namespace safety_position_controller
  * Owns the desired velocity + reference leash, the position-limit, per-joint deviation
  * and tracking-leash boxes, collision damper constraint assembly, the QP solve
  * (SafetyQpLimiter), integration and the stall/park state machine.
+ *
+ * With Config::velocity_mode the reference is a joint velocity demand and the hardware
+ * integrates the commanded velocity. The command is then rebased onto the measurement
+ * every cycle (plus one predicted step, so the collision check leads the robot), and the
+ * three bounds that relate a command to a position target - reference leash, deviation
+ * boxes, tracking leash - are dropped.
  * Reports events instead of logging; the caller (controller) translates them.
  *
  * Per-cycle protocol (the collision check must run at the commanded configuration,
@@ -55,12 +61,18 @@ public:
     double tracking_leash{ 0.5 };
     double bypass_limit_tolerance{ 0.0 };    ///< position-limit extension (fraction of range)
     double stall_velocity_threshold{ 0.01 }; ///< |v| below this counts as not moving
-    double park_resume_threshold{ 0.01 };    ///< reference change that counts as new command
+    /// What counts as a new command releasing a park: a position target this far from the
+    /// abandoned one, or a velocity demand of at least this magnitude.
+    double park_resume_threshold{ 0.01 };
     /// If true, a joint whose desired velocity stays below hold_velocity_threshold is
     /// pinned: the QP may not recruit it to flow around or push out of a collision, so
     /// a resting limb is never swept aside by a collision it did not cause.
     bool hold_unrequested{ false };
     double hold_velocity_threshold{ 0.01 }; ///< |v_des| below this counts as "not requested"
+    /// The reference is a joint velocity demand and the hardware integrates the
+    /// commanded velocity. Drops reference_leash_time, deviation_limits and
+    /// tracking_leash (see the constructor): none of them has anything to bound.
+    bool velocity_mode{ false };
     StallParkMonitor::Params stall_park;
   };
 
@@ -102,12 +114,20 @@ public:
     park_pending_ = true;
   }
 
+  /// The caller stopped the joints itself instead of running a cycle. The acceleration
+  /// box is anchored on the last velocity this pipeline commanded, so without this the
+  /// cycle after a skipped one may resume at full speed from a hardware that was told to
+  /// stop. Unlike invalidate() it abandons no reference and parks nothing: the pipeline
+  /// only learns what was actually written.
+  void noteCommandedStop() { vel_.setZero(); }
+
   /**
    * @brief Phase 1: rebase if invalidated, clamp the reference to the position limits,
    * desired velocity toward the (leashed) reference, position-limit, deviation and
    * tracking-leash boxes, park hold/resume.
    * @param reference raw reference per joint (non-finite entries demand zero velocity);
-   * for continuous joints the shortest path to the target is taken
+   * positions, or velocities in Config::velocity_mode; for continuous position targets
+   * the shortest path is taken
    * @param measured measured positions per joint
    * @param bypass_active relaxes position limits and drops the deviation boxes
    * @return true if a new reference released the parked state this cycle
@@ -115,8 +135,10 @@ public:
   bool prepare( const std::vector<double> &reference, const std::vector<double> &measured,
                 bool bypass_active );
 
-  /// Current commanded configuration: evaluate the collision check here after prepare();
-  /// after step() these are the positions to write to the hardware.
+  /// Current commanded configuration: evaluate the collision check here after prepare().
+  /// In position mode step() integrates it, so afterwards these are also the positions to
+  /// write; in velocity mode it stays the checked configuration (measured plus one step)
+  /// and velocity() is what gets written.
   const Eigen::VectorXd &commandedPositions() const { return cmd_; }
 
   /**
@@ -149,8 +171,17 @@ public:
   const Config &config() const { return config_; }
 
 private:
-  /// True if the reference differs from the one latched at park time (a new command).
+  /// True if the reference counts as a new command, releasing the park: in position mode
+  /// a target that differs from the one latched at park time, in velocity mode a demand
+  /// that was let go and asked for again.
   bool isNewReference( const std::vector<double> &reference ) const;
+
+  /// True if any joint is asked to move faster than park_resume_threshold. Reads the raw
+  /// reference, so it still answers while the park zeroes the demand (velocity mode).
+  bool demandsMotion( const std::vector<double> &reference ) const;
+
+  /// Latch this cycle's reference as the abandoned one (park).
+  void latchPark();
 
   /// Hold every joint (used where step() zeroes the demand after prepare() ran).
   void holdAll();
@@ -167,6 +198,9 @@ private:
   bool park_pending_{ false };
   bool wants_motion_{ false };
   bool measurement_diverged_{ false };
+  /// Velocity mode: the demand has been at rest since the park, so the next one counts
+  /// as a new command.
+  bool demand_released_{ false };
   Eigen::VectorXd cmd_;         ///< commanded positions (integration state)
   Eigen::VectorXd vel_;         ///< commanded velocities
   Eigen::VectorXd ref_leashed_; ///< leashed reference targets (deviation is measured

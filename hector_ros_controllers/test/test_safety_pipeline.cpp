@@ -702,6 +702,325 @@ TEST( SafetyPipeline, HoldIsOffByDefault )
   EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 0, 0 ) );
 }
 
+// ---------------------------------------------------------------------------
+// Velocity mode: the reference is a joint velocity demand and the hardware
+// integrates the commanded velocity
+// ---------------------------------------------------------------------------
+
+namespace
+{
+Pipeline::Config makeVelocityConfig( const size_t n = 2 )
+{
+  auto cfg = makeConfig( n );
+  cfg.velocity_mode = true;
+  return cfg;
+}
+
+/// One cycle in velocity mode: the hardware integrates the commanded velocity exactly.
+Pipeline::Events velocityCycle( Pipeline &pipeline, const std::vector<double> &reference,
+                                std::vector<double> &measured,
+                                const Pipeline::CollisionObservation &obs = {},
+                                const bool bypass = false )
+{
+  pipeline.prepare( reference, measured, bypass );
+  const auto events = pipeline.step( obs );
+  for ( size_t i = 0; i < measured.size(); ++i ) {
+    measured[i] += pipeline.velocity()[static_cast<Eigen::Index>( i )] * kDt;
+  }
+  return events;
+}
+} // namespace
+
+TEST( SafetyPipeline, VelocityModeDropsThePositionOnlyBounds )
+{
+  auto cfg = makeVelocityConfig();
+  cfg.reference_leash_time = 0.3;
+  cfg.tracking_leash = 0.5;
+  cfg.deviation_limits.assign( 2, 0.25 );
+  Pipeline pipeline( cfg );
+
+  EXPECT_EQ( pipeline.config().reference_leash_time, 0.0 );
+  EXPECT_EQ( pipeline.config().tracking_leash, 0.0 );
+  EXPECT_THAT( pipeline.config().deviation_limits, ::testing::Each( 0.0 ) );
+
+  // The continuous-joint leash bound guards a lag measurement velocity mode never makes.
+  auto continuous = makeVelocityConfig( 1 );
+  continuous.joints[0].type = spc::JointType::CONTINUOUS;
+  continuous.tracking_leash = 2.0;
+  EXPECT_NO_THROW( Pipeline{ continuous } );
+}
+
+TEST( SafetyPipeline, VelocityModeTracksTheReferenceWithinBoxes )
+{
+  Pipeline pipeline( makeVelocityConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+
+  double prev_v = 0.0, max_dv = 0.0;
+  for ( int i = 0; i < 100; ++i ) {
+    const double measured_before = measured[0];
+    velocityCycle( pipeline, { 0.5, 0.0 }, measured );
+    const double v = pipeline.velocity()[0];
+    max_dv = std::max( max_dv, std::abs( v - prev_v ) );
+    EXPECT_NEAR( pipeline.commandedPositions()[0], measured_before + prev_v * kDt, 1e-9 )
+        << "the collision check must run one step ahead of the measurement";
+    prev_v = v;
+  }
+  EXPECT_NEAR( pipeline.velocity()[0], 0.5, 1e-6 );
+  EXPECT_NEAR( pipeline.velocity()[1], 0.0, 1e-9 );
+  EXPECT_LE( max_dv, kAcc * kDt + 1e-9 ) << "the acceleration box still applies";
+
+  // A demand above the joint's limit is clamped where it enters, not left for the QP's
+  // own velocity box to cut down.
+  for ( int i = 0; i < 100; ++i ) { velocityCycle( pipeline, { 5.0, 0.0 }, measured ); }
+  EXPECT_NEAR( pipeline.qpInput().v_des[0], kVMax, 1e-9 );
+  EXPECT_NEAR( pipeline.velocity()[0], kVMax, 1e-6 );
+}
+
+TEST( SafetyPipeline, VelocityModeReachesTheVelocityLimitDespiteDeviationLimits )
+{
+  // A configured deviation box must not reach the QP. Centred on the command it would
+  // bound nothing, since the command is re-centred on the measurement every cycle, but
+  // its braking envelope would cap the speed at sqrt(2 * a_dec * limit) ~ 0.58 rad/s.
+  auto cfg = makeVelocityConfig( 1 );
+  cfg.deviation_limits.assign( 1, 0.01 );
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0 };
+  for ( int i = 0; i < 200; ++i ) { velocityCycle( pipeline, { 1.5 }, measured ); }
+  EXPECT_NEAR( pipeline.velocity()[0], kVMax, 1e-6 );
+}
+
+TEST( SafetyPipeline, VelocityModeFollowsAMeasurementThatJumps )
+{
+  // The hardware integrates, so the command has no lag to bound and cannot run away from
+  // the joint: a jump (backdrive, a re-homed encoder) is simply where the robot now is,
+  // and the rebase has to take it as such rather than brake or report a divergence.
+  auto cfg = makeVelocityConfig( 1 );
+  cfg.tracking_leash = 0.5;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0 };
+  for ( int i = 0; i < 100; ++i ) { velocityCycle( pipeline, { 0.5 }, measured ); }
+  ASSERT_NEAR( pipeline.velocity()[0], 0.5, 1e-6 );
+
+  measured[0] += 1.5; // > 2 * tracking_leash: a position-mode divergence
+  const double jumped_to = measured[0];
+  velocityCycle( pipeline, { 0.5 }, measured );
+  EXPECT_FALSE( pipeline.measurementDiverged() );
+  EXPECT_NEAR( pipeline.velocity()[0], 0.5, 1e-6 ) << "the jump must not brake the demand";
+  EXPECT_NEAR( pipeline.commandedPositions()[0], jumped_to + 0.5 * kDt, 1e-6 )
+      << "the checked configuration follows the measurement";
+}
+
+TEST( SafetyPipeline, VelocityModeNaNReferenceBrakesAtTheDecelerationLimit )
+{
+  Pipeline pipeline( makeVelocityConfig( 1 ) );
+  std::vector<double> measured{ 0.0 };
+  for ( int i = 0; i < 200; ++i ) { velocityCycle( pipeline, { 1.0 }, measured ); }
+  ASSERT_NEAR( pipeline.velocity()[0], kVMax, 1e-6 );
+
+  double prev_v = pipeline.velocity()[0];
+  for ( int i = 0; i < 50; ++i ) {
+    velocityCycle( pipeline, { kNaN }, measured );
+    const double v = pipeline.velocity()[0];
+    EXPECT_LE( prev_v - v, kDec * kDt + 1e-9 ) << "no reference is a brake, not a stop";
+    EXPECT_GE( v, -1e-9 );
+    prev_v = v;
+    ASSERT_TRUE( pipeline.lastResult().solved ) << "the QP must never be fed a NaN demand";
+  }
+  EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-9 );
+  EXPECT_FALSE( pipeline.wantsMotion() );
+
+  // An infinity is no demand either. Clamped to the velocity limit it would be full speed.
+  for ( int i = 0; i < 20; ++i ) {
+    velocityCycle( pipeline, { std::numeric_limits<double>::infinity() }, measured );
+    ASSERT_TRUE( pipeline.lastResult().solved );
+  }
+  EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-9 );
+}
+
+TEST( SafetyPipeline, VelocityModeBrakesBeforeThePositionLimit )
+{
+  Pipeline pipeline( makeVelocityConfig( 1 ) ); // limits -3 .. 3
+  std::vector<double> measured{ 0.0 };
+  for ( int i = 0; i < 1000; ++i ) {
+    velocityCycle( pipeline, { 1.0 }, measured );
+    ASSERT_LE( measured[0], 3.0 + 1e-6 ) << "cycle " << i;
+  }
+  EXPECT_NEAR( measured[0], 3.0, 1e-3 );
+  EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-3 );
+}
+
+TEST( SafetyPipeline, VelocityModeHeadOnBlockStallsAndParks )
+{
+  Pipeline pipeline( makeVelocityConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+
+  Eigen::VectorXd gradient( 2 );
+  gradient << -1.0, 0.0;
+  std::vector<Pipeline::PairCandidate> pairs{ { 0.0, &gradient, 0 } };
+  Pipeline::CollisionObservation obs;
+  obs.checks_active = true;
+  obs.state_valid = true;
+  obs.pairs = &pairs;
+
+  int stalled_at = -1, parked_at = -1;
+  for ( int i = 0; i < 100; ++i ) {
+    const auto events = velocityCycle( pipeline, { 1.0, 0.0 }, measured, obs );
+    if ( events.stall.stalled && stalled_at < 0 ) {
+      stalled_at = i;
+    }
+    if ( events.stall.parked && parked_at < 0 ) {
+      parked_at = i;
+    }
+  }
+  EXPECT_EQ( stalled_at, 19 ) << "stall_timeout = 0.2 s = 20 cycles";
+  EXPECT_EQ( parked_at, 49 ) << "park_timeout = 0.5 s = 50 cycles";
+  EXPECT_LT( std::abs( measured[0] ), 0.05 );
+
+  // Parked: the demand is abandoned even when the blockage clears.
+  for ( int i = 0; i < 20; ++i ) { velocityCycle( pipeline, { 1.0, 0.0 }, measured ); }
+  EXPECT_TRUE( pipeline.parked() );
+  EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-9 );
+}
+
+TEST( SafetyPipeline, VelocityModeParkReleasesOnlyAfterTheDemandPassedThroughZero )
+{
+  // A velocity reference is a demand, not a target: releasing on "the number changed"
+  // would resume the moment a held stick wobbled, which is the opposite of parking.
+  Pipeline pipeline( makeVelocityConfig( 1 ) );
+  std::vector<double> measured{ 0.0 };
+
+  pipeline.invalidate();
+  velocityCycle( pipeline, { 0.5 }, measured );
+  ASSERT_TRUE( pipeline.parked() );
+
+  for ( int i = 0; i < 50; ++i ) {
+    const double held = 0.5 + ( i % 2 ? 0.1 : -0.1 ); // a hand on the stick
+    EXPECT_FALSE( pipeline.prepare( { held }, measured, false ) ) << "cycle " << i;
+    pipeline.step( {} );
+    ASSERT_NEAR( pipeline.velocity()[0], 0.0, 1e-9 ) << "cycle " << i;
+  }
+  EXPECT_TRUE( pipeline.parked() );
+
+  velocityCycle( pipeline, { 0.0 }, measured ); // let go
+  EXPECT_TRUE( pipeline.parked() ) << "letting go is not a new command by itself";
+  EXPECT_TRUE( pipeline.prepare( { 0.5 }, measured, false ) ) << "asking again is";
+  pipeline.step( {} );
+  EXPECT_FALSE( pipeline.parked() );
+  for ( int i = 0; i < 100; ++i ) { velocityCycle( pipeline, { 0.5 }, measured ); }
+  EXPECT_NEAR( pipeline.velocity()[0], 0.5, 1e-6 );
+}
+
+TEST( SafetyPipeline, VelocityModeNonFiniteDemandDoesNotReleaseAPark )
+{
+  Pipeline pipeline( makeVelocityConfig( 1 ) );
+  std::vector<double> measured{ 0.0 };
+  pipeline.invalidate();
+  velocityCycle( pipeline, { 0.5 }, measured );
+  ASSERT_TRUE( pipeline.parked() );
+  velocityCycle( pipeline, { 0.0 }, measured ); // let go
+
+  for ( const double glitch : { std::numeric_limits<double>::infinity(),
+                                -std::numeric_limits<double>::infinity(), kNaN } ) {
+    EXPECT_FALSE( pipeline.prepare( { glitch }, measured, false ) ) << glitch;
+    pipeline.step( {} );
+    EXPECT_TRUE( pipeline.parked() );
+    EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-9 );
+  }
+}
+
+TEST( SafetyPipeline, VelocityModeParksAgainAfterResumingIntoTheSameBlock )
+{
+  // The second park is the one that chatters if letting go is not required again: the
+  // stick is still held, so a release rule that only asks "is a demand being made" would
+  // release on the very next cycle and push into the obstacle forever.
+  Pipeline pipeline( makeVelocityConfig( 1 ) );
+  std::vector<double> measured{ 0.0 };
+
+  Eigen::VectorXd gradient( 1 );
+  gradient << -1.0;
+  std::vector<Pipeline::PairCandidate> pairs{ { 0.0, &gradient, 0 } };
+  Pipeline::CollisionObservation obs;
+  obs.checks_active = true;
+  obs.state_valid = true;
+  obs.pairs = &pairs;
+
+  for ( int i = 0; i < 60; ++i ) { velocityCycle( pipeline, { 1.0 }, measured, obs ); }
+  ASSERT_TRUE( pipeline.parked() );
+  velocityCycle( pipeline, { 0.0 }, measured, obs );
+  ASSERT_TRUE( pipeline.prepare( { 1.0 }, measured, obs.checks_active ) );
+  pipeline.step( obs );
+  ASSERT_FALSE( pipeline.parked() );
+
+  // Straight back into the same block: it parks again and stays parked while held.
+  for ( int i = 0; i < 60; ++i ) { velocityCycle( pipeline, { 1.0 }, measured, obs ); }
+  ASSERT_TRUE( pipeline.parked() );
+  for ( int i = 0; i < 200; ++i ) {
+    EXPECT_FALSE( pipeline.prepare( { 1.0 }, measured, false ) ) << "cycle " << i;
+    pipeline.step( obs );
+    ASSERT_TRUE( pipeline.parked() ) << "cycle " << i;
+  }
+}
+
+TEST( SafetyPipeline, VelocityModeAcceleratesFromACommandedStopNotFromTheLastSolve )
+{
+  // The caller stops the joints itself on a cycle it cannot run (busy handles, an
+  // unreadable encoder). The acceleration box is anchored on the last velocity solved
+  // for, so without being told, the first recovered cycle resumes at full speed against
+  // a hardware that was just commanded to zero.
+  Pipeline pipeline( makeVelocityConfig( 1 ) );
+  std::vector<double> measured{ 0.0 };
+  for ( int i = 0; i < 200; ++i ) { velocityCycle( pipeline, { 1.0 }, measured ); }
+  ASSERT_NEAR( pipeline.velocity()[0], kVMax, 1e-6 );
+
+  pipeline.noteCommandedStop(); // what the caller wrote instead of a cycle
+  velocityCycle( pipeline, { 1.0 }, measured );
+  EXPECT_LE( pipeline.velocity()[0], kAcc * kDt + 1e-9 )
+      << "one acceleration step away from the stop that was written";
+  EXPECT_FALSE( pipeline.parked() ) << "a stop the caller wrote abandons no reference";
+}
+
+TEST( SafetyPipeline, VelocityModeHoldPinsTheJointWithNoDemand )
+{
+  auto cfg = makeVelocityConfig();
+  cfg.hold_unrequested = true;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 0.0, 0.0 };
+  const Eigen::VectorXd gradient = sweepGradient(); // escapes by sweeping joint 1 aside
+  std::vector<Pipeline::PairCandidate> pairs{ { 0.001, &gradient, 0 } };
+  Pipeline::CollisionObservation obs;
+  obs.checks_active = true;
+  obs.state_valid = true;
+  obs.pairs = &pairs;
+
+  for ( int i = 0; i < 50; ++i ) { velocityCycle( pipeline, { 1.0, 0.0 }, measured, obs ); }
+  EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 0, 1 ) );
+  EXPECT_EQ( measured[1], 0.0 ) << "a joint with no demand must not be swept aside";
+}
+
+TEST( SafetyPipeline, VelocityModeIsIndifferentToAWrappedMeasurement )
+{
+  // Nothing in velocity mode measures a distance between two angles, so a hardware that
+  // reports wrapped positions cannot produce a phantom 2*pi to travel or brake for.
+  auto cfg = makeVelocityConfig( 1 );
+  cfg.joints[0].type = spc::JointType::CONTINUOUS;
+  cfg.joints[0].has_position_limits = false;
+  Pipeline pipeline( cfg );
+
+  std::vector<double> measured{ 3.13 };
+  for ( int i = 0; i < 100; ++i ) {
+    velocityCycle( pipeline, { 1.0 }, measured );
+    if ( measured[0] > M_PI ) {
+      measured[0] -= 2.0 * M_PI; // the hardware wraps
+    }
+    ASSERT_NEAR( pipeline.velocity()[0], std::min( kVMax, ( i + 1 ) * kAcc * kDt ), 1e-6 )
+        << "cycle " << i;
+  }
+  EXPECT_FALSE( pipeline.measurementDiverged() );
+}
+
 int main( int argc, char **argv )
 {
   testing::InitGoogleMock( &argc, argv );
