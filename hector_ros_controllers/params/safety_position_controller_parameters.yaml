@@ -245,12 +245,14 @@ safety_position_controller:
 
   collision_visualization_rate:
     type: double
-    default_value: 10.0
+    default_value: 25.0
     description: >
       Rate in Hz at which the collision markers ('debug_visualize_collisions' /
       'publish_collision_distances') are published. The markers go out over a reliable
       publisher, so emitting them at the full control rate lets a slow subscriber (RViz)
-      throttle the publisher itself. 0 publishes every control cycle.
+      throttle the publisher itself. 0 publishes every control cycle. Measured in ROS
+      time, so under a simulation clock the rate an outside tool observes is this one
+      scaled by the real-time factor.
     validation:
       bounds<>: [0.0, 1000.0]
 
