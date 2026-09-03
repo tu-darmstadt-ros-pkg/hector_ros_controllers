@@ -46,10 +46,22 @@ calls `pipeline->invalidate()`, so on release the pipeline rebases to the measur
 and parks — the arm holds until the reference changes by more than
 `park_resume_reference_threshold`.
 
+Two more routes reach that same rebase-and-park, both through `note_state_unobservable()`
+and its `state_read_timeout`: joint states that stay unreadable, and a joint that has left
+its command by more than twice `tracking_leash` (`SafetyPipeline::measurementDiverged()`).
+The second one matters because the collision check runs at the *commanded* configuration:
+once the robot is somewhere else, that check is validating a pose the robot has left. It is
+also what keeps a continuous joint's wrapped lag from reaching pi, where it would name the
+other side of the joint and mirror the tracking box onto the wrong side of the command.
+
+The safety bypass drops collision checking and widens the position limits; it does **not**
+relax the velocity, acceleration or tracking-leash bounds. It lapses on a deadline the
+update loop enforces, and is cleared on every activation and deactivation.
+
 ## Where to change what
 
 - **Safe-set math** (dampers, braking, relaxation stages): `safety_qp_limiter.cpp`.
-- **Cycle behavior** (leash, boxes, stall/park semantics): `safety_pipeline.cpp` — add a pure unit test in `test_safety_pipeline.cpp`. Every bound is a box the QP solves against, so the configuration the collision check ran on is the one that gets written.
+- **Cycle behavior** (leash, boxes, stall/park semantics): `safety_pipeline.cpp` — add a pure unit test in `test_safety_pipeline.cpp`. Every bound is a box the QP solves against, so what gets written is one bounded step away from the configuration the collision check ran on, taken under the velocity, acceleration and damper limits that check produced — not a correction applied afterwards that none of them saw.
 - **Which pairs constrain** (pair filtering, budget, gradients): `collision_checker.cpp`.
 - **Marker appearance** (colors, namespaces, what is drawn): `collision_visualizer.cpp`.
 - **New status/debug output**: `safety_diagnostics.cpp` + the msg definitions in `hector_ros_controllers_msgs`.
@@ -86,6 +98,10 @@ Measured in a **Release** build (`-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON`
 | `BM_CollisionChecker` (brute force) | 437 µs |
 | `BM_SolveWarmStarted/7/0` (QP, no collision rows) | 11.3 µs |
 | `BM_SolveWarmStarted/7/10` (QP, 10 collision rows) | 11.8 µs |
+
+The QP row count is bounded by `qp_max_pair_constraints`, which both Athena configs now set
+to 64. The table above stops at 10, the old default, so it no longer covers the deployed
+operating point — extend the benchmark before quoting a solve time for the robot.
 
 The narrow phase runs in a single pass: coal returns the witness points from the same
 query as the distance, so asking for them up front is cheaper than re-running the query
