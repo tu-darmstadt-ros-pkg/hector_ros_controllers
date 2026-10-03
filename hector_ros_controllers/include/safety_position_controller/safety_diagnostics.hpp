@@ -12,7 +12,7 @@
 #include <realtime_tools/realtime_thread_safe_box.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
-#include <safety_position_controller/collision_checker.hpp>
+#include <hector_self_collision_checker/collision_checker.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
 
 #include <hector_ros_controllers_msgs/msg/safety_position_controller_status.hpp>

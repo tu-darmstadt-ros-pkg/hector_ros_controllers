@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--This does not replace URDF, and is not an extension of URDF.
+    This is a format for representing semantic information about the robot structure.
+    A URDF file must exist for this robot as well, where the joints and the links that are referenced are defined
+-->
+<robot name="athena">
+    <!--GROUPS: Representation of a set of joints and links. This can be useful for specifying DOF to plan for, defining arms, end effectors, etc-->
+    <!--LINKS: When a link is specified, the parent joint of that link (if it exists) is automatically included-->
+    <!--JOINTS: When a joint is specified, the child link of that joint (which will always exist) is automatically included-->
+    <!--CHAINS: When a chain is specified, all the links along the chain (including endpoints) are included in the group. Additionally, all the joints that are parents to included links are also included. This means that joints along the chain and the parent joint of the base link are included in the group-->
+    <!--SUBGROUPS: Groups can also be formed by referencing to already defined group names-->
+    <group name="arm_group">
+        <chain base_link="base_link" tip_link="arm_end_link"/>
+    </group>
+    <group name="flipper_group">
+        <joint name="flipper_bl_joint"/>
+        <joint name="flipper_br_joint"/>
+        <joint name="flipper_fl_joint"/>
+        <joint name="flipper_fr_joint"/>
+    </group>
+    <group name="gripper_eef_group">
+        <joint name="gripper_base_joint"/>
+        <joint name="gripper_joint_l1"/>
+        <joint name="gripper_joint_l2"/>
+        <joint name="gripper_joint_r1"/>
+        <joint name="gripper_joint_r2"/>
+        <joint name="gripper_servo_joint"/>
+    </group>
+    <group name="arm_tcp_group">
+        <joint name="gripper_grasp_tip_joint"/>
+        <group name="arm_group"/>
+    </group>
+    <group name="arm_with_gripper">
+        <group name="arm_group"/>
+        <group name="gripper_eef_group"/>
+    </group>
+    <!--GROUP STATES: Purpose: Define a named state for a particular group, in terms of joint values. This is useful to define states like 'folded arms'-->
+    <group_state name="folded" group="arm_group">
+        <joint name="arm_joint_1" value="3.14"/>
+        <joint name="arm_joint_2" value="1.65"/>
+        <joint name="arm_joint_3" value="0"/>
+        <joint name="arm_joint_4" value="-1.51"/>
+        <joint name="arm_joint_5" value="0"/>
+        <joint name="arm_joint_6" value="-1.38"/>
+        <joint name="arm_joint_7" value="0"/>
+    </group_state>
+    <group_state name="folded_partial" group="arm_group">
+        <joint name="arm_joint_1" value="3.14"/>
+        <joint name="arm_joint_2" value="1.5"/>
+        <joint name="arm_joint_3" value="0"/>
+        <joint name="arm_joint_4" value="-1.41"/>
+        <joint name="arm_joint_5" value="0"/>
+        <joint name="arm_joint_6" value="-1.28"/>
+        <joint name="arm_joint_7" value="0"/>
+    </group_state>
+    <group_state name="front" group="arm_group">
+        <joint name="arm_joint_1" value="0.0"/>
+        <joint name="arm_joint_2" value="0.4"/>
+        <joint name="arm_joint_3" value="0.0"/>
+        <joint name="arm_joint_4" value="-0.4"/>
+        <joint name="arm_joint_5" value="3.14"/>
+        <joint name="arm_joint_6" value="0.9"/>
+        <joint name="arm_joint_7" value="0"/>
+    </group_state>
+    <group_state name="back" group="arm_group">
+        <joint name="arm_joint_1" value="3.14"/>
+        <joint name="arm_joint_2" value="0.4"/>
+        <joint name="arm_joint_3" value="0"/>
+        <joint name="arm_joint_4" value="-0.4"/>
+        <joint name="arm_joint_5" value="3.14"/>
+        <joint name="arm_joint_6" value="0.9"/>
+        <joint name="arm_joint_7" value="0"/>
+    </group_state>
+    <group_state name="flat" group="flipper_group">
+        <joint name="flipper_bl_joint" value="0"/>
+        <joint name="flipper_br_joint" value="0"/>
+        <joint name="flipper_fl_joint" value="0"/>
+        <joint name="flipper_fr_joint" value="0"/>
+    </group_state>
+    <group_state name="up" group="flipper_group">
+        <joint name="flipper_bl_joint" value="1.5708"/>
+        <joint name="flipper_br_joint" value="1.5708"/>
+        <joint name="flipper_fl_joint" value="1.5708"/>
+        <joint name="flipper_fr_joint" value="1.5708"/>
+    </group_state>
+    <group_state name="tub" group="flipper_group">
+        <joint name="flipper_bl_joint" value="1.04"/>
+        <joint name="flipper_br_joint" value="1.04"/>
+        <joint name="flipper_fl_joint" value="1.04"/>
+        <joint name="flipper_fr_joint" value="1.04"/>
+    </group_state>
+    <group_state name="compact" group="flipper_group">
+        <joint name="flipper_bl_joint" value="3.14"/>
+        <joint name="flipper_br_joint" value="3.14"/>
+        <joint name="flipper_fl_joint" value="1.8"/>
+        <joint name="flipper_fr_joint" value="1.8"/>
+    </group_state>
+    <!--END EFFECTOR: Purpose: Represent information about an end effector.-->
+    <end_effector name="gripper" parent_link="arm_end_link" group="gripper_eef_group" parent_group="arm_group"/>
+    <end_effector name="gripper_tcp_endeffector" parent_link="gripper_grasp_tip_link" group="gripper_eef_group" parent_group="arm_tcp_group"/>
+    <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->
+    <virtual_joint name="world_virtual_joint" type="floating" parent_frame="map" child_link="base_link"/>
+    <!--PASSIVE JOINT: Purpose: this element is used to mark joints that are not actuated-->
+    <passive_joint name="gripper_joint_l1"/>
+    <passive_joint name="gripper_joint_l2"/>
+    <passive_joint name="gripper_joint_r1"/>
+    <passive_joint name="gripper_joint_r2"/>
+    <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
+    <disable_collisions link1="&lt;octomap&gt;" link2="flipper_bl_link" reason="Default"/>
+    <disable_collisions link1="&lt;octomap&gt;" link2="flipper_br_link" reason="Default"/>
+    <disable_collisions link1="&lt;octomap&gt;" link2="flipper_fl_link" reason="Default"/>
+    <disable_collisions link1="&lt;octomap&gt;" link2="flipper_fr_link" reason="Default"/>
+    <disable_collisions link1="&lt;octomap&gt;" link2="main_track_left_link" reason="Default"/>
+    <disable_collisions link1="&lt;octomap&gt;" link2="main_track_right_link" reason="Default"/>
+    <disable_collisions link1="arm_end_link" link2="arm_link_4" reason="Never"/>
+    <disable_collisions link1="arm_end_link" link2="arm_link_5" reason="Never"/>
+    <disable_collisions link1="arm_end_link" link2="arm_link_6" reason="Adjacent"/>
+    <disable_collisions link1="arm_end_link" link2="gripper_base" reason="Adjacent"/>
+    <disable_collisions link1="arm_end_link" link2="gripper_link_l1" reason="Default"/>
+    <disable_collisions link1="arm_end_link" link2="gripper_link_l2" reason="Never"/>
+    <disable_collisions link1="arm_end_link" link2="gripper_link_r1" reason="Default"/>
+    <disable_collisions link1="arm_end_link" link2="gripper_link_r2" reason="Never"/>
+    <disable_collisions link1="arm_end_link" link2="gripper_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="arm_link_2" reason="Adjacent"/>
+    <disable_collisions link1="arm_link_1" link2="back_lidar_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="back_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="back_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="back_wideangle_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="chassis_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_link_1" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="arm_link_1" link2="main_track_left_link" reason="Default"/>
+    <disable_collisions link1="arm_link_1" link2="main_track_right_link" reason="Default"/>
+    <disable_collisions link1="arm_link_2" link2="arm_link_3" reason="Adjacent"/>
+    <disable_collisions link1="arm_link_2" link2="arm_link_4" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="back_lidar_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="back_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="back_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="back_wideangle_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="chassis_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="arm_link_2" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="arm_link_3" link2="arm_link_4" reason="Adjacent"/>
+    <disable_collisions link1="arm_link_3" link2="arm_link_5" reason="Never"/>
+    <disable_collisions link1="arm_link_3" link2="arm_link_6" reason="Never"/>
+    <disable_collisions link1="arm_link_3" link2="back_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_3" link2="chassis_link" reason="Never"/>
+    <disable_collisions link1="arm_link_3" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_3" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="arm_link_3" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="arm_link_4" link2="arm_link_5" reason="Adjacent"/>
+    <disable_collisions link1="arm_link_4" link2="arm_link_6" reason="Never"/>
+    <disable_collisions link1="arm_link_5" link2="arm_link_6" reason="Adjacent"/>
+    <disable_collisions link1="arm_link_5" link2="gripper_link_l2" reason="Never"/>
+    <disable_collisions link1="arm_link_5" link2="gripper_link_r2" reason="Never"/>
+    <disable_collisions link1="arm_link_5" link2="gripper_rgbd_link" reason="Never"/>
+    <disable_collisions link1="arm_link_6" link2="gripper_base" reason="Never"/>
+    <disable_collisions link1="arm_link_6" link2="gripper_link_l1" reason="Never"/>
+    <disable_collisions link1="arm_link_6" link2="gripper_link_l2" reason="Never"/>
+    <disable_collisions link1="arm_link_6" link2="gripper_link_r1" reason="Never"/>
+    <disable_collisions link1="arm_link_6" link2="gripper_link_r2" reason="Never"/>
+    <disable_collisions link1="arm_link_6" link2="gripper_rgbd_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="back_rgbd_link" reason="Default"/>
+    <disable_collisions link1="back_lidar_link" link2="back_sensor_mount_link" reason="Adjacent"/>
+    <disable_collisions link1="back_lidar_link" link2="back_wideangle_link" reason="Default"/>
+    <disable_collisions link1="back_lidar_link" link2="chassis_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="flipper_bl_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="flipper_br_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="flipper_fl_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="flipper_fr_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="back_lidar_link" link2="main_track_left_link" reason="Default"/>
+    <disable_collisions link1="back_lidar_link" link2="main_track_right_link" reason="Default"/>
+    <disable_collisions link1="back_rgbd_link" link2="back_sensor_mount_link" reason="Adjacent"/>
+    <disable_collisions link1="back_rgbd_link" link2="back_wideangle_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="chassis_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="flipper_bl_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="flipper_br_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="flipper_fl_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="flipper_fr_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="back_rgbd_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="back_wideangle_link" reason="Adjacent"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="chassis_link" reason="Adjacent"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="flipper_bl_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="flipper_br_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="flipper_fl_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="flipper_fr_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="main_track_left_link" reason="Default"/>
+    <disable_collisions link1="back_sensor_mount_link" link2="main_track_right_link" reason="Default"/>
+    <disable_collisions link1="back_wideangle_link" link2="chassis_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="flipper_bl_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="flipper_br_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="flipper_fl_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="flipper_fr_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="back_wideangle_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="chassis_link" link2="flipper_bl_link" reason="Adjacent"/>
+    <disable_collisions link1="chassis_link" link2="flipper_br_link" reason="Adjacent"/>
+    <disable_collisions link1="chassis_link" link2="flipper_fl_link" reason="Adjacent"/>
+    <disable_collisions link1="chassis_link" link2="flipper_fr_link" reason="Adjacent"/>
+    <disable_collisions link1="chassis_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="chassis_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="chassis_link" link2="front_sensor_mount_link" reason="Adjacent"/>
+    <disable_collisions link1="chassis_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="chassis_link" link2="main_track_left_link" reason="Adjacent"/>
+    <disable_collisions link1="chassis_link" link2="main_track_right_link" reason="Adjacent"/>
+    <disable_collisions link1="flipper_bl_link" link2="flipper_br_link" reason="Never"/>
+    <disable_collisions link1="flipper_bl_link" link2="flipper_fr_link" reason="Never"/>
+    <disable_collisions link1="flipper_bl_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="flipper_bl_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="flipper_bl_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="flipper_bl_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="flipper_bl_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="flipper_bl_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="flipper_br_link" link2="flipper_fl_link" reason="Never"/>
+    <disable_collisions link1="flipper_br_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="flipper_br_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="flipper_br_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="flipper_br_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="flipper_br_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="flipper_br_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="flipper_fl_link" link2="flipper_fr_link" reason="Never"/>
+    <disable_collisions link1="flipper_fl_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="flipper_fl_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="flipper_fl_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="flipper_fl_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="flipper_fl_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="flipper_fl_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="flipper_fr_link" link2="front_lidar_link" reason="Never"/>
+    <disable_collisions link1="flipper_fr_link" link2="front_rgbd_link" reason="Never"/>
+    <disable_collisions link1="flipper_fr_link" link2="front_sensor_mount_link" reason="Never"/>
+    <disable_collisions link1="flipper_fr_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="flipper_fr_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="flipper_fr_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="front_lidar_link" link2="front_rgbd_link" reason="Default"/>
+    <disable_collisions link1="front_lidar_link" link2="front_sensor_mount_link" reason="Adjacent"/>
+    <disable_collisions link1="front_lidar_link" link2="front_wideangle_link" reason="Default"/>
+    <disable_collisions link1="front_lidar_link" link2="main_track_left_link" reason="Default"/>
+    <disable_collisions link1="front_lidar_link" link2="main_track_right_link" reason="Default"/>
+    <disable_collisions link1="front_rgbd_link" link2="front_sensor_mount_link" reason="Adjacent"/>
+    <disable_collisions link1="front_rgbd_link" link2="front_wideangle_link" reason="Never"/>
+    <disable_collisions link1="front_rgbd_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="front_rgbd_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="front_sensor_mount_link" link2="front_wideangle_link" reason="Adjacent"/>
+    <disable_collisions link1="front_sensor_mount_link" link2="main_track_left_link" reason="Default"/>
+    <disable_collisions link1="front_sensor_mount_link" link2="main_track_right_link" reason="Default"/>
+    <disable_collisions link1="front_wideangle_link" link2="main_track_left_link" reason="Never"/>
+    <disable_collisions link1="front_wideangle_link" link2="main_track_right_link" reason="Never"/>
+    <disable_collisions link1="gripper_base" link2="gripper_link_l1" reason="Adjacent"/>
+    <disable_collisions link1="gripper_base" link2="gripper_link_l2" reason="Never"/>
+    <disable_collisions link1="gripper_base" link2="gripper_link_r1" reason="Adjacent"/>
+    <disable_collisions link1="gripper_base" link2="gripper_link_r2" reason="Never"/>
+    <disable_collisions link1="gripper_base" link2="gripper_rgbd_link" reason="Adjacent"/>
+    <disable_collisions link1="gripper_link_l1" link2="gripper_link_l2" reason="Adjacent"/>
+    <disable_collisions link1="gripper_link_l1" link2="gripper_link_r1" reason="Never"/>
+    <disable_collisions link1="gripper_link_l1" link2="gripper_link_r2" reason="Never"/>
+    <disable_collisions link1="gripper_link_l1" link2="gripper_rgbd_link" reason="Never"/>
+    <disable_collisions link1="gripper_link_l2" link2="gripper_link_r1" reason="Never"/>
+    <disable_collisions link1="gripper_link_l2" link2="gripper_rgbd_link" reason="Never"/>
+    <disable_collisions link1="gripper_link_r1" link2="gripper_link_r2" reason="Adjacent"/>
+    <disable_collisions link1="gripper_link_r1" link2="gripper_rgbd_link" reason="Never"/>
+    <disable_collisions link1="gripper_link_r2" link2="gripper_rgbd_link" reason="Never"/>
+    <disable_collisions link1="main_track_left_link" link2="main_track_right_link" reason="Never"/>
+</robot>

@@ -20,7 +20,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
-#include "safety_position_controller/collision_checker.hpp"
+#include "hector_self_collision_checker/collision_checker.hpp"
 
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
@@ -45,7 +45,7 @@ namespace
 std::string loadUrdfFile( const std::string &filename )
 {
   const std::string path =
-      ament_index_cpp::get_package_share_directory( "hector_ros_controllers" ) + "/test/config/" +
+      ament_index_cpp::get_package_share_directory( "hector_self_collision_checker" ) + "/test/config/" +
       filename;
   std::ifstream ifs( path );
   if ( !ifs.is_open() ) {

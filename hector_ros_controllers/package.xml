@@ -19,6 +19,7 @@
   <depend>generate_parameter_library</depend>
   <depend>hardware_interface</depend>
   <depend>hector_ros_controllers_msgs</depend>
+  <depend>hector_self_collision_checker</depend>
   <depend>libccd-dev</depend>
   <depend>libfcl-dev</depend>
   <depend>pinocchio</depend>

@@ -27,7 +27,7 @@ A **safety layer for joint position commands**, usable both
     * per-joint deviation boxes around the leashed reference (`joint_deviation_limits`), bounding how far any link may leave the upstream-validated path,
     * an anti-windup box on `|command − measured|` (`tracking_leash`).
 
-  Motion therefore *flows around* an obstacle where a free direction exists, and blocks cleanly where none does. Distances and gradients come from `CollisionChecker` (Pinocchio + coal) using URDF + SRDF.
+  Motion therefore *flows around* an obstacle where a free direction exists, and blocks cleanly where none does. Distances and gradients come from `CollisionChecker` (Pinocchio + coal, package `hector_self_collision_checker`, which MoveIt's self-collision checks can share) using URDF + SRDF.
 * **Contact crawl** (`qp_contact_crawl_speed`): while any pair is inside the padding the velocity box is clamped, because sliding along curved geometry loses true distance faster than the linearised constraint predicts.
 * **Push-out and infeasibility handling**: a penetrating pair is given a capped separation demand (`qp_max_repulsion_speed`). Opposing demands that make the QP infeasible are relaxed in stages — deepest pair first, then "do not get worse" — and only then does the controller fall back to braking at the deceleration limit.
 * **Stall and park**: when the reference demands motion but the solution is ~zero for `qp_stall_timeout`, `stalled` is reported so an upstream planner can replan. After `stall_park_timeout` the controller **parks**: the reference in effect is abandoned and the limb holds even if the blockage clears, until a reference arrives that differs by more than `park_resume_reference_threshold`.

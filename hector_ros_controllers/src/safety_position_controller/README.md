@@ -12,7 +12,7 @@ with flow-around (ProxQP), per-joint deviation boxes, and a stall/park state mac
 | `SafetyPipeline` | Per-cycle control law: desired velocity + reference leash, position/deviation/tracking boxes, constraint projection, solve, integration, stall/park. Returns **events**, never logs | no |
 | `SafetyQpLimiter` | The dense QP itself (velocity boxes, braking bounds, collision dampers, tiered infeasibility relaxation) | no |
 | `StallParkMonitor` | Stall / park state machine (park latch survives E-stop) | no |
-| `CollisionChecker` | Pinocchio + coal self-collision distances and gradients | yes (logging only) |
+| `CollisionChecker` (package `hector_self_collision_checker`) | Pinocchio + coal self-collision distances and gradients | yes (logging only) |
 | `CollisionVisualizer` | RViz markers on `~/debug_collision_geometry`: distance lines colored by approach direction, optionally the collision geometry | yes |
 | `CollisionObserver` | Assembles the check configuration (measured + commanded overlay), runs the checker, caches results, edge-triggers "entered collision" | no |
 | `SafetyDiagnostics` | `~/status`, `~/qp_debug`, debug joint states, warning formatters | yes |
@@ -62,7 +62,7 @@ update loop enforces, and is cleared on every activation and deactivation.
 
 - **Safe-set math** (dampers, braking, relaxation stages): `safety_qp_limiter.cpp`.
 - **Cycle behavior** (leash, boxes, stall/park semantics): `safety_pipeline.cpp` — add a pure unit test in `test_safety_pipeline.cpp`. Every bound is a box the QP solves against, so what gets written is one bounded step away from the configuration the collision check ran on, taken under the velocity, acceleration and damper limits that check produced — not a correction applied afterwards that none of them saw.
-- **Which pairs constrain** (pair filtering, budget, gradients): `collision_checker.cpp`.
+- **Which pairs constrain** (pair filtering, budget, gradients): `collision_checker.cpp` in `hector_self_collision_checker`.
 - **Marker appearance** (colors, namespaces, what is drawn): `collision_visualizer.cpp`.
 - **New status/debug output**: `safety_diagnostics.cpp` + the msg definitions in `hector_ros_controllers_msgs`.
 - **Parameters**: `params/safety_position_controller_parameters.yaml` (generate_parameter_library), plumbed into `SafetyPipeline::Config` in `setup_pipeline_on_activate()`.
@@ -111,9 +111,9 @@ Run them with:
 
 ```bash
 # cap the parallelism: a full-parallel build of this package exhausts RAM
-MAKEFLAGS=-j2 colcon build --packages-select hector_ros_controllers \
+MAKEFLAGS=-j2 colcon build --packages-select hector_self_collision_checker hector_ros_controllers \
   --parallel-workers 1 --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-./build/hector_ros_controllers/benchmark_collision_checker
+./build/hector_self_collision_checker/benchmark_collision_checker
 ./build/hector_ros_controllers/benchmark_safety_qp_limiter
 ```
 

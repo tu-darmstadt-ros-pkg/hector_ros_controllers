@@ -37,7 +37,8 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     std_msgs
     std_srvs
     fcl
-    ad_kinematics)
+    ad_kinematics
+    hector_self_collision_checker)
 
 foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${dependency} REQUIRED)
@@ -78,7 +79,6 @@ add_library(
   src/safety_position_controller/joint_info.cpp
   src/safety_position_controller/collision_observer.cpp
   src/safety_position_controller/safety_diagnostics.cpp
-  src/safety_position_controller/collision_checker.cpp
   src/safety_position_controller/collision_visualizer.cpp
   src/gripper_position_effort_controller.cpp)
 
@@ -92,6 +92,7 @@ target_link_libraries(
   controllers
   PUBLIC coal::coal
          pinocchio::pinocchio
+         hector_self_collision_checker::hector_self_collision_checker
          proxsuite::proxsuite
          sync_group_velocity_to_position_controller_parameters
          self_collision_avoidance_controller_parameters
@@ -160,20 +161,12 @@ if(BUILD_TESTING)
     fcl
     pinocchio::pinocchio
     ad_kinematics::ad_kinematics
+    hector_self_collision_checker::hector_self_collision_checker
     sync_group_velocity_to_position_controller_parameters
     self_collision_avoidance_controller_parameters
     safety_forward_controller_parameters
     safety_position_controller_parameters
     gripper_position_effort_controller_parameters)
-
-  ament_add_gmock(test_collision_checker test/test_collision_checker.cpp)
-  target_include_directories(
-    test_collision_checker PRIVATE ${PROJECT_SOURCE_DIR}/include
-                                   ${PROJECT_SOURCE_DIR}/test)
-  target_link_libraries(
-    test_collision_checker ${PROJECT_NAME}::controllers_test_doubles
-    ament_index_cpp::ament_index_cpp)
-  target_compile_definitions(test_collision_checker PRIVATE ${DEFS})
 
   ament_add_gmock(test_collision_visualizer test/test_collision_visualizer.cpp)
   target_include_directories(
@@ -231,27 +224,17 @@ if(BUILD_TESTING)
   target_link_libraries(test_safety_pipeline proxsuite::proxsuite)
   target_compile_features(test_safety_pipeline PRIVATE cxx_std_17)
 
-  find_package(ament_cmake_google_benchmark REQUIRED)
-  ament_add_google_benchmark(
-    benchmark_safety_qp_limiter test/benchmark_safety_qp_limiter.cpp
-    src/safety_position_controller/safety_qp_limiter.cpp)
-  if(TARGET benchmark_safety_qp_limiter)
-    target_include_directories(benchmark_safety_qp_limiter
-                               PRIVATE ${PROJECT_SOURCE_DIR}/include)
-    target_link_libraries(benchmark_safety_qp_limiter proxsuite::proxsuite)
-    target_compile_features(benchmark_safety_qp_limiter PRIVATE cxx_std_17)
-  endif()
-
-  ament_add_google_benchmark(benchmark_collision_checker
-                             test/benchmark_collision_checker.cpp)
-  if(TARGET benchmark_collision_checker)
-    target_include_directories(
-      benchmark_collision_checker PRIVATE ${PROJECT_SOURCE_DIR}/include
-                                          ${PROJECT_SOURCE_DIR}/test)
-    target_link_libraries(
-      benchmark_collision_checker ${PROJECT_NAME}::controllers_test_doubles
-      ament_index_cpp::ament_index_cpp)
-    target_compile_definitions(benchmark_collision_checker PRIVATE ${DEFS})
+  find_package(ament_cmake_google_benchmark QUIET)
+  if(ament_cmake_google_benchmark_FOUND)
+    ament_add_google_benchmark(
+      benchmark_safety_qp_limiter test/benchmark_safety_qp_limiter.cpp
+      src/safety_position_controller/safety_qp_limiter.cpp)
+    if(TARGET benchmark_safety_qp_limiter)
+      target_include_directories(benchmark_safety_qp_limiter
+                                 PRIVATE ${PROJECT_SOURCE_DIR}/include)
+      target_link_libraries(benchmark_safety_qp_limiter proxsuite::proxsuite)
+      target_compile_features(benchmark_safety_qp_limiter PRIVATE cxx_std_17)
+    endif()
   endif()
 
   ament_add_gmock(test_sync_group_velocity_to_position_controller

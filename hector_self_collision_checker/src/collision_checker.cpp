@@ -1,7 +1,7 @@
 //
 // Created by aljoscha-schmidt on 10/20/25.
 //
-#include "safety_position_controller/collision_checker.hpp"
+#include "hector_self_collision_checker/collision_checker.hpp"
 
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
@@ -112,10 +112,17 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
 };
 } // namespace
 
+CollisionChecker::CollisionChecker( const rclcpp::Logger &logger, rclcpp::Clock::SharedPtr clock,
+                                    double collision_padding, double collision_cache_epsilon )
+    : logger_( logger ), clock_( std::move( clock ) ), collision_padding_( collision_padding ),
+      collision_cache_epsilon_( collision_cache_epsilon )
+{
+}
+
 CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                                     double collision_padding, double collision_cache_epsilon )
-    : node_( node ), collision_padding_( collision_padding ),
-      collision_cache_epsilon_( collision_cache_epsilon )
+    : CollisionChecker( node->get_logger(), node->get_clock(), collision_padding,
+                        collision_cache_epsilon )
 {
 }
 
@@ -147,7 +154,7 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
         break;
       }
     }
-    RCLCPP_INFO( node_->get_logger(), "[CollisionChecker] Using root frame '%s' for markers.",
+    RCLCPP_INFO( logger_, "[CollisionChecker] Using root frame '%s' for markers.",
                  root_frame_.c_str() );
 
     std::istringstream urdf_stream( urdf_xml );
@@ -180,7 +187,7 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
 
     return true;
   } catch ( const std::exception &e ) {
-    RCLCPP_ERROR( node_->get_logger(), "CollisionChecker init failed: %s", e.what() );
+    RCLCPP_ERROR( logger_, "CollisionChecker init failed: %s", e.what() );
     // A half-built model would pass the size guards and answer from an empty pair set,
     // i.e. fail open. Leave nothing checkable so the nq == 0 guard reports unsafe.
     model_ = pinocchio::Model();
@@ -194,7 +201,7 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
 {
   // If nothing specified, keep all pairs
   if ( controlled_joints.empty() ) {
-    RCLCPP_INFO( node_->get_logger(),
+    RCLCPP_INFO( logger_,
                  "[CollisionChecker] No controlled_joints -> keeping all %zu pairs",
                  geom_model_.collisionPairs.size() );
     return;
@@ -210,7 +217,7 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
   for ( const auto &name : controlled_joints ) {
     auto it = name_to_id_.find( name );
     if ( it == name_to_id_.end() ) {
-      RCLCPP_WARN( node_->get_logger(),
+      RCLCPP_WARN( logger_,
                    "[CollisionChecker] controlled joint '%s' not found in model (ignored).",
                    name.c_str() );
       continue;
@@ -257,7 +264,7 @@ void CollisionChecker::filterCollisionPairs( const std::vector<std::string> &con
 
   const std::size_t after = geom_model_.collisionPairs.size();
   RCLCPP_INFO(
-      node_->get_logger(),
+      logger_,
       "[CollisionChecker] Filtered collision pairs: %zu -> %zu (kept = pairs whose distance the "
       "%zu controlled joints can influence)",
       before, after, controlled_joints.size() );
@@ -291,7 +298,7 @@ CollisionChecker::checkCollision( const std::unordered_map<std::string, double> 
 {
   for ( const auto &[name, position] : joint_positions ) {
     if ( !std::isfinite( position ) ) {
-      RCLCPP_ERROR( node_->get_logger(),
+      RCLCPP_ERROR( logger_,
                     "Joint position for joint '%s' is not finite (%.3f). Assuming the robot is "
                     "in collision.",
                     name.c_str(), position );
@@ -341,7 +348,7 @@ CollisionChecker::buildConfiguration( const std::unordered_map<std::string, doub
   for ( const auto &[name, position] : joint_positions ) {
     const JointQSlot slot = getJointQSlot( name );
     if ( slot.index < 0 ) {
-      RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
+      RCLCPP_WARN_THROTTLE( logger_, *clock_, 2000,
                             "Joint '%s' is unknown or has an unsupported DoF layout (ignored).",
                             name.c_str() );
       continue;
@@ -355,17 +362,17 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
   const double safety_zone_threshold = safety_zone_threshold_;
 
   if ( model_.nq == 0 ) {
-    RCLCPP_ERROR( node_->get_logger(), "Model not initialized." );
+    RCLCPP_ERROR( logger_, "Model not initialized." );
     return unsafeResult();
   }
   if ( q.size() != model_.nq ) {
-    RCLCPP_ERROR( node_->get_logger(), "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
+    RCLCPP_ERROR( logger_, "q size (%ld) != model.nq (%d)", long( q.size() ), model_.nq );
     return unsafeResult();
   }
   // Every distance comparison against a NaN is false, which would report "no collision,
   // min_distance = DBL_MAX" — the check has to fail safe, not open.
   if ( !q.allFinite() ) {
-    RCLCPP_ERROR_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
+    RCLCPP_ERROR_THROTTLE( logger_, *clock_, 2000,
                            "Configuration is not finite. Assuming the robot is in collision." );
     return unsafeResult();
   }
@@ -491,7 +498,7 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
                    return geom_data_.distanceResults[a].min_distance <
                           geom_data_.distanceResults[b].min_distance;
                  } );
-      RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 10000,
+      RCLCPP_WARN_THROTTLE( logger_, *clock_, 10000,
                             "%zu pairs in safety zone (%zu distinct link pairs), keeping %zu.",
                             safety_zone_indices.size(), num_link_pairs, primaries.size() );
 
@@ -507,7 +514,7 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
         if ( std::find( primaries.begin(), primaries.end(), k ) == primaries.end() ) {
           const auto [name_a, name_b] = getPairNames( k );
           RCLCPP_ERROR_THROTTLE(
-              node_->get_logger(), *node_->get_clock(), 5000,
+              logger_, *clock_, 5000,
               "Collision pair budget too small: dropped pair '%s'<->'%s' at d=%.4f m is "
               "inside the braking-critical band (< %.4f m). Increase the pair budget!",
               name_a.c_str(), name_b.c_str(), d, critical_distance );

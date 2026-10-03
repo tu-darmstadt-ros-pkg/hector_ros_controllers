@@ -7,7 +7,7 @@
 
 #include <Eigen/Core>
 
-#include <safety_position_controller/collision_checker.hpp>
+#include <hector_self_collision_checker/collision_checker.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
 
 namespace safety_position_controller

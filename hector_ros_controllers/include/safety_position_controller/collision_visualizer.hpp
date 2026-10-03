@@ -8,7 +8,7 @@
 #include <realtime_tools/realtime_publisher.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include <safety_position_controller/collision_checker.hpp>
+#include <hector_self_collision_checker/collision_checker.hpp>
 
 namespace safety_position_controller
 {

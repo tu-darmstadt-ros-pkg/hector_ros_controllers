@@ -2,8 +2,8 @@
 // Created by aljoscha-schmidt on 10/20/25.
 //
 
-#ifndef COLLISION_CHECKER_HPP
-#define COLLISION_CHECKER_HPP
+#ifndef HECTOR_SELF_COLLISION_CHECKER__COLLISION_CHECKER_HPP
+#define HECTOR_SELF_COLLISION_CHECKER__COLLISION_CHECKER_HPP
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
@@ -38,13 +38,25 @@ struct CollisionResult {
   std::vector<PairInfo> safety_zone_pairs; ///< pairs with distance < safety_zone_threshold
 };
 
-/// Self-collision checker using Pinocchio + coal; optional RViz debug markers.
+/// Self-collision checker using Pinocchio + coal.
 class CollisionChecker
 {
 public:
   /**
    * @brief Ctor.
-   * @param node lifecycle node (pub/log/time)
+   * For users without a node, e.g. the MoveIt collision plugin of moveit_self_collision_clearance,
+   * which only gets the planning scene.
+   * @param logger logger for diagnostics
+   * @param clock clock for throttled warnings
+   * @param collision_padding min allowed distance [m]
+   * @param collision_cache_epsilon cache threshold on max(q - q_last) [rad/m] -> reuse last distances
+   */
+  CollisionChecker( const rclcpp::Logger &logger, rclcpp::Clock::SharedPtr clock, double collision_padding = 0.0,
+                    double collision_cache_epsilon = 1e-6 );
+
+  /**
+   * @brief Ctor logging through a node's logger and clock.
+   * @param node lifecycle node (log/time)
    * @param collision_padding min allowed distance [m]
    * @param collision_cache_epsilon cache threshold on max(q - q_last) [rad/m] -> reuse last distances
    */
@@ -234,7 +246,8 @@ private:
    */
   void filterCollisionPairs( const std::vector<std::string> &controlled_joints );
 
-  rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
+  rclcpp::Logger logger_;
+  rclcpp::Clock::SharedPtr clock_;
 
   pinocchio::Model model_;
   pinocchio::Data data_;
@@ -279,4 +292,4 @@ private:
   std::unique_ptr<BroadPhaseManager> broadphase_manager_;
 };
 
-#endif // COLLISION_CHECKER_HPP
+#endif // HECTOR_SELF_COLLISION_CHECKER__COLLISION_CHECKER_HPP

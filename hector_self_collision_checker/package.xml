@@ -1,0 +1,23 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<package format="3">
+  <name>hector_self_collision_checker</name>
+  <version>1.0.0</version>
+  <description>Self-collision distances between robot links (Pinocchio + coal), shared by the safety position controller and MoveIt</description>
+  <maintainer email="marekdaniv@googlemail.com">Marek Daniv</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>coal</depend>
+  <depend>pinocchio</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+
+  <test_depend>ament_cmake_gmock</test_depend>
+  <test_depend>ament_cmake_google_benchmark</test_depend>
+  <test_depend>ament_index_cpp</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

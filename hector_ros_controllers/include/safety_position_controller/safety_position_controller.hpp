@@ -9,7 +9,7 @@
 
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <realtime_tools/realtime_buffer.hpp>
-#include <safety_position_controller/collision_checker.hpp>
+#include <hector_self_collision_checker/collision_checker.hpp>
 #include <safety_position_controller/collision_observer.hpp>
 #include <safety_position_controller/collision_visualizer.hpp>
 #include <safety_position_controller/joint_info.hpp>
