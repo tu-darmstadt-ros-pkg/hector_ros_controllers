@@ -17,6 +17,7 @@
 #include <coal/collision_data.h>
 #include <coal/distance.h>
 #include <pinocchio/multibody/data.hpp>
+#include <pinocchio/collision/coal-pinocchio-conversions.hpp>
 #include <pinocchio/multibody/fcl.hpp>
 #include <pinocchio/multibody/model.hpp>
 
@@ -31,18 +32,18 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
   pinocchio::GeometryData *geom_data_ptr{ nullptr };
   double safety_zone_threshold{ 0.0 };
 
-  // Outputs (filled during traversal)
+  // Outputs (filled during traversal)  
   double global_min_distance{ std::numeric_limits<double>::max() };
   std::size_t min_distance_pair{ 0 };
-  std::vector<std::size_t> safety_zone_indices;
-  std::vector<std::size_t> visited_indices; ///< pairs the traversal actually evaluated
+  std::vector<std::size_t> *safety_zone_indices{ nullptr };
+  std::vector<std::size_t> *visited_indices{ nullptr }; ///< pairs the traversal actually evaluated
 
   void init() override
   {
     global_min_distance = std::numeric_limits<double>::max();
     min_distance_pair = 0;
-    safety_zone_indices.clear();
-    visited_indices.clear();
+    safety_zone_indices->clear();
+    visited_indices->clear();
   }
 
   bool distance( coal::CollisionObject *o1, coal::CollisionObject *o2, coal::CoalScalar &dist ) override
@@ -89,7 +90,7 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
       dres.normal = -dres.normal;
     }
     const double d = dres.min_distance;
-    visited_indices.push_back( k );
+    visited_indices->push_back( k );
 
     // Update outputs
     if ( d < global_min_distance ) {
@@ -98,7 +99,7 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
     }
 
     if ( safety_zone_threshold > 0.0 && d < safety_zone_threshold ) {
-      safety_zone_indices.push_back( k );
+      safety_zone_indices->push_back( k );
     }
 
     // Set the AABB pruning bound: the tree skips subtrees whose AABB lower
@@ -108,6 +109,48 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
                                            : global_min_distance;
 
     return false; // never stop early — we need ALL safety zone pairs
+  }
+};
+
+/// Broadphase callback for a clearance query: stops at the first tracked pair that is not farther
+/// apart than the threshold, which makes a couple optimizations possible.
+struct ClearanceCallback : coal::DistanceCallBackBase {
+  const pinocchio::GeometryModel *geom_model_ptr{ nullptr };
+  const pinocchio::GeometryData *geom_data_ptr{ nullptr };
+  double threshold{ 0.0 };
+  coal::DistanceRequest request{ false }; ///< no nearest points
+  coal::DistanceResult distance_result;
+  ClearanceResult result;
+
+  void init() override { result = ClearanceResult{}; }
+
+  bool distance( coal::CollisionObject *o1, coal::CollisionObject *o2, coal::CoalScalar &dist ) override
+  {
+    // Prune every subtree farther apart than the threshold. The tree only descends where the
+    // bounding boxes are strictly closer than the bound, so it must lie above the threshold:
+    // overlapping boxes have distance 0 and would be pruned at a threshold of 0.
+    dist = std::max( threshold, 0.0 ) + 1e-6;
+
+    auto &co1 = reinterpret_cast<pinocchio::CollisionObject &>( *o1 );
+    auto &co2 = reinterpret_cast<pinocchio::CollisionObject &>( *o2 );
+    const auto go1 = static_cast<Eigen::DenseIndex>( co1.geometryObjectIndex );
+    const auto go2 = static_cast<Eigen::DenseIndex>( co2.geometryObjectIndex );
+    const int pair_index = geom_model_ptr->collisionPairMapping( std::min( go1, go2 ), std::max( go1, go2 ) );
+    if ( pair_index < 0 || !geom_data_ptr->activeCollisionPairs[static_cast<std::size_t>( pair_index )] )
+      return false;
+    // The traversal only knows the bound once a pair has been evaluated, so the first pairs
+    // reach this point unpruned; their bounding boxes bound the distance from below.
+    if ( o1->getAABB().distance( o2->getAABB() ) > threshold )
+      return false;
+
+    distance_result.clear();
+    coal::distance( o1, o2, request, distance_result );
+    if ( distance_result.min_distance > threshold )
+      return false;
+    result.violated = true;
+    result.distance = distance_result.min_distance;
+    result.pair_index = static_cast<std::size_t>( pair_index );
+    return true; // stop the traversal
   }
 };
 } // namespace
@@ -181,6 +224,8 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     // Pre-allocate Jacobian workspace matrices
     J1_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
     J2_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
+    Jp1_workspace_ = Eigen::MatrixXd::Zero( 3, model_.nv );
+    Jp2_workspace_ = Eigen::MatrixXd::Zero( 3, model_.nv );
 
     // Always create broadphase manager (cheap); use_broadphase_ controls which path is taken
     broadphase_manager_ = std::make_unique<BroadPhaseManager>( &model_, &geom_model_, &geom_data_ );
@@ -408,18 +453,19 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
     callback.geom_model_ptr = &geom_model_;
     callback.geom_data_ptr = &geom_data_;
     callback.safety_zone_threshold = safety_zone_threshold;
+    callback.safety_zone_indices = &safety_zone_indices;
+    callback.visited_indices = &visited_indices_;
     callback.init();
 
     broadphase_manager_->getManager().distance( &callback );
 
     global_min_distance = callback.global_min_distance;
     min_distance_pair = callback.min_distance_pair;
-    safety_zone_indices.swap( callback.safety_zone_indices );
     has_safety_zone_pairs = !safety_zone_indices.empty();
 
     // Pruned pairs keep last cycle's nearest points; only the visited ones are fresh.
     // Every safety-zone pair is visited: the pruning bound never drops below the zone.
-    for ( const std::size_t k : callback.visited_indices ) { nearest_points_fresh_[k] = true; }
+    for ( const std::size_t k : visited_indices_ ) { nearest_points_fresh_[k] = true; }
   } else {
     // --- Brute-force path: compute distances for ALL pairs ---
     for ( auto &dreq : geom_data_.distanceRequests ) { dreq.enable_nearest_points = true; }
@@ -443,12 +489,14 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
     std::fill( nearest_points_fresh_.begin(), nearest_points_fresh_.end(), true );
   }
 
-  CollisionResult result;
+  // Filled in place, so the pair list and its gradient vectors keep their allocations.
+  CollisionResult &result = last_collision_result_;
   result.in_collision = ( global_min_distance <= collision_padding_ );
   result.min_distance = global_min_distance;
-  if ( global_min_distance != std::numeric_limits<double>::max() ) {
-    result.min_distance_pair_index = min_distance_pair;
-  }
+  result.min_distance_pair_index = global_min_distance != std::numeric_limits<double>::max()
+                                       ? min_distance_pair
+                                       : std::numeric_limits<std::size_t>::max();
+  std::size_t num_pairs = 0;
 
   // Compute per-pair distance gradients (lazy: only if pairs actually exist in safety zone)
   if ( has_safety_zone_pairs ) {
@@ -527,17 +575,76 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
 
     pinocchio::computeJointJacobians( model_, data_ );
 
+    if ( result.safety_zone_pairs.size() < safety_zone_indices.size() )
+      result.safety_zone_pairs.resize( safety_zone_indices.size() );
     for ( const std::size_t k : safety_zone_indices ) {
-      CollisionResult::PairInfo info;
+      CollisionResult::PairInfo &info = result.safety_zone_pairs[num_pairs++];
       info.pair_index = k;
       info.distance = geom_data_.distanceResults[k].min_distance;
-      info.gradient = computePairGradient( k );
-      result.safety_zone_pairs.push_back( std::move( info ) );
+      computePairGradient( k, info.gradient );
     }
   }
+  // shrinking keeps the vector's capacity
+  result.safety_zone_pairs.resize( num_pairs );
+  return result;
+}
 
-  last_collision_result_ = std::move( result );
-  return last_collision_result_;
+ClearanceResult CollisionChecker::checkClearanceQ( const Eigen::VectorXd &q, const double threshold )
+{
+  ClearanceResult unsafe;
+  unsafe.violated = true;
+  unsafe.distance = 0.0;
+  if ( model_.nq == 0 ) {
+    RCLCPP_ERROR_THROTTLE( logger_, *clock_, 2000, "Model not initialized." );
+    return unsafe;
+  }
+  if ( q.size() != model_.nq ) {
+    RCLCPP_ERROR_THROTTLE( logger_, *clock_, 2000, "q size (%ld) != model.nq (%d)", long( q.size() ),
+                           model_.nq );
+    return unsafe;
+  }
+  // Every distance comparison against a NaN is false; the check has to fail safe, not open.
+  if ( !q.allFinite() ) {
+    RCLCPP_ERROR_THROTTLE( logger_, *clock_, 2000,
+                           "Configuration is not finite. Assuming the robot is in collision." );
+    return unsafe;
+  }
+
+  // The placements below no longer belong to the configuration checkCollisionQ cached.
+  invalidateCache();
+  pinocchio::forwardKinematics( model_, data_, q );
+  pinocchio::updateGeometryPlacements( model_, data_, geom_model_, geom_data_ );
+
+  ClearanceCallback callback;
+  callback.geom_model_ptr = &geom_model_;
+  callback.geom_data_ptr = &geom_data_;
+  callback.threshold = threshold;
+  callback.init();
+  if ( use_broadphase_ && broadphase_manager_ ) {
+    broadphase_manager_->update( false ); // sync transforms from oMg, rebuild AABB tree
+    broadphase_manager_->getManager().distance( &callback );
+    return callback.result;
+  }
+
+  // Brute force: every active pair until the first violation
+  for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
+    if ( !geom_data_.activeCollisionPairs[k] )
+      continue;
+    const auto &cp = geom_model_.collisionPairs[k];
+    callback.distance_result.clear();
+    coal::distance( geom_model_.geometryObjects[cp.first].geometry.get(),
+                    pinocchio::toCoalTransform3s( geom_data_.oMg[cp.first] ),
+                    geom_model_.geometryObjects[cp.second].geometry.get(),
+                    pinocchio::toCoalTransform3s( geom_data_.oMg[cp.second] ), callback.request,
+                    callback.distance_result );
+    if ( callback.distance_result.min_distance <= threshold ) {
+      callback.result.violated = true;
+      callback.result.distance = callback.distance_result.min_distance;
+      callback.result.pair_index = k;
+      break;
+    }
+  }
+  return callback.result;
 }
 
 void CollisionChecker::updateCollisionPadding( const double collision_padding )
@@ -585,16 +692,16 @@ void CollisionChecker::setBroadphase( bool enable )
 
 bool CollisionChecker::isBroadphaseEnabled() const { return use_broadphase_; }
 
-Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
+void CollisionChecker::computePairGradient( std::size_t pair_k, Eigen::VectorXd &grad )
 {
-  Eigen::VectorXd grad = Eigen::VectorXd::Zero( model_.nv );
+  grad.setZero( model_.nv );
 
   const auto &dres = geom_data_.distanceResults[pair_k];
 
   // Validate nearest points
   if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
        !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() ) {
-    return grad; // zero gradient = no directional preference (safe fallback)
+    return; // zero gradient = no directional preference (safe fallback)
   }
 
   const auto &cp = geom_model_.collisionPairs[pair_k];
@@ -622,19 +729,19 @@ Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
   const Eigen::Vector3d diff = ( dres.min_distance < 0.0 ) ? ( p1 - p2 ).eval() : ( p2 - p1 ).eval();
   const double dist_norm = diff.norm();
   if ( dist_norm < 1e-12 ) {
-    return grad; // points coincide, gradient undefined
+    return; // points coincide, gradient undefined
   }
   const Eigen::Vector3d n = diff / dist_norm;
 
   // Point Jacobians and gradient: dd/dv = n^T * (Jp2 - Jp1)
   // where Jp = J_linear - skew(r) * J_angular
-  const Eigen::MatrixXd Jp1 =
-      J1_workspace_.topRows( 3 ) - pinocchio::skew( r1 ) * J1_workspace_.bottomRows( 3 );
-  const Eigen::MatrixXd Jp2 =
-      J2_workspace_.topRows( 3 ) - pinocchio::skew( r2 ) * J2_workspace_.bottomRows( 3 );
+  Jp1_workspace_.noalias() = J1_workspace_.topRows( 3 );
+  Jp1_workspace_.noalias() -= pinocchio::skew( r1 ) * J1_workspace_.bottomRows( 3 );
+  Jp2_workspace_.noalias() = J2_workspace_.topRows( 3 );
+  Jp2_workspace_.noalias() -= pinocchio::skew( r2 ) * J2_workspace_.bottomRows( 3 );
+  Jp2_workspace_ -= Jp1_workspace_;
 
-  grad = ( n.transpose() * ( Jp2 - Jp1 ) ).transpose();
-  return grad;
+  grad.noalias() = Jp2_workspace_.transpose() * n;
 }
 
 int CollisionChecker::getJointVelocityIndex( const std::string &joint_name ) const

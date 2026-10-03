@@ -38,6 +38,15 @@ struct CollisionResult {
   std::vector<PairInfo> safety_zone_pairs; ///< pairs with distance < safety_zone_threshold
 };
 
+/// Result of a clearance query (CollisionChecker::checkClearanceQ).
+struct ClearanceResult {
+  bool violated{ false }; ///< true if some pair is not farther apart than the threshold
+  double distance{ std::numeric_limits<double>::max() }; ///< distance of the violating pair found [m]; not
+                                                          ///< necessarily the closest pair
+  std::size_t pair_index{
+      std::numeric_limits<std::size_t>::max() }; ///< index of that pair; SIZE_MAX if none was found
+};
+
 /// Self-collision checker using Pinocchio + coal.
 class CollisionChecker
 {
@@ -100,6 +109,19 @@ public:
    * gradients); valid until the next collision query
    */
   const CollisionResult &checkCollisionQ( const Eigen::VectorXd &q );
+
+  /**
+   * @brief Whether any pair is not farther apart than @p threshold, for a yes/no question such as
+   * a motion planner's state validity check.
+   * Cheaper than checkCollisionQ: the broadphase prunes at the threshold, the scan stops at the
+   * first violating pair, and neither witness points nor gradients are computed. It leaves the
+   * per-pair results of checkCollisionQ (geometryData(), lastResult()) untouched, but moves the
+   * geometry placements, so it invalidates the cache of checkCollisionQ.
+   * @param q size == model_.nq
+   * @param threshold distance [m] a pair must exceed
+   * @return violated = true for unusable input (fail safe)
+   */
+  ClearanceResult checkClearanceQ( const Eigen::VectorXd &q, double threshold );
 
   /**
    * @brief Cap the number of safety-zone pairs returned (and gradient computations).
@@ -236,9 +258,9 @@ private:
    * @brief Compute the distance gradient for a single collision pair.
    * Requires FK + computeJointJacobians to have been called already.
    * @param pair_k index into geom_model_.collisionPairs
-   * @return gradient vector of size model_.nv
+   * @param grad output, resized to model_.nv (keeps its allocation when already that size)
    */
-  Eigen::VectorXd computePairGradient( std::size_t pair_k );
+  void computePairGradient( std::size_t pair_k, Eigen::VectorXd &grad );
 
   /**
    * @brief Keep only pairs attached to controlled joints (and ancestors).
@@ -259,6 +281,7 @@ private:
 
   // Per-cycle scratch, kept as members so the control loop does not reallocate.
   std::vector<std::size_t> safety_zone_indices_;
+  std::vector<std::size_t> visited_indices_; ///< pairs the broadphase evaluated this cycle
   std::vector<std::size_t> primaries_;
   std::vector<std::size_t> duplicates_;
   std::vector<std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex>> seen_links_;
@@ -281,6 +304,8 @@ private:
   // Pre-allocated Jacobian workspace (sized in initFromXml)
   Eigen::MatrixXd J1_workspace_; ///< 6 × nv
   Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+  Eigen::MatrixXd Jp1_workspace_; ///< 3 × nv
+  Eigen::MatrixXd Jp2_workspace_; ///< 3 × nv
 
   static constexpr pinocchio::FrameIndex kNoFrame = std::numeric_limits<pinocchio::FrameIndex>::max();
   pinocchio::FrameIndex manipulability_frame_{ kNoFrame };

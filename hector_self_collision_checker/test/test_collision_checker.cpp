@@ -977,6 +977,83 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForceAthena )
   }
 }
 
+// ---- Clearance query (yes/no at a threshold) ----
+TEST_F( CollisionCheckerTest, ClearanceQueryMatchesMinimumDistanceAthena )
+{
+  std::string athena_urdf, athena_srdf;
+  try {
+    athena_urdf = loadUrdfFile( "athena.urdf" );
+    athena_srdf = loadUrdfFile( "athena.srdf" );
+  } catch ( ... ) {
+    GTEST_SKIP() << "Athena URDF/SRDF not available";
+  }
+
+  const std::vector<std::string> arm_joints = { "arm_joint_1", "arm_joint_2", "arm_joint_3",
+                                                "arm_joint_4", "arm_joint_5", "arm_joint_6",
+                                                "arm_joint_7" };
+  auto reference = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
+  reference->setBroadphase( false );
+  ASSERT_TRUE( reference->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
+
+  for ( const bool broadphase : { true, false } ) {
+    auto checker = std::make_unique<CollisionChecker>( node_, 0.0, 0.0 );
+    checker->setBroadphase( broadphase );
+    ASSERT_TRUE( checker->initFromXml( athena_urdf, athena_srdf, arm_joints ) );
+
+    std::mt19937 rng( 91 );
+    std::uniform_real_distribution<double> dist( -M_PI, M_PI );
+    int violated = 0;
+    for ( int i = 0; i < 300; ++i ) {
+      std::unordered_map<std::string, double> positions;
+      for ( const auto &name : arm_joints ) { positions[name] = dist( rng ); }
+      const Eigen::VectorXd q = checker->buildConfiguration( positions );
+      const double min_distance = reference->checkCollisionQ( q ).min_distance;
+
+      for ( const double threshold : { 0.0, 0.012, 0.05 } ) {
+        const auto result = checker->checkClearanceQ( q, threshold );
+        EXPECT_EQ( result.violated, min_distance <= threshold )
+            << "config " << i << ", threshold " << threshold << ", broadphase " << broadphase
+            << ", min distance " << min_distance;
+        if ( result.violated ) {
+          ++violated;
+          EXPECT_LE( result.distance, threshold );
+          // penetration depths come from an iterative solver; witness points change it slightly
+          EXPECT_GE( result.distance, min_distance - 1e-5 );
+          EXPECT_LT( result.pair_index, checker->getNumCollisionPairs() );
+        }
+      }
+    }
+    EXPECT_GT( violated, 0 ) << "no colliding configuration sampled";
+  }
+}
+
+TEST_F( CollisionCheckerTest, ClearanceQueryKeepsTheLatchedResult )
+{
+  auto checker = makeChecker( 0.0, 1e-4 );
+  const std::unordered_map<std::string, double> near = {
+      { "joint1", 0.3 }, { "joint2", 0.7 }, { "joint3", -0.4 }, { "joint4", 0.2 } };
+  const std::unordered_map<std::string, double> far = {
+      { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
+
+  const CollisionResult before = checker->checkCollision( near );
+  checker->checkClearanceQ( checker->buildConfiguration( far ), 0.01 );
+  EXPECT_EQ( checker->lastResult().min_distance, before.min_distance );
+  EXPECT_EQ( checker->lastResult().min_distance_pair_index, before.min_distance_pair_index );
+
+  // the cache is invalidated: the same configuration is recomputed, with the same answer
+  const CollisionResult after = checker->checkCollision( near );
+  EXPECT_DOUBLE_EQ( after.min_distance, before.min_distance );
+}
+
+TEST_F( CollisionCheckerTest, ClearanceQueryFailsSafeOnBadInput )
+{
+  auto checker = makeChecker();
+  Eigen::VectorXd q = checker->neutralConfiguration();
+  q[0] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_TRUE( checker->checkClearanceQ( q, 0.01 ).violated );
+  EXPECT_TRUE( checker->checkClearanceQ( Eigen::VectorXd::Zero( q.size() + 1 ), 0.01 ).violated );
+}
+
 // ============================================================================
 // Safety-zone pair capping (QP support API)
 // ============================================================================
