@@ -112,7 +112,7 @@ protected:
     auto node_name = std::string( derived().controller_->get_node()->get_fully_qualified_name() );
     auto status_topic = node_name + "/status";
     derived().status_pub_mock_ =
-        rtest::findPublisher<typename Derived::StatusMsgType>( node_name, status_topic );
+        rtest::findPublisher<typename Derived::StatusMsgType>( derived().controller_->get_node(), status_topic );
     ASSERT_TRUE( derived().status_pub_mock_ ) << "Failed to find status publisher mock for node '"
                                               << node_name << "' topic '" << status_topic << "'";
     derived().findControllerSpecificMocks( node_name );

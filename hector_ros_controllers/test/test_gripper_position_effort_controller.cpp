@@ -708,7 +708,7 @@ protected:
     activateController();
 
     server_mock_ = rtest::experimental::findActionServer<ActionT>(
-        controller_->get_node()->get_fully_qualified_name(), "~/gripper_cmd" );
+        controller_->get_node(), "~/gripper_cmd" );
     ASSERT_TRUE( server_mock_ ) << "Failed to find ActionServerMock for ~/gripper_cmd";
   }
 

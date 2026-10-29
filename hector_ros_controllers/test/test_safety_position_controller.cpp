@@ -48,7 +48,7 @@ public:
   void findControllerSpecificMocks( const std::string &node_name )
   {
     bypass_service_mock_ =
-        rtest::findService<std_srvs::srv::SetBool>( node_name, "~/bypass_safety_checks" );
+        rtest::findService<std_srvs::srv::SetBool>( controller_->get_node(), "~/bypass_safety_checks" );
   }
 
   void SetUp() override { controller_ = std::make_shared<ControllerType>(); }
@@ -609,12 +609,12 @@ TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
                   { rclcpp::Parameter( "e_stop_topic", topic ) } );
 
   EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+                   controller_->get_node(),
                    topic ) != nullptr )
       << "the configured topic must be the one subscribed";
 
   EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+                   controller_->get_node(),
                    "test_safety_position/safety_estop" ) == nullptr )
       << "the default topic must not also be subscribed";
 }
@@ -627,7 +627,7 @@ TEST_F( SafetyPositionControllerTest, EstopSubscriptionKeepsTheLatchedState )
   // durability here is load bearing, not a default.
   initController();
   const auto sub = rtest::findSubscription<std_msgs::msg::Bool>(
-      controller_->get_node()->get_node_base_interface()->get_fully_qualified_name(),
+      controller_->get_node(),
       "test_safety_position/safety_estop" );
   ASSERT_TRUE( sub != nullptr );
 
@@ -1486,9 +1486,9 @@ TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
 
   const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
   EXPECT_TRUE( rtest::findSubscription<safety_position_controller::CmdType>(
-      node_name, node_name + "/commands" ) );
+      controller_->get_node(), node_name + "/commands" ) );
   EXPECT_TRUE(
-      rtest::findSubscription<std_msgs::msg::Bool>( node_name, node_name + "/safety_estop" ) );
+      rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(), node_name + "/safety_estop" ) );
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
   sendCommand( { 0.5, 0.0, 0.0 } );
