@@ -58,9 +58,7 @@ public:
 
   /// Returns true if the joint has a sync partner.
   inline bool has_partner( size_t joint_idx ) const
-  {
-    return joint_links_[joint_idx].partner != NO_PARTNER;
-  }
+  { return joint_links_[joint_idx].partner != NO_PARTNER; }
 
   /// Returns the partner joint index. Precondition: has_partner(joint_idx) is true.
   inline size_t partner( size_t joint_idx ) const { return joint_links_[joint_idx].partner; }
@@ -77,9 +75,7 @@ public:
 
   /// Check if the offset for this joint's pair is NaN (uninitialized).
   inline bool is_offset_nan( size_t joint_idx ) const
-  {
-    return std::isnan( pair_offsets_[joint_links_[joint_idx].pair_index] );
-  }
+  { return std::isnan( pair_offsets_[joint_links_[joint_idx].pair_index] ); }
 
   /**
    * \brief Set the offset from this joint's perspective.

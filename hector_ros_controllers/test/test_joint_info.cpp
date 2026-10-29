@@ -46,9 +46,7 @@ const char *kUrdf = R"(<robot name="test">
 </robot>)";
 
 spc::JointInfoParseResult parse( const std::vector<std::string> &joints )
-{
-  return spc::parse_joint_infos( kUrdf, joints, kDefaultVelocity );
-}
+{ return spc::parse_joint_infos( kUrdf, joints, kDefaultVelocity ); }
 
 bool warnsAbout( const spc::JointInfoParseResult &result, const std::string &needle )
 {

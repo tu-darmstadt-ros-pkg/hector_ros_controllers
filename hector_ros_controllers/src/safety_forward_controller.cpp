@@ -23,9 +23,7 @@ SafetyForwardController::SafetyForwardController()
 }
 
 void SafetyForwardController::declare_parameters()
-{
-  param_listener_ = std::make_shared<ParamListener>( get_node() );
-}
+{ param_listener_ = std::make_shared<ParamListener>( get_node() ); }
 
 controller_interface::CallbackReturn SafetyForwardController::read_parameters()
 {
@@ -256,9 +254,7 @@ SafetyForwardController::on_export_reference_interfaces()
 }
 
 std::vector<hardware_interface::StateInterface> SafetyForwardController::on_export_state_interfaces()
-{
-  return {};
-}
+{ return {}; }
 
 controller_interface::return_type
 SafetyForwardController::update_reference_from_subscribers( const rclcpp::Time & /*time*/,

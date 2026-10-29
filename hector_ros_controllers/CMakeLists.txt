@@ -107,8 +107,8 @@ target_link_libraries(
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 
 # fcl-config.cmake only sets FCL_LIBRARIES (uppercase), so it has to be linked
-# explicitly. Without ccd, dlopen() of this plugin fails with "undefined
-# symbol: ccd_points_on_sphere_len".
+# explicitly. Without ccd, dlopen() of this plugin fails with "undefined symbol:
+# ccd_points_on_sphere_len".
 target_link_libraries(controllers PUBLIC fcl ccd)
 target_link_libraries(
   controllers

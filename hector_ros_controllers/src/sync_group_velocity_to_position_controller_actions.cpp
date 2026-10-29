@@ -169,9 +169,7 @@ rclcpp_action::GoalResponse SyncGroupVelocityToPositionController::handle_drive_
 
 rclcpp_action::CancelResponse SyncGroupVelocityToPositionController::handle_drive_cancel(
     std::shared_ptr<DriveFlipperGroupGoalHandle> /*goal_handle*/ )
-{
-  return rclcpp_action::CancelResponse::ACCEPT;
-}
+{ return rclcpp_action::CancelResponse::ACCEPT; }
 
 void SyncGroupVelocityToPositionController::handle_drive_accepted(
     std::shared_ptr<DriveFlipperGroupGoalHandle> goal_handle )
@@ -292,9 +290,7 @@ rclcpp_action::GoalResponse SyncGroupVelocityToPositionController::handle_sync_g
 
 rclcpp_action::CancelResponse SyncGroupVelocityToPositionController::handle_sync_cancel(
     std::shared_ptr<SyncFlipperGroupGoalHandle> /*goal_handle*/ )
-{
-  return rclcpp_action::CancelResponse::ACCEPT;
-}
+{ return rclcpp_action::CancelResponse::ACCEPT; }
 
 void SyncGroupVelocityToPositionController::handle_sync_accepted(
     std::shared_ptr<SyncFlipperGroupGoalHandle> goal_handle )

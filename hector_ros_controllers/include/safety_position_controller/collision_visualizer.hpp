@@ -55,9 +55,7 @@ public:
 
   /// Change the marker rate [Hz] without dropping the publisher (0 = every call).
   void setPublishRate( double publish_rate )
-  {
-    min_period_ = publish_rate > 0.0 ? 1.0 / publish_rate : 0.0;
-  }
+  { min_period_ = publish_rate > 0.0 ? 1.0 / publish_rate : 0.0; }
 
   /// Fill in @p m's type and scale (and, for a bounding-box fallback, offset its pose)
   /// from @p go's collision geometry. Never emits a mesh resource for a primitive:
@@ -95,8 +93,8 @@ private:
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
   std::shared_ptr<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>> pub_;
   visualization_msgs::msg::MarkerArray msg_; ///< Reused between publishes to keep its capacity
-  double min_period_{ 0.0 };  ///< minimum time between publishes [s]; 0 = every call
-  rclcpp::Time last_publish_; ///< stamp of the last published array
+  double min_period_{ 0.0 };                 ///< minimum time between publishes [s]; 0 = every call
+  rclcpp::Time last_publish_;                ///< stamp of the last published array
   /// Geometry markers of the last publish; a change re-sends DELETEALL so ids that no
   /// longer exist cannot linger.
   std::size_t last_geometry_count_{ 0 };

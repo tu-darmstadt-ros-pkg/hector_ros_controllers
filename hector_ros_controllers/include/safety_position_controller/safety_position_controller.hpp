@@ -185,9 +185,7 @@ private:
 
   /// True while safety checks are bypassed.
   bool bypass_active() const
-  {
-    return safety_bypass_deadline_.load( std::memory_order_relaxed ) != 0;
-  }
+  { return safety_bypass_deadline_.load( std::memory_order_relaxed ) != 0; }
 
   /// Turn the safety bypass off. Idempotent and callable from any thread, including the
   /// control loop.

@@ -27,9 +27,7 @@ namespace dynamics_mock_hardware
 // =============================================================================
 
 double DynamicsMockHardware::clampSymmetric( double val, double limit )
-{
-  return std::clamp( val, -limit, limit );
-}
+{ return std::clamp( val, -limit, limit ); }
 
 double DynamicsMockHardware::wrapAngle( double angle )
 {

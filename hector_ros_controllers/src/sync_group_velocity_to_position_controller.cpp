@@ -28,9 +28,7 @@ SyncGroupVelocityToPositionController::SyncGroupVelocityToPositionController()
 // ---------------------------------------------------------------------------
 
 void SyncGroupVelocityToPositionController::declare_parameters()
-{
-  param_listener_ = std::make_shared<ParamListener>( get_node() );
-}
+{ param_listener_ = std::make_shared<ParamListener>( get_node() ); }
 
 controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read_parameters()
 {
@@ -520,18 +518,14 @@ SyncGroupVelocityToPositionController::update_reference_from_subscribers(
 }
 
 bool SyncGroupVelocityToPositionController::on_set_chained_mode( bool /*chained_mode*/ )
-{
-  return true;
-}
+{ return true; }
 
 // ---------------------------------------------------------------------------
 // State reading
 // ---------------------------------------------------------------------------
 
 static bool is_valid( const std::optional<double> &v_opt )
-{
-  return v_opt.has_value() && !std::isnan( v_opt.value() );
-}
+{ return v_opt.has_value() && !std::isnan( v_opt.value() ); }
 
 void SyncGroupVelocityToPositionController::update_joint_states_if_valid()
 {
@@ -811,9 +805,7 @@ void SyncGroupVelocityToPositionController::publish_debug_joint_state_out(
     return;
 
   debug_out_js_msg_.header.stamp = get_node()->now();
-  for ( size_t i = 0; i < positions.size(); i++ ) {
-    debug_out_js_msg_.position[i] = positions[i];
-  }
+  for ( size_t i = 0; i < positions.size(); i++ ) { debug_out_js_msg_.position[i] = positions[i]; }
   rt_debug_out_js_pub_->try_publish( debug_out_js_msg_ );
 }
 

@@ -543,9 +543,7 @@ void CollisionChecker::updateCollisionPadding( const double collision_padding )
 }
 
 void CollisionChecker::updateCollisionCacheEpsilon( const double epsilon )
-{
-  collision_cache_epsilon_ = epsilon;
-}
+{ collision_cache_epsilon_ = epsilon; }
 
 void CollisionChecker::setSafetyZoneThreshold( double threshold )
 {
@@ -641,9 +639,7 @@ int CollisionChecker::getJointVelocityIndex( const std::string &joint_name ) con
 int CollisionChecker::getNv() const { return model_.nv; }
 
 std::size_t CollisionChecker::getNumCollisionPairs() const
-{
-  return geom_model_.collisionPairs.size();
-}
+{ return geom_model_.collisionPairs.size(); }
 
 std::pair<std::string, std::string> CollisionChecker::getPairNames( std::size_t pair_index ) const
 {

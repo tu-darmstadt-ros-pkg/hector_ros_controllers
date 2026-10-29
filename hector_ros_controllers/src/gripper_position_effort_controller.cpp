@@ -386,22 +386,16 @@ void GripperPositionEffortController::flush_previous_goal_if_any()
 
 void GripperPositionEffortController::store_goal_slot( RealtimeGoalHandlePtr &slot,
                                                        RealtimeGoalHandlePtr handle )
-{
-  std::atomic_store( &slot, std::move( handle ) );
-}
+{ std::atomic_store( &slot, std::move( handle ) ); }
 
 GripperPositionEffortController::RealtimeGoalHandlePtr
 GripperPositionEffortController::load_goal_slot( const RealtimeGoalHandlePtr &slot )
-{
-  return std::atomic_load( &slot );
-}
+{ return std::atomic_load( &slot ); }
 
 GripperPositionEffortController::RealtimeGoalHandlePtr
 GripperPositionEffortController::exchange_goal_slot( RealtimeGoalHandlePtr &slot,
                                                      RealtimeGoalHandlePtr handle )
-{
-  return std::atomic_exchange( &slot, std::move( handle ) );
-}
+{ return std::atomic_exchange( &slot, std::move( handle ) ); }
 
 void GripperPositionEffortController::clear_pending_action_command()
 {

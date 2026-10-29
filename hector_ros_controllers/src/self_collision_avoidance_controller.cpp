@@ -465,9 +465,7 @@ void SelfCollisionAvoidanceController::set_joint_infos( const urdf::ModelInterfa
 void SelfCollisionAvoidanceController::get_dependent_links_from_joint(
     const urdf::ModelInterfaceSharedPtr &urdf, const urdf::JointConstSharedPtr &joint,
     std::vector<std::string> &dependent_links )
-{
-  get_dependent_links_from_link( urdf, urdf->getLink( joint->child_link_name ), dependent_links );
-}
+{ get_dependent_links_from_link( urdf, urdf->getLink( joint->child_link_name ), dependent_links ); }
 
 void SelfCollisionAvoidanceController::get_dependent_links_from_link(
     const urdf::ModelInterfaceSharedPtr &urdf, const urdf::LinkConstSharedPtr &link,
