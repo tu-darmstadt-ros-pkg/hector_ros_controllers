@@ -291,6 +291,7 @@ SelfCollisionAvoidanceController::on_activate( const rclcpp_lifecycle::State & /
   //  check if we have all resources defined in the "points" parameter
   //  also verify that we *only* have the resources defined in the "points" parameter
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_interfaces;
+  ordered_interfaces.reserve( command_interface_names_.size() );
   if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_names_,
                                                       std::string( "" ), ordered_interfaces ) ||
        command_interface_names_.size() != ordered_interfaces.size() ) {

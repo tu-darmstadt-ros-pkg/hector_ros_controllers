@@ -168,6 +168,7 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
 {
   // Check that we have the expected command interfaces
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>> ordered_interfaces;
+  ordered_interfaces.reserve( command_interface_types_.size() );
   if ( !controller_interface::get_ordered_interfaces( command_interfaces_, command_interface_types_,
                                                       std::string( "" ), ordered_interfaces ) ||
        command_interface_types_.size() != ordered_interfaces.size() ) {
