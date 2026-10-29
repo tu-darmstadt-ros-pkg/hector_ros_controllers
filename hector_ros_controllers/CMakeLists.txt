@@ -178,6 +178,7 @@ if(BUILD_TESTING)
     coal::coal
     fcl
     pinocchio::pinocchio
+    proxsuite::proxsuite
     ad_kinematics::ad_kinematics
     sync_group_velocity_to_position_controller_parameters
     self_collision_avoidance_controller_parameters
