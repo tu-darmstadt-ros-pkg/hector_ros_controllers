@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(hector_ros_controllers LANGUAGES CXX)
 
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+endif()
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "(GNU|Clang)")
   add_compile_options(
     -Wall
@@ -82,7 +87,7 @@ add_library(
   src/safety_position_controller/collision_visualizer.cpp
   src/gripper_position_effort_controller.cpp)
 
-target_compile_features(controllers PUBLIC cxx_std_17)
+target_compile_features(controllers PUBLIC cxx_std_20)
 
 target_include_directories(
   controllers PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -101,12 +106,26 @@ target_link_libraries(
 
 target_link_libraries(controllers PUBLIC ad_kinematics::ad_kinematics)
 
-# fcl-config.cmake only sets FCL_LIBRARIES (uppercase), so
-# ament_target_dependencies() cannot pick it up. Link the imported targets
-# explicitly - without ccd, dlopen() of this plugin fails with "undefined
+# fcl-config.cmake only sets FCL_LIBRARIES (uppercase), so it has to be linked
+# explicitly. Without ccd, dlopen() of this plugin fails with "undefined
 # symbol: ccd_points_on_sphere_len".
 target_link_libraries(controllers PUBLIC fcl ccd)
-ament_target_dependencies(controllers PUBLIC ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_link_libraries(
+  controllers
+  PUBLIC ${control_msgs_TARGETS}
+         controller_interface::controller_interface
+         hardware_interface::hardware_interface
+         ${hector_ros_controllers_msgs_TARGETS}
+         pluginlib::pluginlib
+         rclcpp::rclcpp
+         rclcpp_action::rclcpp_action
+         rclcpp_lifecycle::rclcpp_lifecycle
+         realtime_tools::realtime_tools
+         ${sensor_msgs_TARGETS}
+         srdfdom::srdfdom
+         ${std_msgs_TARGETS}
+         ${std_srvs_TARGETS}
+         ${visualization_msgs_TARGETS})
 
 target_compile_definitions(controllers PUBLIC ${DEFS})
 
@@ -155,7 +174,7 @@ if(BUILD_TESTING)
     hardware_interface::hardware_interface
     realtime_tools::realtime_tools
     pluginlib::pluginlib
-    ${srdfdom_TARGETS}
+    srdfdom::srdfdom
     coal::coal
     fcl
     pinocchio::pinocchio
@@ -210,8 +229,8 @@ if(BUILD_TESTING)
                   src/safety_position_controller/joint_info.cpp)
   target_include_directories(test_joint_info
                              PRIVATE ${PROJECT_SOURCE_DIR}/include)
-  target_link_libraries(test_joint_info ${srdfdom_TARGETS})
-  target_compile_features(test_joint_info PRIVATE cxx_std_17)
+  target_link_libraries(test_joint_info srdfdom::srdfdom)
+  target_compile_features(test_joint_info PRIVATE cxx_std_20)
 
   # Pure unit test for the safety QP (no ROS runtime, no test doubles)
   ament_add_gmock(test_safety_qp_limiter test/test_safety_qp_limiter.cpp
@@ -219,7 +238,7 @@ if(BUILD_TESTING)
   target_include_directories(test_safety_qp_limiter
                              PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_link_libraries(test_safety_qp_limiter proxsuite::proxsuite)
-  target_compile_features(test_safety_qp_limiter PRIVATE cxx_std_17)
+  target_compile_features(test_safety_qp_limiter PRIVATE cxx_std_20)
 
   # Pure unit test for the safety pipeline (no ROS runtime, no test doubles)
   ament_add_gmock(
@@ -229,7 +248,7 @@ if(BUILD_TESTING)
   target_include_directories(test_safety_pipeline
                              PRIVATE ${PROJECT_SOURCE_DIR}/include)
   target_link_libraries(test_safety_pipeline proxsuite::proxsuite)
-  target_compile_features(test_safety_pipeline PRIVATE cxx_std_17)
+  target_compile_features(test_safety_pipeline PRIVATE cxx_std_20)
 
   find_package(ament_cmake_google_benchmark REQUIRED)
   ament_add_google_benchmark(
@@ -239,7 +258,7 @@ if(BUILD_TESTING)
     target_include_directories(benchmark_safety_qp_limiter
                                PRIVATE ${PROJECT_SOURCE_DIR}/include)
     target_link_libraries(benchmark_safety_qp_limiter proxsuite::proxsuite)
-    target_compile_features(benchmark_safety_qp_limiter PRIVATE cxx_std_17)
+    target_compile_features(benchmark_safety_qp_limiter PRIVATE cxx_std_20)
   endif()
 
   ament_add_google_benchmark(benchmark_collision_checker

@@ -751,8 +751,8 @@ void SyncGroupVelocityToPositionController::update_debug_publishers( bool enable
               get_node()->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states",
                                                                           10 ) );
       // Pre-allocate message fields once
-      rt_debug_in_js_pub_->msg_.name = joints_;
-      rt_debug_in_js_pub_->msg_.velocity.resize( joints_.size(), 0.0 );
+      debug_in_js_msg_.name = joints_;
+      debug_in_js_msg_.velocity.resize( joints_.size(), 0.0 );
     }
     if ( !rt_debug_out_js_pub_ ) {
       rt_debug_out_js_pub_ =
@@ -760,8 +760,8 @@ void SyncGroupVelocityToPositionController::update_debug_publishers( bool enable
               get_node()->create_publisher<sensor_msgs::msg::JointState>(
                   "~/debug_out_joint_states", 10 ) );
       // Pre-allocate message fields once
-      rt_debug_out_js_pub_->msg_.name = joints_;
-      rt_debug_out_js_pub_->msg_.position.resize( joints_.size(), 0.0 );
+      debug_out_js_msg_.name = joints_;
+      debug_out_js_msg_.position.resize( joints_.size(), 0.0 );
     }
     if ( !rt_sync_status_pub_ ) {
       rt_sync_status_pub_ =
@@ -769,7 +769,7 @@ void SyncGroupVelocityToPositionController::update_debug_publishers( bool enable
               get_node()->create_publisher<hector_ros_controllers_msgs::msg::SyncStatus>(
                   "~/sync_status", 10 ) );
       // Pre-allocate message fields once
-      auto &msg = rt_sync_status_pub_->msg_;
+      auto &msg = sync_status_msg_;
       msg.joint_names = joints_;
       msg.vel_command_in.resize( joints_.size(), 0.0 );
       msg.vel_command_out.resize( joints_.size(), 0.0 );
@@ -792,14 +792,14 @@ void SyncGroupVelocityToPositionController::publish_debug_joint_state_in()
 {
   if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
     return;
-  if ( !rt_debug_in_js_pub_->trylock() )
+  if ( !rt_debug_in_js_pub_->can_publish() )
     return;
 
-  rt_debug_in_js_pub_->msg_.header.stamp = get_node()->now();
+  debug_in_js_msg_.header.stamp = get_node()->now();
   for ( size_t i = 0; i < joints_.size(); i++ ) {
-    rt_debug_in_js_pub_->msg_.velocity[i] = reference_interfaces_[i];
+    debug_in_js_msg_.velocity[i] = reference_interfaces_[i];
   }
-  rt_debug_in_js_pub_->unlockAndPublish();
+  rt_debug_in_js_pub_->try_publish( debug_in_js_msg_ );
 }
 
 void SyncGroupVelocityToPositionController::publish_debug_joint_state_out(
@@ -807,14 +807,14 @@ void SyncGroupVelocityToPositionController::publish_debug_joint_state_out(
 {
   if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
     return;
-  if ( !rt_debug_out_js_pub_->trylock() )
+  if ( !rt_debug_out_js_pub_->can_publish() )
     return;
 
-  rt_debug_out_js_pub_->msg_.header.stamp = get_node()->now();
+  debug_out_js_msg_.header.stamp = get_node()->now();
   for ( size_t i = 0; i < positions.size(); i++ ) {
-    rt_debug_out_js_pub_->msg_.position[i] = positions[i];
+    debug_out_js_msg_.position[i] = positions[i];
   }
-  rt_debug_out_js_pub_->unlockAndPublish();
+  rt_debug_out_js_pub_->try_publish( debug_out_js_msg_ );
 }
 
 void SyncGroupVelocityToPositionController::publish_sync_status(
@@ -822,10 +822,10 @@ void SyncGroupVelocityToPositionController::publish_sync_status(
 {
   if ( !debug_pubs_enabled_.load( std::memory_order_acquire ) )
     return;
-  if ( !rt_sync_status_pub_->trylock() )
+  if ( !rt_sync_status_pub_->can_publish() )
     return;
 
-  auto &msg = rt_sync_status_pub_->msg_;
+  auto &msg = sync_status_msg_;
   msg.header.stamp = get_node()->now();
 
   for ( size_t i = 0; i < joints_.size(); ++i ) {
@@ -842,7 +842,7 @@ void SyncGroupVelocityToPositionController::publish_sync_status(
     }
   }
 
-  rt_sync_status_pub_->unlockAndPublish();
+  rt_sync_status_pub_->try_publish( msg );
 }
 
 // ---------------------------------------------------------------------------

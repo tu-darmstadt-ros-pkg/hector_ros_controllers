@@ -1,9 +1,9 @@
 name: Lint, Build & Test
 on:
   push:
-    branches: [jazzy]
+    branches: [lyrical]
   pull_request:
-    branches: [jazzy]
+    branches: [lyrical]
 defaults:
   run:
     shell: bash
@@ -29,8 +29,8 @@ jobs:
     strategy:
       matrix:
         setup:
-        - rosdistro: jazzy
-          os: ubuntu-24.04
+        - rosdistro: lyrical
+          os: ubuntu-26.04
     runs-on: ${{ matrix.setup.os }}
     container:
       image: ros:${{ matrix.setup.rosdistro }}-ros-base

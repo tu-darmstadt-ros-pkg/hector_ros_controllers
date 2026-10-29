@@ -362,12 +362,12 @@ void CollisionVisualizer::publish( const CollisionChecker &checker, const Level 
       return;
     }
   }
-  if ( !pub_->trylock() ) {
-    return; // a subscriber is still reading the previous message; skip this cycle
+  if ( !pub_->can_publish() ) {
+    return; // the previous message is still being published; skip this cycle
   }
   last_publish_ = stamp;
 
-  auto &array = pub_->msg_;
+  auto &array = msg_;
   array.markers.clear();
 
   // DELETEALL only when the marker set can have shrunk. Sending it every cycle makes
@@ -390,7 +390,7 @@ void CollisionVisualizer::publish( const CollisionChecker &checker, const Level 
   }
   appendDistanceLines( checker, level, directional, safety_zone_threshold, array, stamp );
 
-  pub_->unlockAndPublish();
+  pub_->try_publish( msg_ );
 }
 
 } // namespace safety_position_controller

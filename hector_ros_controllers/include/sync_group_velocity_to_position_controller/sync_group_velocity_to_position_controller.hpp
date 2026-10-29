@@ -202,6 +202,10 @@ private:
   realtime_tools::RealtimePublisherSharedPtr<sensor_msgs::msg::JointState> rt_debug_in_js_pub_;
   realtime_tools::RealtimePublisherSharedPtr<sensor_msgs::msg::JointState> rt_debug_out_js_pub_;
   realtime_tools::RealtimePublisherSharedPtr<hector_ros_controllers_msgs::msg::SyncStatus> rt_sync_status_pub_;
+  // Messages are pre-allocated once and reused so the RT loop does not allocate.
+  sensor_msgs::msg::JointState debug_in_js_msg_;
+  sensor_msgs::msg::JointState debug_out_js_msg_;
+  hector_ros_controllers_msgs::msg::SyncStatus sync_status_msg_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_debug_pubs_;
 
   // Velocity command timeout

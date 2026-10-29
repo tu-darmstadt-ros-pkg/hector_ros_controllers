@@ -94,6 +94,7 @@ private:
 
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
   std::shared_ptr<realtime_tools::RealtimePublisher<visualization_msgs::msg::MarkerArray>> pub_;
+  visualization_msgs::msg::MarkerArray msg_; ///< Reused between publishes to keep its capacity
   double min_period_{ 0.0 };  ///< minimum time between publishes [s]; 0 = every call
   rclcpp::Time last_publish_; ///< stamp of the last published array
   /// Geometry markers of the last publish; a change re-sends DELETEALL so ids that no

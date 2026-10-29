@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(dynamics_mock_hardware LANGUAGES CXX)
 
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+endif()
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "(GNU|Clang)")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -15,16 +20,19 @@ endforeach()
 
 add_library(${PROJECT_NAME} SHARED src/dynamics_mock_hardware.cpp)
 
-target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
+target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
 
 target_include_directories(
   ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                          $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
 
-target_link_libraries(${PROJECT_NAME} PUBLIC pinocchio::pinocchio)
-
-ament_target_dependencies(${PROJECT_NAME} PUBLIC
-                          ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_link_libraries(
+  ${PROJECT_NAME}
+  PUBLIC hardware_interface::hardware_interface
+         pinocchio::pinocchio
+         pluginlib::pluginlib
+         rclcpp::rclcpp
+         rclcpp_lifecycle::rclcpp_lifecycle)
 
 target_compile_definitions(
   ${PROJECT_NAME} PUBLIC PINOCCHIO_URDFDOM_TYPEDEF_SHARED_PTR
@@ -56,9 +64,8 @@ if(BUILD_TESTING)
 
   ament_add_gmock(test_dynamics_mock_hardware
                   test/test_dynamics_mock_hardware.cpp)
-  target_link_libraries(test_dynamics_mock_hardware ${PROJECT_NAME})
-  ament_target_dependencies(test_dynamics_mock_hardware hardware_interface
-                            lifecycle_msgs rclcpp rclcpp_lifecycle)
+  target_link_libraries(
+    test_dynamics_mock_hardware ${PROJECT_NAME} ${lifecycle_msgs_TARGETS})
   target_compile_definitions(
     test_dynamics_mock_hardware PRIVATE PINOCCHIO_URDFDOM_TYPEDEF_SHARED_PTR
                                         PINOCCHIO_URDFDOM_USE_STD_SHARED_PTR)

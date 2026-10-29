@@ -576,9 +576,9 @@ GripperPositionEffortController::update( const rclcpp::Time &time, const rclcpp:
   if ( rt_is_grasped_pub_ ) {
     if ( last_is_grasped_publish_time_.nanoseconds() == 0 ||
          ( time - last_is_grasped_publish_time_ ) >= action_monitor_period_ ) {
-      if ( rt_is_grasped_pub_->trylock() ) {
-        rt_is_grasped_pub_->msg_.data = is_grasped_;
-        rt_is_grasped_pub_->unlockAndPublish();
+      std_msgs::msg::Bool msg;
+      msg.data = is_grasped_;
+      if ( rt_is_grasped_pub_->try_publish( msg ) ) {
         last_is_grasped_publish_time_ = time;
       }
     }
