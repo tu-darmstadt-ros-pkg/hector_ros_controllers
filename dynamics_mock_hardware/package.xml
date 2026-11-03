@@ -18,6 +18,7 @@
   <depend>rclcpp_lifecycle</depend>
 
   <exec_depend>controller_manager</exec_depend>
+  <exec_depend>hector_controller_manager</exec_depend>
   <exec_depend>hector_controller_spawner</exec_depend>
   <exec_depend>hector_gamepad_manager</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
