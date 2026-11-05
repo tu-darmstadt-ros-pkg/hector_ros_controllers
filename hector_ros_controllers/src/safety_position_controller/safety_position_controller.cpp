@@ -213,13 +213,13 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
+  // Nobody is supervising a controller that is only now starting, so it starts guarded
+  // whatever was in effect before. First, so no failing check below can skip it.
+  clear_bypass();
   // a target from before the deactivation must never be resumed on activation
   if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
     return controller_interface::CallbackReturn::ERROR;
   }
-  // Nobody is supervising a controller that is only now starting, so it starts guarded
-  // whatever was in effect before. First, so no failing check below can skip it.
-  clear_bypass();
   // Compliant mode is granted the same way and must not be inherited either: a
   // controller that comes back compliant holds with the lower current ceiling, which is
   // how an arm sags or drops what it was carrying.
