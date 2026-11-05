@@ -707,8 +707,8 @@ protected:
     setupHardwareInterfaces();
     activateController();
 
-    server_mock_ = rtest::experimental::findActionServer<ActionT>(
-        controller_->get_node(), "~/gripper_cmd" );
+    server_mock_ =
+        rtest::experimental::findActionServer<ActionT>( controller_->get_node(), "~/gripper_cmd" );
     ASSERT_TRUE( server_mock_ ) << "Failed to find ActionServerMock for ~/gripper_cmd";
   }
 
