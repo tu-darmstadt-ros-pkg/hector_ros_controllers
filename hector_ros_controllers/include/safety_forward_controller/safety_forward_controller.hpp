@@ -56,9 +56,8 @@ protected:
   controller_interface::return_type
   update_and_write_commands( const rclcpp::Time &time, const rclcpp::Duration &period ) override;
 
-  std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
-
-  std::vector<hardware_interface::StateInterface> on_export_state_interfaces() override;
+  std::vector<hardware_interface::CommandInterface::SharedPtr>
+  on_export_reference_interfaces_list() override;
 
   void record_hold_positions();
   void publish_status();

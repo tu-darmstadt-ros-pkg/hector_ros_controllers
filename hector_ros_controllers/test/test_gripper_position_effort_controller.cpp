@@ -25,6 +25,9 @@
 #include <controller_interface/controller_interface_params.hpp>
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
+
+#include "handle_values.hpp"
 
 using GripperController = gripper_position_effort_controller::GripperPositionEffortController;
 
@@ -55,8 +58,8 @@ protected:
   std::shared_ptr<GripperController> controller_;
 
   // Backing storage: cmd[0]=position, cmd[1]=effort; state[0]=position, state[1]=velocity, state[2]=effort
-  std::vector<double> hw_cmd_values_;
-  std::vector<double> hw_state_values_;
+  hector_test::HandleValues hw_cmd_values_;
+  hector_test::HandleValues hw_state_values_;
   std::vector<std::shared_ptr<hardware_interface::CommandInterface>> cmd_ifaces_;
   std::vector<std::shared_ptr<hardware_interface::StateInterface>> state_ifaces_;
 
@@ -114,19 +117,11 @@ protected:
     cmd_ifaces_.clear();
     state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        joint_name_, "position", &hw_cmd_values_[0] ) );
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        joint_name_, "effort", &hw_cmd_values_[1] ) );
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        joint_name_, "position", &hw_state_values_[0] ) );
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        joint_name_, "velocity", &hw_state_values_[1] ) );
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        joint_name_, "effort", &hw_state_values_[2] ) );
-#pragma GCC diagnostic pop
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( 0, joint_name_, "position" ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( 1, joint_name_, "effort" ) );
+    state_ifaces_.push_back( hw_state_values_.make_state( 0, joint_name_, "position" ) );
+    state_ifaces_.push_back( hw_state_values_.make_state( 1, joint_name_, "velocity" ) );
+    state_ifaces_.push_back( hw_state_values_.make_state( 2, joint_name_, "effort" ) );
 
     controller_->command_interfaces_.clear();
     controller_->state_interfaces_.clear();
@@ -276,17 +271,10 @@ TEST_F( GripperPositionEffortControllerTest, DisabledModeWritesPositionOnly )
   hw_state_values_.assign( 3, 0.0 );
   cmd_ifaces_.clear();
   state_ifaces_.clear();
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-      joint_name_, "position", &hw_cmd_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "position", &hw_state_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "velocity", &hw_state_values_[1] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "effort", &hw_state_values_[2] ) );
-#pragma GCC diagnostic pop
+  cmd_ifaces_.push_back( hw_cmd_values_.make_command( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 1, joint_name_, "velocity" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 2, joint_name_, "effort" ) );
   controller_->command_interfaces_.clear();
   controller_->state_interfaces_.clear();
   for ( auto &ci : cmd_ifaces_ ) controller_->command_interfaces_.emplace_back( ci, []() { } );
@@ -310,17 +298,10 @@ TEST_F( GripperPositionEffortControllerTest, RequiredModeFailsActivateWhenEffort
   hw_state_values_.assign( 3, 0.0 );
   cmd_ifaces_.clear();
   state_ifaces_.clear();
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-      joint_name_, "position", &hw_cmd_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "position", &hw_state_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "velocity", &hw_state_values_[1] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "effort", &hw_state_values_[2] ) );
-#pragma GCC diagnostic pop
+  cmd_ifaces_.push_back( hw_cmd_values_.make_command( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 1, joint_name_, "velocity" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 2, joint_name_, "effort" ) );
   controller_->command_interfaces_.clear();
   controller_->state_interfaces_.clear();
   for ( auto &ci : cmd_ifaces_ ) controller_->command_interfaces_.emplace_back( ci, []() { } );

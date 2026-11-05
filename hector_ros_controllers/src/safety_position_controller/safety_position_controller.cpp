@@ -9,6 +9,7 @@
 #include <hardware_interface/loaned_state_interface.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 
+#include <hector_ros_controllers/reference_handles.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 namespace safety_position_controller
@@ -22,8 +23,7 @@ SafetyPositionController::SafetyPositionController()
 bool SafetyPositionController::on_set_chained_mode( const bool )
 {
   // switching the reference source must not resume a stale target
-  for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
-  return true;
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
 }
 
 controller_interface::CallbackReturn SafetyPositionController::on_init()
@@ -186,7 +186,7 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   }
 
   const size_t n = params_.joints.size();
-  reference_interfaces_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  reference_values_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   joint_index_.assign( n, -1 );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   hold_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
@@ -214,7 +214,9 @@ controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
   // a target from before the deactivation must never be resumed on activation
-  for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
+  if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
+    return controller_interface::CallbackReturn::ERROR;
+  }
   // Nobody is supervising a controller that is only now starting, so it starts guarded
   // whatever was in effect before. First, so no failing check below can skip it.
   clear_bypass();
@@ -381,18 +383,19 @@ SafetyPositionController::state_interface_configuration() const
   return conf;
 }
 
-std::vector<hardware_interface::CommandInterface>
-SafetyPositionController::on_export_reference_interfaces()
+std::vector<hardware_interface::CommandInterface::SharedPtr>
+SafetyPositionController::on_export_reference_interfaces_list()
 {
   const size_t n = params_.joints.size();
-  std::vector<hardware_interface::CommandInterface> refs;
+  std::vector<hardware_interface::CommandInterface::SharedPtr> refs;
   refs.reserve( n );
 
   const std::string controller_name = get_node()->get_name();
 
   for ( size_t i = 0; i < n; ++i ) {
     const std::string resource_name = controller_name + "/" + params_.joints[i];
-    refs.emplace_back( resource_name, hardware_interface::HW_IF_POSITION, &reference_interfaces_[i] );
+    refs.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        resource_name, hardware_interface::HW_IF_POSITION ) );
   }
   return refs;
 }
@@ -409,7 +412,7 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
   // Non-chained mode: read from RT buffer
   const auto cmd = rt_command_ptr_.readFromRT();
   if ( !cmd || !( *cmd ) ) {
-    // no new command → keep previous reference_interfaces_
+    // no new command → keep the previous references
     return controller_interface::return_type::OK;
   }
 
@@ -426,17 +429,23 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
     return controller_interface::return_type::OK;
   }
 
-  for ( size_t i = 0; i < n_expected; ++i ) { reference_interfaces_[i] = data[i]; }
-
-  return controller_interface::return_type::OK;
+  bool written = true;
+  for ( size_t i = 0; i < n_expected; ++i ) {
+    written &= ordered_exported_reference_interfaces_[i]->set_value( data[i] );
+  }
+  return written ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
 }
 
 controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
                                                      const rclcpp::Duration &period )
 {
+  if ( !hector_ros_controllers::read_references( ordered_exported_reference_interfaces_,
+                                                 reference_values_ ) ) {
+    return controller_interface::return_type::ERROR;
+  }
   // Debug: incoming joint states
-  diagnostics_->publishJointStateIn( reference_interfaces_ );
+  diagnostics_->publishJointStateIn( reference_values_ );
 
   // The bypass lapses on its own so an unattended one cannot last: enforced here rather
   // than by a timer, which would mean an unsynchronised handle shared with the control
@@ -694,7 +703,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
       !bypass_active && params_.check_self_collisions && collision_checker_ != nullptr;
 
   bool status_event = false;
-  if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active ) ) {
+  if ( pipeline_->prepare( reference_values_, current_positions_, bypass_active ) ) {
     RCLCPP_INFO( get_node()->get_logger(), "New reference received — resuming from parked state." );
     status_event = true;
   }
@@ -777,7 +786,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
                                     params_.collision_safety_zone );
   }
 
-  diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );
+  diagnostics_->maybePublishQpDebug( *pipeline_, reference_values_ );
   return status_event;
 }
 

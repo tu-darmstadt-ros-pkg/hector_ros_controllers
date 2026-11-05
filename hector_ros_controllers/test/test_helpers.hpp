@@ -25,7 +25,10 @@
 #include <controller_interface/controller_interface_params.hpp>
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
 #include <rtest/static_registry.hpp>
+
+#include "handle_values.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
@@ -71,8 +74,8 @@ protected:
   static constexpr unsigned int kUpdateRate = 100;
 
   // Hardware interface backing storage
-  std::vector<double> hw_cmd_values_;
-  std::vector<double> hw_state_values_;
+  hector_test::HandleValues hw_cmd_values_;
+  hector_test::HandleValues hw_state_values_;
   std::vector<std::shared_ptr<hardware_interface::CommandInterface>> cmd_ifaces_;
   std::vector<std::shared_ptr<hardware_interface::StateInterface>> state_ifaces_;
 

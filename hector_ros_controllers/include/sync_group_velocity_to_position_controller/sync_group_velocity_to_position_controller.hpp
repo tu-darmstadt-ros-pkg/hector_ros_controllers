@@ -99,7 +99,8 @@ public:
   bool on_set_chained_mode( bool chained_mode ) override;
 
 protected:
-  std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
+  std::vector<hardware_interface::CommandInterface::SharedPtr>
+  on_export_reference_interfaces_list() override;
 
   controller_interface::return_type
   update_reference_from_subscribers( const rclcpp::Time &time,
@@ -144,6 +145,7 @@ private:
   // Position tracking
   std::vector<double> desired_positions_;
   std::vector<double> hold_positions_;
+  std::vector<double> reference_values_; ///< references of this cycle, read once from the handles
 
   // State machine
   std::vector<MoveState> move_states_;

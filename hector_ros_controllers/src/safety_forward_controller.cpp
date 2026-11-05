@@ -233,14 +233,11 @@ SafetyForwardController::on_deactivate( const rclcpp_lifecycle::State & /*previo
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-std::vector<hardware_interface::CommandInterface>
-SafetyForwardController::on_export_reference_interfaces()
+std::vector<hardware_interface::CommandInterface::SharedPtr>
+SafetyForwardController::on_export_reference_interfaces_list()
 {
-  std::vector<hardware_interface::CommandInterface> refs;
+  std::vector<hardware_interface::CommandInterface::SharedPtr> refs;
   refs.reserve( joints_.size() );
-
-  // One reference per joint.
-  reference_interfaces_.assign( joints_.size(), 0.0 );
 
   const std::string controller_name = get_node()->get_name(); // e.g. "flipper_velocity_controller"
 
@@ -248,44 +245,45 @@ SafetyForwardController::on_export_reference_interfaces()
     // Resource name must start with controller name
     const std::string resource_name = controller_name + "/" + joints_[i];
     // Interface type is the same as the hardware command interface ("position"/"velocity"/"effort")
-    refs.emplace_back( resource_name, interface_type_, &reference_interfaces_[i] );
+    refs.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        resource_name, interface_type_, "double", "0.0" ) );
   }
 
   return refs;
 }
-
-std::vector<hardware_interface::StateInterface> SafetyForwardController::on_export_state_interfaces()
-{ return {}; }
 
 controller_interface::return_type
 SafetyForwardController::update_reference_from_subscribers( const rclcpp::Time & /*time*/,
                                                             const rclcpp::Duration & /*period*/ )
 {
   // In chained mode, references come from preceding controller,
-  // so we DON'T touch reference_interfaces_ here.
+  // so we DON'T touch the references here.
   if ( is_in_chained_mode() ) {
     return controller_interface::return_type::OK;
   }
 
   const auto joint_commands = rt_command_ptr_.readFromRT();
   if ( !joint_commands || !( *joint_commands ) ) {
-    // No new command message → keep previous reference_interfaces_ values
+    // No new command message → keep previous references
     return controller_interface::return_type::OK;
   }
 
   const auto &data = ( *joint_commands )->data;
 
-  if ( data.size() < reference_interfaces_.size() ) {
+  const auto &references = ordered_exported_reference_interfaces_;
+  if ( data.size() < references.size() ) {
     RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
                            "Received command of size %zu, but controller expects %zu", data.size(),
-                           reference_interfaces_.size() );
+                           references.size() );
     // Use only the available part
   }
 
-  const std::size_t n = std::min( reference_interfaces_.size(), data.size() );
-  for ( std::size_t i = 0; i < n; ++i ) { reference_interfaces_[i] = data[i]; }
+  bool successful = true;
+  const std::size_t n = std::min( references.size(), data.size() );
+  for ( std::size_t i = 0; i < n; ++i ) { successful &= references[i]->set_value( data[i] ); }
 
-  return controller_interface::return_type::OK;
+  return successful ? controller_interface::return_type::OK
+                    : controller_interface::return_type::ERROR;
 }
 
 static std::size_t find_joint_index( const std::vector<std::string> &joints, const std::string &name )
@@ -359,8 +357,12 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming command output" );
       publish_status();
       // on e-stop release, invalidate commands once
-      for ( auto &ref : reference_interfaces_ ) ref = std::numeric_limits<double>::quiet_NaN();
-      return controller_interface::return_type::OK;
+      bool invalidated = true;
+      for ( const auto &ref : ordered_exported_reference_interfaces_ ) {
+        invalidated &= ref->set_value( std::numeric_limits<double>::quiet_NaN() );
+      }
+      return invalidated ? controller_interface::return_type::OK
+                         : controller_interface::return_type::ERROR;
     }
   }
 
@@ -384,15 +386,20 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
       command_value = 0.0;
     } else {
       // --- NORMAL OPERATION ---
-      if ( index >= reference_interfaces_.size() ) {
+      if ( index >= ordered_exported_reference_interfaces_.size() ) {
         RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
-                               "reference_interfaces_ too small (index %zu, size %zu)", index,
-                               reference_interfaces_.size() );
+                               "too few reference interfaces (index %zu, size %zu)", index,
+                               ordered_exported_reference_interfaces_.size() );
         successful = false;
         continue;
       }
 
-      command_value = reference_interfaces_[index];
+      const auto reference = ordered_exported_reference_interfaces_[index]->get_optional();
+      if ( !reference ) {
+        successful = false;
+        continue;
+      }
+      command_value = *reference;
 
       const auto &limits = joint_limits_[index];
       if ( limits ) {

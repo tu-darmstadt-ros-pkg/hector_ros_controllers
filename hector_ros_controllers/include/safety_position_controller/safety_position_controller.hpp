@@ -99,9 +99,10 @@ public:
 
   /**
    * @brief Export per-joint reference interfaces (position) for chaining.
-   * @return vector of CommandInterface referencing internal reference buffers
+   * @return the reference interfaces, which own their values
    */
-  std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
+  std::vector<hardware_interface::CommandInterface::SharedPtr>
+  on_export_reference_interfaces_list() override;
 
   /**
    * @brief Fill the reference interfaces when NOT in chained mode.
@@ -267,6 +268,7 @@ private:
 
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> current_positions_; ///< latest measured positions
+  std::vector<double> reference_values_;  ///< references of this cycle, read once from the handles
   std::vector<double> hold_positions_;    ///< positions to hold during E-stop
   /// Latest measured positions of ALL joints (aligned with all_joint_names_), read once
   /// per cycle so the pipeline and the collision check see the same robot.
