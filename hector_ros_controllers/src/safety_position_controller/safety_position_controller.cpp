@@ -43,10 +43,12 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // Get SRDF: prefer parameter, fall back to topic subscription
-  if ( get_node()->has_parameter( "robot_description_semantic" ) ) {
-    srdf_ = get_node()->get_parameter( "robot_description_semantic" ).as_string();
+  // Get SRDF: prefer parameter, fall back to topic subscription. Declared, because the
+  // controller manager passes it as a parameter override, which only a declared parameter sees.
+  if ( !get_node()->has_parameter( "robot_description_semantic" ) ) {
+    get_node()->declare_parameter<std::string>( "robot_description_semantic", "" );
   }
+  srdf_ = get_node()->get_parameter( "robot_description_semantic" ).as_string();
   if ( !srdf_.empty() ) {
     srdf_received_ = true;
     RCLCPP_INFO( get_node()->get_logger(), "Loaded robot_description_semantic from parameter." );

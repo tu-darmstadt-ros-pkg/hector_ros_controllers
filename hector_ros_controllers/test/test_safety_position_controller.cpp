@@ -1433,6 +1433,16 @@ TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
       << "a busy command handle must not fail the update";
 }
 
+TEST_F( SafetyPositionControllerTest, SemanticDescriptionComesFromTheParameterOverride )
+{
+  const std::string srdf = "<robot name=\"test_robot\"/>";
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "robot_description_semantic", srdf ) } );
+  EXPECT_TRUE( controller_->srdf_received_ ) << "the controller manager passes the SRDF as an "
+                                                "override, which only a declared parameter sees";
+  EXPECT_EQ( controller_->srdf_, srdf );
+}
+
 TEST_F( SafetyPositionControllerTest, BusyReferenceHandleDoesNotFailTheCycle )
 {
   initController();

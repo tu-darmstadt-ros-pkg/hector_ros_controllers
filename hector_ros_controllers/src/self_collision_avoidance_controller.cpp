@@ -208,12 +208,13 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
 
   transformTree_ = std::make_shared<ad_kinematics::Tree>( urdf );
 
-  // Get SRDF: prefer parameter, fall back to topic subscription
+  // Get SRDF: prefer parameter, fall back to topic subscription. Declared, because the
+  // controller manager passes it as a parameter override, which only a declared parameter sees.
   srdf_received_ = false;
-  std::string srdf_xml;
-  if ( get_node()->has_parameter( "robot_description_semantic" ) ) {
-    srdf_xml = get_node()->get_parameter( "robot_description_semantic" ).as_string();
+  if ( !get_node()->has_parameter( "robot_description_semantic" ) ) {
+    get_node()->declare_parameter<std::string>( "robot_description_semantic", "" );
   }
+  const std::string srdf_xml = get_node()->get_parameter( "robot_description_semantic" ).as_string();
   if ( !srdf_xml.empty() ) {
     srdf_ = srdf::Model();
     srdf_.initString( *urdf, srdf_xml );
