@@ -556,6 +556,26 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, NaNReferenceSkipsWriting )
   EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 99.0 );
 }
 
+TEST_F( SyncGroupVelocityToPositionControllerTest, BusyReferenceHandleKeepsLastCyclesValue )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 2 ) = std::numeric_limits<double>::quiet_NaN();
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  hw_cmd_values_[0] = 99.0;
+
+  std::unique_lock<std::shared_mutex> busy(
+      controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+  EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+      << "a busy reference handle must not fail the update";
+  EXPECT_NE( hw_cmd_values_[0], 99.0 ) << "last cycle's velocity still drives the joint";
+}
+
 // ============================================================================
 // Repeated Activation/Deactivation Cycle Tests
 // ============================================================================

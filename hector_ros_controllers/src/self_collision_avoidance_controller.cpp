@@ -81,10 +81,10 @@ controller_interface::return_type SelfCollisionAvoidanceController::update_refer
           references.size() );
       return controller_interface::return_type::ERROR;
     }
-    bool written = true;
-    for ( size_t i = 0; i < data.size(); ++i ) { written &= references[i]->set_value( data[i] ); }
-    if ( !written ) {
-      return controller_interface::return_type::ERROR;
+    if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                            "%zu reference interfaces were busy; they keep their previous value",
+                            busy );
     }
   }
 
@@ -383,9 +383,11 @@ controller_interface::return_type
 SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time & /*time*/,
                                                              const rclcpp::Duration &p )
 {
-  if ( !hector_ros_controllers::read_references( ordered_exported_reference_interfaces_,
-                                                 reference_values_ ) ) {
-    return controller_interface::return_type::ERROR;
+  if ( const auto busy = hector_ros_controllers::read_references(
+           ordered_exported_reference_interfaces_, reference_values_ );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                          "%zu reference interfaces were busy; using their last value", busy );
   }
   // Apply joint updates read from state interfaces
   update_joint_angles();

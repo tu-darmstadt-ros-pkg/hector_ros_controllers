@@ -554,8 +554,13 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
     // them and an old velocity reference does not resume once the action ends
     for ( size_t idx : group_joint_indices ) {
       reference_values_[idx] = std::numeric_limits<double>::quiet_NaN();
-      all_successful &= ordered_exported_reference_interfaces_[idx]->set_value(
-          std::numeric_limits<double>::quiet_NaN() );
+      if ( !ordered_exported_reference_interfaces_[idx]->set_value(
+               std::numeric_limits<double>::quiet_NaN() ) ) {
+        RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+            "Reference of joint '%s' was busy and keeps its value until written again",
+            joints_[idx].c_str() );
+      }
     }
 
     group_last_rt_state_[g] = next_rt_state;

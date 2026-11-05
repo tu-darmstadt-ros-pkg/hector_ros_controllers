@@ -1433,6 +1433,32 @@ TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
       << "a busy command handle must not fail the update";
 }
 
+TEST_F( SafetyPositionControllerTest, BusyReferenceHandleDoesNotFailTheCycle )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  followCommands();
+  const double before = hw_cmd_values_[0];
+
+  {
+    std::unique_lock<std::shared_mutex> busy(
+        controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+    EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+        << "a busy reference handle must not fail the update";
+  }
+  EXPECT_GT( hw_cmd_values_[0], before ) << "the joint keeps moving to last cycle's target";
+}
+
 // ============================================================================
 // Chained Mode Tests
 // ============================================================================

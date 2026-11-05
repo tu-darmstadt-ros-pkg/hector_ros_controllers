@@ -429,20 +429,26 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
     return controller_interface::return_type::OK;
   }
 
-  bool written = true;
-  for ( size_t i = 0; i < n_expected; ++i ) {
-    written &= ordered_exported_reference_interfaces_[i]->set_value( data[i] );
+  if ( const auto busy =
+           hector_ros_controllers::write_references( ordered_exported_reference_interfaces_, data );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                          "%zu reference interfaces were busy; they keep their previous target",
+                          busy );
   }
-  return written ? controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+  return controller_interface::return_type::OK;
 }
 
 controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
                                                      const rclcpp::Duration &period )
 {
-  if ( !hector_ros_controllers::read_references( ordered_exported_reference_interfaces_,
-                                                 reference_values_ ) ) {
-    return controller_interface::return_type::ERROR;
+  // A busy reference keeps last cycle's target, like a busy state or command handle never fails
+  if ( const auto busy = hector_ros_controllers::read_references(
+           ordered_exported_reference_interfaces_, reference_values_ );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                          "%zu reference interfaces were busy; keeping their last target", busy );
   }
   // Debug: incoming joint states
   diagnostics_->publishJointStateIn( reference_values_ );

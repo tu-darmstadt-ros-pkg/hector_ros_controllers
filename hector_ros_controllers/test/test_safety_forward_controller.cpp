@@ -428,6 +428,55 @@ TEST_F( SafetyForwardControllerTest, UnchainedCommandBecomesTheReference )
   EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.2 );
 }
 
+TEST_F( SafetyForwardControllerTest, BusyReferenceHandleKeepsLastCyclesValue )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  controller_->on_set_chained_mode( true );
+
+  hector_test::reference( *controller_, 0 ) = 0.7;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  hw_cmd_values_[0] = 99.0;
+
+  std::unique_lock<std::shared_mutex> busy(
+      controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+  EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+      << "a busy reference handle must not fail the update";
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.7 );
+}
+
+TEST_F( SafetyForwardControllerTest, BusyReferenceHandleTakesTheCommandOnceFree )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  auto msg = std::make_shared<safety_forward_controller::CmdType>();
+  msg->data = { 0.4, -0.2, 0.0 };
+  controller_->rt_command_ptr_.writeFromNonRT( msg );
+  rclcpp::Time now( 0, 0, RCL_ROS_TIME );
+  rclcpp::Duration period( std::chrono::milliseconds( 10 ) );
+  {
+    std::unique_lock<std::shared_mutex> busy(
+        controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+    EXPECT_EQ( controller_->update_reference_from_subscribers( now, period ),
+               controller_interface::return_type::OK )
+        << "a busy reference handle must not fail the update";
+  }
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 1 ), -0.2 );
+
+  ASSERT_EQ( controller_->update_reference_from_subscribers( now, period ),
+             controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.4 );
+}
+
 // ============================================================================
 // Status Publishing
 // ============================================================================

@@ -85,6 +85,7 @@ protected:
   std::atomic<bool> estop_active_{ false };  // latest request (callback thread)
   std::atomic<bool> estop_engaged_{ false }; // actually applied in update() thread
   std::vector<double> hold_positions_;       // latched positions when e-stop engages
+  std::vector<double> reference_values_;     // references of this cycle, read once from the handles
 
   // External command input (non-chained mode)
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;

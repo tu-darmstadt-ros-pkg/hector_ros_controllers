@@ -1,4 +1,5 @@
 #include "safety_forward_controller/safety_forward_controller.hpp"
+#include "hector_ros_controllers/reference_handles.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -248,6 +249,7 @@ SafetyForwardController::on_export_reference_interfaces_list()
     refs.push_back( std::make_shared<hardware_interface::CommandInterface>(
         resource_name, interface_type_, "double", "0.0" ) );
   }
+  reference_values_.assign( refs.size(), 0.0 );
 
   return refs;
 }
@@ -278,12 +280,12 @@ SafetyForwardController::update_reference_from_subscribers( const rclcpp::Time &
     // Use only the available part
   }
 
-  bool successful = true;
-  const std::size_t n = std::min( references.size(), data.size() );
-  for ( std::size_t i = 0; i < n; ++i ) { successful &= references[i]->set_value( data[i] ); }
-
-  return successful ? controller_interface::return_type::OK
-                    : controller_interface::return_type::ERROR;
+  if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
+                          "%zu reference interfaces were busy; they keep their previous value",
+                          busy );
+  }
+  return controller_interface::return_type::OK;
 }
 
 static std::size_t find_joint_index( const std::vector<std::string> &joints, const std::string &name )
@@ -331,6 +333,12 @@ controller_interface::return_type
 SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*/,
                                                     const rclcpp::Duration & /*period*/ )
 {
+  if ( const auto busy = hector_ros_controllers::read_references(
+           ordered_exported_reference_interfaces_, reference_values_ );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
+                          "%zu reference interfaces were busy; using their last value", busy );
+  }
   const bool estop_active = estop_active_.load();
   bool estop_engaged = estop_engaged_.load();
 
@@ -357,12 +365,17 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
       RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming command output" );
       publish_status();
       // on e-stop release, invalidate commands once
-      bool invalidated = true;
-      for ( const auto &ref : ordered_exported_reference_interfaces_ ) {
-        invalidated &= ref->set_value( std::numeric_limits<double>::quiet_NaN() );
+      std::fill( reference_values_.begin(), reference_values_.end(),
+                 std::numeric_limits<double>::quiet_NaN() );
+      if ( const auto busy = hector_ros_controllers::write_references(
+               ordered_exported_reference_interfaces_, reference_values_ );
+           busy > 0 ) {
+        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
+                              "%zu reference interfaces were busy and keep their command after the "
+                              "e-stop release",
+                              busy );
       }
-      return invalidated ? controller_interface::return_type::OK
-                         : controller_interface::return_type::ERROR;
+      return controller_interface::return_type::OK;
     }
   }
 
@@ -386,20 +399,15 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
       command_value = 0.0;
     } else {
       // --- NORMAL OPERATION ---
-      if ( index >= ordered_exported_reference_interfaces_.size() ) {
+      if ( index >= reference_values_.size() ) {
         RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
                                "too few reference interfaces (index %zu, size %zu)", index,
-                               ordered_exported_reference_interfaces_.size() );
+                               reference_values_.size() );
         successful = false;
         continue;
       }
 
-      const auto reference = ordered_exported_reference_interfaces_[index]->get_optional();
-      if ( !reference ) {
-        successful = false;
-        continue;
-      }
-      command_value = *reference;
+      command_value = reference_values_[index];
 
       const auto &limits = joint_limits_[index];
       if ( limits ) {
