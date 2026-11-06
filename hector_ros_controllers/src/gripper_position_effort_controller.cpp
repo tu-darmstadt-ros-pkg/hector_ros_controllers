@@ -312,8 +312,7 @@ GripperPositionEffortController::cancel_callback( std::shared_ptr<GoalHandle> go
   clear_pending_action_command();
   auto res = std::make_shared<GripperCommandAction::Result>();
   active_goal->setCanceled( res );
-  // Non-RT executor thread: flush synchronously so canceled status reaches the client.
-  active_goal->runNonRealtime();
+  // rclcpp_action marks the goal canceling only after this returns, so the goal timer delivers it
   clear_active_goal();
   return rclcpp_action::CancelResponse::ACCEPT;
 }

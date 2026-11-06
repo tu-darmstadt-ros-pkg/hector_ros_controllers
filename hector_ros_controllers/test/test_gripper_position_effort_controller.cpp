@@ -782,21 +782,33 @@ TEST_F( GripperPositionEffortLifecycleTest, CancelBeforeUpdateDoesNotMoveGripper
   EXPECT_NEAR( cmdEffort(), 1.0, 1e-9 );
 }
 
-// Bug 3 regression: a terminal goal state must actually be delivered to the action client.
-// cancel_callback runs on a non-RT thread and synchronously flushes the realtime wrapper
-// before clearing the active goal, so gh.canceled() must have been called by the time
-// cancel_callback returns.
+// rclcpp_action moves a goal to canceling only after cancel_callback returns, and canceled() is
+// valid only from there. The goal timer delivers the result on its next tick.
 TEST_F( GripperPositionEffortLifecycleTest, CancelDeliversCanceledToClient )
 {
   initAndActivateWithActionServer();
 
-  auto gh = acceptGoal( 0.5, 2.0, []( testing::NiceMock<GoalHandleMock> &mock ) {
-    EXPECT_CALL( mock, canceled( testing::_ ) ).Times( 1 );
+  auto canceling = std::make_shared<std::atomic<bool>>( false );
+  auto gh = acceptGoal( 0.5, 2.0, [canceling]( testing::NiceMock<GoalHandleMock> &mock ) {
+    ON_CALL( mock, is_canceling() ).WillByDefault( testing::Invoke( [canceling]() {
+      return canceling->load();
+    } ) );
+    ON_CALL( mock, is_executing() ).WillByDefault( testing::Invoke( [canceling]() {
+      return !canceling->load();
+    } ) );
+    EXPECT_CALL( mock, canceled( testing::_ ) ).Times( 0 );
   } );
 
   cancelGoal( gh );
   EXPECT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) )
       << "Active goal must be cleared after cancel";
+  testing::Mock::VerifyAndClearExpectations( gh.get() );
+
+  canceling->store( true );
+  EXPECT_CALL( *gh, canceled( testing::_ ) ).Times( 1 );
+  auto prev = std::atomic_load( &controller_->previous_rt_goal_ );
+  ASSERT_TRUE( prev ) << "the canceled goal waits for the goal timer";
+  prev->runNonRealtime();
 }
 
 // Bug 3 regression for the success path: check_for_success runs in RT and only sets the
