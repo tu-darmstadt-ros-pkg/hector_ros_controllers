@@ -4,7 +4,8 @@ Mock hardware interface that supports position, velocity, effort (torque) contro
 
 A joint that declares `<command_interface name="torque_off"/>` goes limp while a controller claims
 that interface (for example `claim_only_controller/ClaimOnlyController`), as a Dynamixel joint does.
-When the claim ends the joint holds where it was left.
+When the claim ends alone the joint stays limp. Torque comes back when a motion command interface
+of the joint starts, holding where the joint was left.
 
 - [dynamics_mock_hardware](#dynamics_mock_hardware)
 
