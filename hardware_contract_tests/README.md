@@ -1,15 +1,22 @@
 # hardware_contract_tests
 
 A gtest suite that checks a ros2_control hardware plugin against what `hector_controller_manager`
-relies on (rulebook 2.1 and the torque_off decisions):
+relies on. These rows of the plugin contract (rulebook 2.1) and the torque_off decisions are
+checked:
 
-- a NaN position command holds where the joint is;
 - a stop alone holds a moving joint, and a start alone takes commands;
+- a NaN position command stops a moving joint within its braking distance (0.1 rad) and holds it
+  there, and a NaN velocity command stops it within 0.05 rad;
+- `on_error` returns SUCCESS, and the component recovers through configure and activate with no
+  claim left;
 - a `torque_off` claim alone leaves the joint limp, it is refused next to a motion interface of
   the same joint, a stop alone keeps the joint limp, and a motion start energises it where it was
   left;
-- deactivation stops a moving joint, activation holds it, and after `on_error` the component
-  recovers through configure and activate with no claim left.
+- deactivation stops a moving joint, and activation holds it. A plant that moves only in `write()`
+  stands still while inactive, so on the dynamics mock only the activation half can fail.
+
+The suite does not check a started interface that never gets a command, the timing rows, or
+`write()` returning ERROR, which is a demand on hcm.
 
 The suite drives one component directly from the test's thread, one call at a time, as hcm does.
 

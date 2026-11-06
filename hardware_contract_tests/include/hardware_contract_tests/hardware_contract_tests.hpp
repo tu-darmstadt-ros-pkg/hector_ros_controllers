@@ -151,6 +151,22 @@ TYPED_TEST_P( HardwareContract, ANaNPositionCommandHoldsWhereTheJointIs )
   this->expectHeldAt( held, "after the NaN" );
 }
 
+TYPED_TEST_P( HardwareContract, ANaNVelocityCommandStopsTheJoint )
+{
+  const double start = this->position();
+  this->perform( { this->interface( "velocity" ) }, {} );
+  this->command( "velocity", 0.5 );
+  this->cycles( 25 );
+  const double at_nan = this->position();
+  ASSERT_GT( std::abs( at_nan - start ), 0.05 ) << "the joint was not moving";
+  this->command( "velocity", this->kNaN );
+  this->cycles( 10 );
+  const double stopped = this->position();
+  EXPECT_NEAR( stopped, at_nan, 0.05 ) << "the joint did not brake at the NaN";
+  this->cycles( 25 );
+  EXPECT_NEAR( this->position(), stopped, 0.01 ) << "the joint kept its last velocity";
+}
+
 TYPED_TEST_P( HardwareContract, AStopAloneHoldsAMovingJoint )
 {
   const double start = this->position();
@@ -222,6 +238,7 @@ TYPED_TEST_P( HardwareContract, AMotionStartInALaterSwitchEnergisesWhereTheJoint
   this->expectHeldAt( left, "after the later start" );
 }
 
+// Only a plant that moves without write() can fail the stop half, the dynamics mock cannot
 TYPED_TEST_P( HardwareContract, DeactivationStopsAMovingJointAndActivationHoldsIt )
 {
   this->perform( { this->interface( "velocity" ) }, {} );
@@ -260,8 +277,8 @@ TYPED_TEST_P( HardwareContract, AfterAFaultTheRecoveredJointHoldsAndTakesAMotion
 }
 
 REGISTER_TYPED_TEST_SUITE_P( HardwareContract, ANaNPositionCommandHoldsWhereTheJointIs,
-                             AStopAloneHoldsAMovingJoint, AStartAloneTakesCommands,
-                             TorqueOffAloneGoesLimp,
+                             ANaNVelocityCommandStopsTheJoint, AStopAloneHoldsAMovingJoint,
+                             AStartAloneTakesCommands, TorqueOffAloneGoesLimp,
                              TorqueOffIsRefusedNextToAMotionInterfaceOfTheSameJoint,
                              AStoppedTorqueOffStaysLimp,
                              AMotionStartInTheSameSwitchEnergisesWhereTheJointWasLeft,
