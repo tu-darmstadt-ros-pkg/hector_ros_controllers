@@ -258,6 +258,44 @@ TEST_F( SafetyForwardControllerTest, SubscribesToNoEstop )
   EXPECT_TRUE( controller_->state_interface_configuration().names.empty() );
 }
 
+// No reference is a target: the hardware holds until one arrives, on activation and after a switch
+TEST_F( SafetyForwardControllerTest, ReferencesStartInvalidOnActivation )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+    EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) ) << "exported as 0.0";
+  }
+  activateController();
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  ASSERT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
+
+  deactivateController();
+  activateController();
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( std::isnan( hw_cmd_values_[0] ) ) << "a re-activation resumed the old reference";
+}
+
+TEST_F( SafetyForwardControllerTest, ChainedModeSwitchInvalidatesReferences )
+{
+  initController( "velocity" );
+  configureController();
+  for ( const bool chained : { true, false } ) {
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      hector_test::reference( *controller_, i ) = 0.5;
+    }
+    ASSERT_TRUE( controller_->on_set_chained_mode( chained ) );
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) )
+          << ( chained ? "chained" : "unchained" ) << " mode kept reference " << i;
+    }
+  }
+}
+
 // ============================================================================
 // Safety Timer Tests
 // ============================================================================

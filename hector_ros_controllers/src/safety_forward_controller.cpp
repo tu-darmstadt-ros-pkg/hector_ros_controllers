@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -168,6 +169,11 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
 
   // Reset command buffer if a command came through callback when controller was inactive
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
+  // No target until a new command arrives, so the hardware holds instead of resuming an old one
+  if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Could not reset the reference interfaces" );
+    return controller_interface::CallbackReturn::ERROR;
+  }
 
   safety_engaged_.store( false );
   if ( safety_timer_ ) {
@@ -220,10 +226,10 @@ SafetyForwardController::on_export_reference_interfaces_list()
     // Resource name must start with controller name
     const std::string resource_name = controller_name + "/" + joints_[i];
     // Interface type is the same as the hardware command interface ("position"/"velocity"/"effort")
-    refs.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        resource_name, interface_type_, "double", "0.0" ) );
+    refs.push_back(
+        std::make_shared<hardware_interface::CommandInterface>( resource_name, interface_type_ ) );
   }
-  reference_values_.assign( refs.size(), 0.0 );
+  reference_values_.assign( refs.size(), std::numeric_limits<double>::quiet_NaN() );
 
   return refs;
 }
@@ -272,7 +278,8 @@ bool SafetyForwardController::on_set_chained_mode( const bool chained_mode )
     RCLCPP_INFO( get_node()->get_logger(), "Switched to UNCHAINED mode" );
     rt_command_ptr_.reset();
   }
-  return true;
+  // The previous source's last reference must not outlive the switch
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
 }
 
 controller_interface::return_type
