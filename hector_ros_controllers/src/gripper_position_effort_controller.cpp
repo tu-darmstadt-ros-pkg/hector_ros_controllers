@@ -215,10 +215,9 @@ GripperPositionEffortController::on_activate( const rclcpp_lifecycle::State & )
   velocity_state_interface_ = *vel_state_it;
   effort_state_interface_ = *eff_state_it;
 
-  // Initialise target to current position so the actuator does not jump on activation. A busy
-  // handle leaves no target, and nothing is written until a command arrives.
-  target_.position = position_state_interface_->get().get_optional().value_or(
-      std::numeric_limits<double>::quiet_NaN() );
+  // No target until a command arrives: the hardware keeps its goal, so a held grasp stays held.
+  // The measured position as a goal would release it.
+  target_.position = std::numeric_limits<double>::quiet_NaN();
   target_.max_effort = params_.default_max_effort;
 
   // Reset action / topic state
@@ -518,7 +517,9 @@ GripperPositionEffortController::update( const rclcpp::Time &time, const rclcpp:
   }
 
   // ----- Write commands -----
-  if ( !std::isfinite( target_.position ) || !std::isfinite( target_.max_effort ) ) {
+  if ( std::isnan( target_.position ) ) {
+    // No target yet, nothing to write
+  } else if ( !std::isfinite( target_.position ) || !std::isfinite( target_.max_effort ) ) {
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
                           "Refusing to write non-finite command (pos=%f, eff=%f)", target_.position,
                           target_.max_effort );

@@ -313,19 +313,26 @@ TEST_F( GripperPositionEffortControllerTest, RequiredModeFailsActivateWhenEffort
   EXPECT_EQ( controller_->on_activate( inactive ), controller_interface::CallbackReturn::ERROR );
 }
 
-TEST_F( GripperPositionEffortControllerTest, ActivateInitialisesTargetToCurrentPosition )
+// The hardware's goal may be a grasp: current-based position squeezing beyond the object. Writing
+// the measured position as the goal would release it, so activation commands nothing.
+TEST_F( GripperPositionEffortControllerTest, ActivationKeepsTheHardwaresGoal )
 {
   initController();
   configureController();
   setupHardwareInterfaces();
   setPosition( 0.3 );
+  hw_cmd_values_[0] = 0.25;
+  hw_cmd_values_[1] = 0.7;
 
   activateController();
-
-  // First update should hold at 0.3 with default_max_effort
   callUpdate( 0.0 );
-  EXPECT_DOUBLE_EQ( cmdPos(), 0.3 );
-  EXPECT_DOUBLE_EQ( cmdEffort(), 1.0 ); // default_max_effort
+  callUpdate( 0.01 );
+  EXPECT_DOUBLE_EQ( cmdPos(), 0.25 ) << "activation overwrote the goal";
+  EXPECT_DOUBLE_EQ( cmdEffort(), 0.7 ) << "activation overwrote the current limit";
+
+  injectPositionCommand( 0.4 );
+  callUpdate( 0.02 );
+  EXPECT_DOUBLE_EQ( cmdPos(), 0.4 );
 }
 
 // A position state locked by another thread at activation is no reason to drive to 0
@@ -647,18 +654,21 @@ TEST_F( GripperPositionEffortControllerTest, IsGraspedRequiresEffortAboveThresho
 // Hold position when no goal received
 // ============================================================================
 
-TEST_F( GripperPositionEffortControllerTest, HoldsPositionWithoutAnyCommand )
+// Without any command the hardware holds its own goal
+TEST_F( GripperPositionEffortControllerTest, WritesNothingWithoutAnyCommand )
 {
   initController();
   configureController();
   setupHardwareInterfaces();
   setPosition( 0.42 );
+  hw_cmd_values_[0] = 0.4;
+  hw_cmd_values_[1] = 0.6;
   activateController();
 
   for ( int i = 0; i < 10; ++i ) {
     callUpdate( i * kPeriodSec );
-    EXPECT_NEAR( cmdPos(), 0.42, 1e-9 );
-    EXPECT_NEAR( cmdEffort(), 1.0, 1e-9 ); // default_max_effort
+    EXPECT_DOUBLE_EQ( cmdPos(), 0.4 );
+    EXPECT_DOUBLE_EQ( cmdEffort(), 0.6 );
   }
 }
 
