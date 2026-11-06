@@ -18,6 +18,7 @@
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <safety_forward_controller/safety_forward_controller.hpp>
 #include <safety_position_controller/safety_position_controller.hpp>
+#include <self_collision_avoidance_controller/self_collision_avoidance_controller.hpp>
 #include <sync_group_velocity_to_position_controller/sync_group_velocity_to_position_controller.hpp>
 #undef protected
 #undef private

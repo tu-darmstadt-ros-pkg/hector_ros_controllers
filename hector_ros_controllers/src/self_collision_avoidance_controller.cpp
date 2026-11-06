@@ -191,8 +191,6 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
   reference_values_.assign( reference_interface_names_.size(),
                             std::numeric_limits<double>::quiet_NaN() );
 
-  prev_command_vals_ = std::vector<double>( reference_interface_names_.size() );
-
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -310,6 +308,9 @@ SelfCollisionAvoidanceController::on_activate( const rclcpp_lifecycle::State & /
 
   // reset command buffer if a command came through callback when controller was inactive
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
+  // A block before this activation's first valid command holds instead of replaying an old one
+  prev_command_vals_.assign( command_interface_names_.size(),
+                             std::numeric_limits<double>::quiet_NaN() );
 
   RCLCPP_INFO( this->get_node()->get_logger(), "activate successful" );
 
