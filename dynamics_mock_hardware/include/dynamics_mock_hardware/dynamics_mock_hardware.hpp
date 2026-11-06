@@ -46,6 +46,8 @@ struct JointData {
   bool wrap_position{ false };
 
   ControlMode control_mode{ ControlMode::POSITION };
+  // TORQUE_OFF outlives the claim, a released joint stays limp until a motion command starts
+  bool torque_off_claimed{ false };
   /// Position held while the position command is NaN, latched at the first NaN.
   double nan_hold_position{ std::numeric_limits<double>::quiet_NaN() };
 

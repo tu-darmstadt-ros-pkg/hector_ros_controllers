@@ -571,7 +571,9 @@ std::string withTorqueOff( std::string block )
   return block;
 }
 
-TEST_F( DynamicsMockHardwareTest, TorqueOffGoesLimpAndHoldsOnRelease )
+// A released torque_off stays limp, as a hold after a fault releases it, and a motion start brings
+// the torque back holding where the joint was left
+TEST_F( DynamicsMockHardwareTest, TorqueOffGoesLimpAndHoldsOnlyWithAMotionStart )
 {
   const std::string urdf =
       std::string( URDF_HEAD ) +
@@ -596,8 +598,14 @@ TEST_F( DynamicsMockHardwareTest, TorqueOffGoesLimpAndHoldsOnRelease )
 
   ASSERT_TRUE( rm.prepare_command_mode_switch( {}, { "joint1/torque_off" } ) );
   ASSERT_TRUE( rm.perform_command_mode_switch( {}, { "joint1/torque_off" } ) );
+  run_cycles( rm, 30 );
+  const double restarted_at = pos_s.get_optional().value();
+  EXPECT_LT( restarted_at, released_at - 0.1 ) << "releasing torque_off alone brought torque back";
+
+  ASSERT_TRUE( rm.prepare_command_mode_switch( { "joint1/position" }, {} ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/position" }, {} ) );
   run_cycles( rm, 200 );
-  EXPECT_NEAR( pos_s.get_optional().value(), released_at, 0.1 )
+  EXPECT_NEAR( pos_s.get_optional().value(), restarted_at, 0.1 )
       << "torque came back driving to the goal from before the torque off";
 }
 

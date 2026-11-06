@@ -440,6 +440,7 @@ CallbackReturn DynamicsMockHardware::on_configure( const rclcpp_lifecycle::State
 
     jd.accumulated_angle = get_state( pos_if );
     jd.control_mode = ControlMode::POSITION;
+    jd.torque_off_claimed = false;
   }
 
   // Initialize mimic joint states
@@ -476,8 +477,11 @@ CallbackReturn DynamicsMockHardware::on_activate( const rclcpp_lifecycle::State 
     RCLCPP_ERROR( get_logger(), "Cannot activate: the power is cut." );
     return CallbackReturn::FAILURE;
   }
-  // Seed command interfaces from current states to prevent an initial jump.
-  for ( const auto &jd : joints_ ) {
+  // Seed command interfaces from current states to prevent an initial jump. Activation energises
+  // every joint, also one left limp by a released torque_off.
+  for ( auto &jd : joints_ ) {
+    if ( !jd.torque_off_claimed )
+      jd.control_mode = ControlMode::POSITION;
     const auto &n = jd.name;
     if ( has_command( n + "/" + hardware_interface::HW_IF_POSITION ) )
       set_command( n + "/" + hardware_interface::HW_IF_POSITION,
@@ -530,9 +534,8 @@ DynamicsMockHardware::prepare_command_mode_switch( const std::vector<std::string
 
   for ( const auto &jd : joints_ ) {
     const std::string torque_off = jd.name + "/" + TORQUE_OFF_INTERFACE;
-    if ( jd.control_mode == ControlMode::TORQUE_OFF &&
-         std::find( stop_interfaces.begin(), stop_interfaces.end(), torque_off ) ==
-             stop_interfaces.end() ) {
+    if ( jd.torque_off_claimed && std::find( stop_interfaces.begin(), stop_interfaces.end(),
+                                             torque_off ) == stop_interfaces.end() ) {
       joint_start_count[jd.name]++;
     }
   }
@@ -564,11 +567,13 @@ return_type
 DynamicsMockHardware::perform_command_mode_switch( const std::vector<std::string> &start_interfaces,
                                                    const std::vector<std::string> &stop_interfaces )
 {
-  // A joint whose interface stops without a successor holds where it is, and torque comes back
-  // holding where the joint was left
+  // A joint whose motion interface stops without a successor holds where it is. A released
+  // torque_off stays limp, and a motion start brings torque back holding where the joint was left.
   for ( const auto &key : stop_interfaces ) {
     for ( auto &jd : joints_ ) {
-      if ( key.rfind( jd.name + "/", 0 ) == 0 ) {
+      if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
+        jd.torque_off_claimed = false;
+      } else if ( key.rfind( jd.name + "/", 0 ) == 0 ) {
         jd.control_mode = ControlMode::POSITION;
         const std::string position = jd.name + "/" + hardware_interface::HW_IF_POSITION;
         if ( has_command( position ) )
@@ -591,6 +596,7 @@ DynamicsMockHardware::perform_command_mode_switch( const std::vector<std::string
         jd.control_mode = ControlMode::EFFORT;
       } else if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
         jd.control_mode = ControlMode::TORQUE_OFF;
+        jd.torque_off_claimed = true;
       }
     }
   }
