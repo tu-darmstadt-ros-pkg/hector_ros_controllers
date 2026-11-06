@@ -138,6 +138,12 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 {
   const auto node = get_node();
 
+  // The pipeline integrates with 1 / rate
+  if ( get_update_rate() == 0 ) {
+    RCLCPP_ERROR( node->get_logger(), "An update rate of 0 Hz leaves no control period." );
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
   if ( params_.joints.empty() ) {
     RCLCPP_ERROR( node->get_logger(), "'joints' parameter must not be empty." );
     return controller_interface::CallbackReturn::ERROR;

@@ -1083,6 +1083,24 @@ TEST_F( SafetyPositionControllerTest, SwitchingChainedModeInvalidatesReferences 
   }
 }
 
+TEST_F( SafetyPositionControllerTest, AZeroUpdateRateRefusesConfiguration )
+{
+  controller_interface::ControllerInterfaceParams params;
+  params.controller_name = "test_safety_position";
+  params.robot_description = hector_test::loadUrdfFile( "test_robot.urdf" );
+  params.update_rate = 0;
+  params.controller_manager_update_rate = 0;
+  rclcpp::NodeOptions opts;
+  opts.parameter_overrides( { rclcpp::Parameter( "joints", controlled_joints_ ),
+                              rclcpp::Parameter( "check_self_collisions", false ) } );
+  params.node_options = opts;
+  ASSERT_EQ( controller_->init( params ), controller_interface::return_type::OK );
+  ASSERT_EQ( controller_->get_update_rate(), 0u );
+  controller_->srdf_received_ = true;
+  EXPECT_EQ( controller_->on_configure( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR );
+}
+
 // The controller manager owns the e-stop and stops this controller on it
 TEST_F( SafetyPositionControllerTest, SubscribesToNoEstop )
 {
