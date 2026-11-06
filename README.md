@@ -1,5 +1,11 @@
 # Hector Ros Controllers
 
+> **Requires hector_controller_manager with e-stop topics.** On this branch the controllers and the
+> hardware interface have no e-stop of their own: `hector_controller_manager` stops them on a hard
+> or soft e-stop. Run it with both e-stop topics configured (`estop_topics`, hard and soft). Under
+> the stock `ros2_control` controller manager nothing stops them on an e-stop. Do not deploy this
+> branch with athena's current launch before it moves to hcm (team 5 phase L1).
+
 A set of ROS 2 controllers focused on **safety**, **self-collision avoidance**, **safe position command handling**, and **gripper control with effort limiting**.
 All controllers are compatible with **ros2_control**; most can be inserted as **chain controllers** (the gripper action controller is a terminal endpoint).
 
