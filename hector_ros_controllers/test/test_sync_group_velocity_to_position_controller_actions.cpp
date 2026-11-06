@@ -71,7 +71,6 @@ protected:
         rclcpp::Parameter( "kd", 0.1 ),
         rclcpp::Parameter( "kp_sync", 1.0 ),
         rclcpp::Parameter( "passthrough_controller", std::string( "" ) ),
-        rclcpp::Parameter( "e_stop_topic", std::string( "estop_board/hard_estop" ) ),
         rclcpp::Parameter( "synchronous_groups", sync_groups ),
         // Keep profiles short so the monitor thread sees COMPLETED quickly.
         rclcpp::Parameter( "max_velocity", 5.0 ),

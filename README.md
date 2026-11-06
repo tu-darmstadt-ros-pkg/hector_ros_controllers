@@ -215,8 +215,8 @@ Converts **velocity references** into **position commands** for joint hardware. 
     * Goals are **rejected** if any target group is already executing another goal. If acceptance succeeds but a later group fails to start (e.g. invalid joint state), already-started groups are rolled back so the failed goal result accurately reflects no in-flight motion.
 * **URDF position limit clamping:**
     * Position commands are clamped to URDF joint limits for revolute/prismatic joints. Continuous joints are unclamped.
-* **E-Stop support:**
-    * Subscribes to an E-Stop topic and tracks the latest state. The freeze-on-engage logic in the update loop is currently disabled (TODO); the subscription remains so downstream consumers can read the state.
+* **E-Stop:**
+    * The controller manager owns the e-stop: it stops this controller, and the hardware holds.
 * **Chainable controller:**
     * Can receive velocity references from an upstream controller or from a `~/commands` topic.
 * **Debug joint state publishers:**
@@ -250,7 +250,6 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | **max_deceleration**            | `double`       | `4.0`                    | Maximum deceleration in rad/s². Used for braking profiles when velocity commands go to zero. Higher than max_acceleration for faster stopping.  |
 | **synchronous_groups**          | `string_array` | `[]`                     | Group names per joint for synchronization (empty = no sync).                                                                                    |
 | **passthrough_controller**      | `string`       | `""`                     | Prefix for the lower-level controller exposing command interfaces.                                                                              |
-| **e_stop_topic**                | `string`       | `estop_board/hard_estop` | Topic for emergency stop messages (`std_msgs/Bool`).                                                                                            |
 | **velocity_command_timeout**    | `double`       | `0.0`                    | Timeout in seconds. If no non-zero velocity command arrives within this duration, references are zeroed. 0 disables.                            |
 | **upright_position**            | `double`       | `1.517`                  | Default target position for the drive flipper group action (rad).                                                                               |
 | **publish_debug_joint_states**  | `bool`         | `false`                  | If `true`, publishes `~/debug_in_joint_states` (velocity refs) and `~/debug_out_joint_states` (position cmds) as `sensor_msgs/JointState`.     |
@@ -260,7 +259,6 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | Topic                      | Type                     | Description                                                            |
 |----------------------------|--------------------------|------------------------------------------------------------------------|
 | `~/commands`               | `Float64MultiArray`      | Velocity commands (not used in chained mode).                          |
-| E-Stop topic               | `Bool`                   | Engages (`true`) or releases (`false`) the e-stop.                     |
 | `~/debug_in_joint_states`  | `sensor_msgs/JointState` | Incoming velocity references (only when `publish_debug_joint_states`). |
 | `~/debug_out_joint_states` | `sensor_msgs/JointState` | Outgoing position commands (only when `publish_debug_joint_states`).   |
 | `~/sync_status`            | `hector_ros_controllers_msgs/SyncStatus` | Per-joint input/output velocities and desired/current sync offsets (only when `publish_debug_joint_states`). |

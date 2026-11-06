@@ -13,7 +13,6 @@ sync_group_velocity_to_position_controller:
 
   # --- Safety ---------------------------------------------------------------
   # Hard e-stop subscription. While true, all joints freeze in place.
-  e_stop_topic: {type: string, default_value: estop_board/hard_estop, description: Topic for hard e-stop (std_msgs/Bool). When true all joints are stopped.}
 
   # Zero reference interfaces if no non-zero command is received for this many
   # seconds. 0 disables (rely on upstream SafetyForwardController instead).

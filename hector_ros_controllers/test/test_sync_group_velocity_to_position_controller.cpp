@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <std_msgs/msg/bool.hpp>
+
 using VelToPosController =
     sync_group_velocity_to_position_controller::SyncGroupVelocityToPositionController;
 using MoveState = sync_group_velocity_to_position_controller::MoveState;
@@ -54,7 +56,6 @@ protected:
         rclcpp::Parameter( "kp_sync", 1.0 ),
         rclcpp::Parameter( "stopping_velocity_threshold", 0.005 ),
         rclcpp::Parameter( "passthrough_controller", passthrough ),
-        rclcpp::Parameter( "e_stop_topic", std::string( "estop_board/hard_estop" ) ),
     };
     if ( !sync_groups.empty() ) {
       overrides.emplace_back( "synchronous_groups", sync_groups );
@@ -174,7 +175,6 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OnConfigureFailsEmptyJoints )
   opts.parameter_overrides( {
       rclcpp::Parameter( "joints", std::vector<std::string>{} ),
       rclcpp::Parameter( "passthrough_controller", std::string( "" ) ),
-      rclcpp::Parameter( "e_stop_topic", std::string( "estop" ) ),
       rclcpp::Parameter( "synchronous_groups", std::vector<std::string>{} ),
   } );
   params.node_options = opts;
@@ -491,39 +491,17 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, HoldPositionUsesDesiredNotAct
   EXPECT_DOUBLE_EQ( controller_->hold_positions_[0], controller_->desired_positions_[0] );
 }
 
-// ============================================================================
-// E-Stop Tests
-// ============================================================================
-
-// Verify e-stop freezes all joints in STOPPED state with positions reset
-// TODO: e-stop logic is currently disabled, re-enable when e-stop is fixed
-TEST_F( SyncGroupVelocityToPositionControllerTest, DISABLED_EStopHoldsAndResets )
+// The controller manager owns the e-stop and stops this controller on it
+TEST_F( SyncGroupVelocityToPositionControllerTest, SubscribesToNoEstop )
 {
   initController();
   configureController();
   setupHardwareInterfaces();
-
-  setPosition( 0, 0.5 );
-  setPosition( 1, -0.3 );
-  setPosition( 2, 1.0 );
   activateController();
 
-  // Start moving
-  hector_test::reference( *controller_, 0 ) = 1.0;
-  hector_test::reference( *controller_, 1 ) = 1.0;
-  hector_test::reference( *controller_, 2 ) = 1.0;
-  callUpdate();
-
-  // Engage e-stop
-  controller_->e_stop_active_.writeFromNonRT( true );
-  callUpdate();
-
-  // All joints should be STOPPED with hold positions = current positions
-  for ( size_t i = 0; i < joints_.size(); i++ ) {
-    EXPECT_EQ( controller_->move_states_[i], MoveState::STOPPED );
-    EXPECT_DOUBLE_EQ( controller_->hold_positions_[i], controller_->joint_position_states_[i] );
-    EXPECT_DOUBLE_EQ( controller_->desired_positions_[i], controller_->joint_position_states_[i] );
-  }
+  EXPECT_FALSE( controller_->get_node()->has_parameter( "e_stop_topic" ) );
+  EXPECT_FALSE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                              "/estop_board/hard_estop" ) );
 }
 
 // ============================================================================
@@ -607,8 +585,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, RepeatedActivateDeactivateCyc
   }
 }
 
-// Verify controller is functional after e-stop + deactivate + reactivate cycle
-TEST_F( SyncGroupVelocityToPositionControllerTest, ReactivateAfterEstop )
+// Verify controller is functional after a deactivate + reactivate cycle during motion
+TEST_F( SyncGroupVelocityToPositionControllerTest, ReactivateAfterMotion )
 {
   initController();
   configureController();
@@ -619,9 +597,6 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, ReactivateAfterEstop )
   hector_test::reference( *controller_, 0 ) = 1.0;
   hector_test::reference( *controller_, 1 ) = 0.0;
   hector_test::reference( *controller_, 2 ) = 0.0;
-  callUpdate();
-
-  controller_->e_stop_active_.writeFromNonRT( true );
   callUpdate();
 
   deactivateController();

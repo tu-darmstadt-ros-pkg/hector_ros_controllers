@@ -19,7 +19,7 @@ namespace sync_group_velocity_to_position_controller
 SyncGroupVelocityToPositionController::SyncGroupVelocityToPositionController()
     : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
       max_velocity_( 1.0 ), max_acceleration_( 2.0 ), max_deceleration_( 4.0 ),
-      e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
+      interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
       velocity_command_timeout_( 0.0 ), rt_buffer_ptr_( nullptr )
 {
 }
@@ -116,7 +116,6 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read
   joint_lower_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
   joint_upper_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
 
-  e_stop_topic_ = params_.e_stop_topic;
   kp_ = params_.kp;
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
@@ -345,26 +344,12 @@ SyncGroupVelocityToPositionController::on_activate( const rclcpp_lifecycle::Stat
   if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
     return controller_interface::CallbackReturn::ERROR;
   }
-  e_stop_active_.writeFromNonRT( false );
 
   // Topic subscriber for non-chained mode
   auto cmd_qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
   cmd_sub_ = get_node()->create_subscription<CmdType>(
       "~/commands", cmd_qos,
       [this]( const CmdType::SharedPtr msg ) { rt_buffer_ptr_.writeFromNonRT( msg ); } );
-
-  auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
-  hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
-      e_stop_topic_, qos, [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
-        if ( msg->data ) {
-          RCLCPP_WARN(
-              get_node()->get_logger(),
-              "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
-          e_stop_active_.writeFromNonRT( true );
-        } else {
-          e_stop_active_.writeFromNonRT( false );
-        }
-      } );
 
   update_joint_states_if_valid();
 
@@ -433,7 +418,6 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::on_d
   sync_flipper_action_server_.reset();
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
   cmd_sub_.reset();
-  hard_estop_sub_.reset();
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
