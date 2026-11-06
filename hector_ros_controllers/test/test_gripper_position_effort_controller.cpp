@@ -1071,6 +1071,31 @@ TEST_F( GripperPositionEffortLifecycleTest, AcceptingTwoGoalsRapidlyDeliversBoth
   // gh_a.succeed should have fired exactly once, verified by the EXPECT_CALL above.
 }
 
+// Each goal reports through its own result, so a later goal never rewrites the result an
+// earlier goal handed to its client.
+TEST_F( GripperPositionEffortLifecycleTest, ALaterGoalLeavesAnEarlierGoalsResultAlone )
+{
+  initAndActivateWithActionServer();
+
+  std::shared_ptr<ActionT::Result> result_a;
+  auto gh_a = acceptGoal( 0.5, 2.0, [&result_a]( testing::NiceMock<GoalHandleMock> &mock ) {
+    EXPECT_CALL( mock, succeed( testing::_ ) ).WillOnce( testing::SaveArg<0>( &result_a ) );
+  } );
+  setPosition( 0.5 );
+  setVelocity( 0.0 );
+  callUpdate( 0.0 );
+
+  auto gh_b = acceptGoal( 0.7, 2.0 );
+  ASSERT_TRUE( result_a ) << "accepting goal B flushes goal A";
+  EXPECT_TRUE( result_a->reached_goal );
+  EXPECT_DOUBLE_EQ( result_a->position, 0.5 );
+
+  setPosition( 0.7 );
+  callUpdate( 0.01 );
+  ASSERT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) ) << "goal B succeeded";
+  EXPECT_DOUBLE_EQ( result_a->position, 0.5 ) << "goal B rewrote goal A's result";
+}
+
 // Bug 4 regression: NaN on the position topic must not be written to hardware.
 TEST_F( GripperPositionEffortControllerTest, NaNPositionTopicIsRejected )
 {

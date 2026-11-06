@@ -238,8 +238,6 @@ GripperPositionEffortController::on_activate( const rclcpp_lifecycle::State & )
   is_grasped_dwell_counter_ = 0;
   last_is_grasped_publish_time_ = rclcpp::Time( 0, 0, RCL_ROS_TIME );
 
-  pre_alloc_result_ = std::make_shared<GripperCommandAction::Result>();
-
   // Action server
   action_server_ = rclcpp_action::create_server<GripperCommandAction>(
       get_node(), "~/gripper_cmd",
@@ -339,7 +337,7 @@ void GripperPositionEffortController::accepted_callback( std::shared_ptr<GoalHan
   rt_action_command_.writeFromNonRT( cmd );
   action_cmd_seq_.store( input_seq_counter_.fetch_add( 1 ) + 1 );
 
-  // last_movement_time_ and pre_alloc_result_ flags are owned by the RT update thread.
+  // last_movement_time_ is owned by the RT update thread.
 
   auto rt_goal = std::make_shared<RealtimeGoalHandle>( goal_handle );
   rt_goal->execute();
@@ -620,11 +618,12 @@ void GripperPositionEffortController::check_for_success( const rclcpp::Time &tim
     return;
 
   if ( std::fabs( error_position ) < params_.goal_tolerance ) {
-    pre_alloc_result_->position = current_position;
-    pre_alloc_result_->effort = current_effort;
-    pre_alloc_result_->reached_goal = true;
-    pre_alloc_result_->stalled = false;
-    active_goal->setSucceeded( pre_alloc_result_ );
+    auto &result = *active_goal->preallocated_result_;
+    result.position = current_position;
+    result.effort = current_effort;
+    result.reached_goal = true;
+    result.stalled = false;
+    active_goal->setSucceeded();
     clear_active_goal();
     return;
   }
@@ -635,14 +634,15 @@ void GripperPositionEffortController::check_for_success( const rclcpp::Time &tim
   }
 
   if ( ( time - last_movement_time_ ).seconds() > params_.stall_timeout ) {
-    pre_alloc_result_->position = current_position;
-    pre_alloc_result_->effort = current_effort;
-    pre_alloc_result_->reached_goal = false;
-    pre_alloc_result_->stalled = true;
+    auto &result = *active_goal->preallocated_result_;
+    result.position = current_position;
+    result.effort = current_effort;
+    result.reached_goal = false;
+    result.stalled = true;
     if ( params_.allow_stalling ) {
-      active_goal->setSucceeded( pre_alloc_result_ );
+      active_goal->setSucceeded();
     } else {
-      active_goal->setAborted( pre_alloc_result_ );
+      active_goal->setAborted();
     }
     clear_active_goal();
   }
