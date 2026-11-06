@@ -520,6 +520,23 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, ChainedModeSwitchInvalidatesR
   }
 }
 
+TEST_F( SyncGroupVelocityToPositionControllerTest, AWrongSizeCommandIsIgnored )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+  hector_test::reference( *controller_, 0 ) = 0.2;
+
+  auto msg = std::make_shared<std_msgs::msg::Float64MultiArray>();
+  msg->data = { 1.0 };
+  controller_->rt_buffer_ptr_.writeFromNonRT( msg );
+  EXPECT_EQ( controller_->update_reference_from_subscribers( rclcpp::Time( 0, 0, RCL_ROS_TIME ),
+                                                             rclcpp::Duration( 0, 10000000 ) ),
+             controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.2 );
+}
+
 // ============================================================================
 // NaN Reference Tests
 // ============================================================================
