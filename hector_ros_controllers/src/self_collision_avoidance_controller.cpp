@@ -75,11 +75,11 @@ controller_interface::return_type SelfCollisionAvoidanceController::update_refer
     const auto &data = ( *joint_commands )->data;
     const auto &references = ordered_exported_reference_interfaces_;
     if ( references.size() != data.size() ) {
-      RCLCPP_ERROR_THROTTLE(
-          get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
-          "command size (%zu) does not match number of reference interfaces (%zu)", data.size(),
-          references.size() );
-      return controller_interface::return_type::ERROR;
+      // Not a command to this controller. An ERROR would stop the whole chain for one bad message.
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                            "Ignoring a command of size %zu, %zu joints are controlled",
+                            data.size(), references.size() );
+      return controller_interface::return_type::OK;
     }
     if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {
       RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
