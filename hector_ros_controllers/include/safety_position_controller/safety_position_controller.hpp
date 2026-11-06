@@ -15,7 +15,6 @@
 #include <safety_position_controller/joint_info.hpp>
 #include <safety_position_controller/safety_diagnostics.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/set_bool.hpp>
@@ -195,9 +194,6 @@ private:
   /// Clear the bypass if its deadline has passed. Returns true if this call ended it.
   bool expire_bypass();
 
-  /// Handle an E-stop request from the ~/safety_estop subscriber (executor thread).
-  void note_estop_request( bool active );
-
   /**
    * @brief Account for a cycle in which the safety state could not be observed (busy or
    * non-finite joint states, failed collision-state read). Past state_read_timeout the
@@ -215,18 +211,6 @@ private:
 
   // ---- Configuration / mode ----
   std::atomic<bool> in_compliant_mode_{ false }; ///< selects compliant vs. stiff current limits
-
-  // ---- E-stop ----
-  /// Last requested E-stop state. Tracks the external safety signal and therefore
-  /// survives deactivation; the update loop acts on it directly.
-  std::atomic<bool> estop_active_{ false };
-  /// estop_active_ as of the last processed edge: the update loop's edge memory and the
-  /// engagement flag reported in ~/status.
-  std::atomic<bool> estop_engaged_{ false };
-  /// An engage was requested since the last cycle. Set on every engage message and
-  /// consumed by the update loop, so a pulse that both engages and releases between two
-  /// cycles still produces one engaged cycle instead of cancelling itself out.
-  std::atomic<bool> estop_engage_pending_{ false };
 
   // ---- Safety bypass (for folded arm positions etc.) ----
   /// The whole bypass state: the steady_clock time it lapses at, in nanoseconds, or 0
@@ -269,7 +253,6 @@ private:
   // ---- Command/state buffers (aligned with params_.joints) ----
   std::vector<double> current_positions_; ///< latest measured positions
   std::vector<double> reference_values_;  ///< references of this cycle, read once from the handles
-  std::vector<double> hold_positions_;    ///< positions to hold during E-stop
   /// Latest measured positions of ALL joints (aligned with all_joint_names_), read once
   /// per cycle so the pipeline and the collision check see the same robot.
   std::vector<double> all_positions_;
@@ -299,9 +282,6 @@ private:
   // Non-chained command input
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;
   rclcpp::Subscription<CmdType>::SharedPtr joints_command_subscriber_;
-
-  // E-stop input
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr estop_subscriber_;
 
   // Periodic status timer
   rclcpp::TimerBase::SharedPtr status_timer_;

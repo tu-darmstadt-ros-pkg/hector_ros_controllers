@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <std_msgs/msg/bool.hpp>
+
 #include <shared_mutex>
 #include <thread>
 
@@ -254,84 +256,6 @@ TEST_F( SafetyPositionControllerTest, ContinuousJointTakesShortestPath )
 // Velocity Limiting Tests (no collision fixture — collision checks disabled)
 // ============================================================================
 
-// ============================================================================
-// E-Stop Tests
-// ============================================================================
-
-TEST_F( SafetyPositionControllerTest, EstopEngageHoldsPositions )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  setStateValue( "joint1", 0.5 );
-  setStateValue( "joint2", -0.3 );
-  setStateValue( "joint3", 1.0 );
-
-  // Provide valid references
-  hector_test::reference( *controller_, 0 ) = 0.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  // First update to read positions
-  callUpdate();
-
-  sendEstop( true );
-  callUpdate();
-
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.3 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
-}
-
-TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
-{
-  // An E-stop abandons whatever was being tracked. On release the arm must hold even
-  // though the upstream controller keeps writing the pre-E-stop target every cycle.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 1.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
-
-  sendEstop( true );
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  const double position_at_estop = hw_cmd_values_[0];
-
-  sendEstop( false );
-  for ( int i = 0; i < 50; ++i ) {
-    hector_test::reference( *controller_, 0 ) = 1.0; // upstream keeps commanding it
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
-        << "the pre-E-stop target must stay abandoned (cycle " << i << ")";
-  }
-
-  // A changed reference is a new command and releases the hold.
-  for ( int i = 0; i < 20; ++i ) {
-    hector_test::reference( *controller_, 0 ) = 1.1;
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
-}
-
 TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
 {
   // These go straight to the motors as an ampere ceiling. A compliant limit above the
@@ -568,9 +492,7 @@ TEST_F( SafetyPositionControllerTest, RejectedCommandCannotReleaseAPark )
     followCommands();
   }
 
-  sendEstop( true );
-  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  sendEstop( false );
+  controller_->pipeline_->invalidate();
   ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
   ASSERT_TRUE( controller_->pipeline_->parked() );
   const double parked_at = hw_cmd_values_[0];
@@ -590,129 +512,6 @@ TEST_F( SafetyPositionControllerTest, RejectedCommandCannotReleaseAPark )
   }
   EXPECT_FALSE( controller_->pipeline_->parked() );
   EXPECT_GT( hw_cmd_values_[0], parked_at + 1e-4 ) << "control returns once the sender is fixed";
-}
-
-TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
-{
-  // The controller has to listen where the robot's e-stop actually is. On Athena that
-  // is the SOFT stop, whose "please stop" the arm can honour by holding position; the
-  // hard stop cuts power, faults the hardware and deactivates every controller, so no
-  // controller-side handling would run for it anyway.
-  const std::string topic = "e_stop_manager/aggregated_state/emergency_stop_software";
-  initController( {}, false, false, "test_robot.urdf",
-                  { rclcpp::Parameter( "e_stop_topic", topic ) } );
-
-  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(), topic ) != nullptr )
-      << "the configured topic must be the one subscribed";
-
-  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node(), "test_safety_position/safety_estop" ) == nullptr )
-      << "the default topic must not also be subscribed";
-}
-
-TEST_F( SafetyPositionControllerTest, EstopSubscriptionKeepsTheLatchedState )
-{
-  // The e-stop manager publishes its aggregated state once per change and latches it
-  // (RELIABLE, TRANSIENT_LOCAL). A volatile subscriber that joins after the operator
-  // engaged the stop is told nothing and runs as if none were in effect, so the
-  // durability here is load bearing, not a default.
-  initController();
-  const auto sub = rtest::findSubscription<std_msgs::msg::Bool>(
-      controller_->get_node(), "test_safety_position/safety_estop" );
-  ASSERT_TRUE( sub != nullptr );
-
-  const auto qos = sub->get_actual_qos();
-  EXPECT_EQ( qos.durability(), rclcpp::DurabilityPolicy::TransientLocal )
-      << "a volatile subscriber would miss a stop engaged before it subscribed";
-  EXPECT_EQ( qos.reliability(), rclcpp::ReliabilityPolicy::Reliable );
-  // An engage and the release after it can be delivered together while the executor is
-  // busy; a depth of one would let the release overwrite the unread engage.
-  EXPECT_GT( qos.depth(), 1u ) << "the engage must survive until its callback runs";
-}
-
-TEST_F( SafetyPositionControllerTest, EstopPulseBetweenCyclesIsHonored )
-{
-  // A stalled executor can deliver the engage and the release back to back, so the
-  // update loop never samples the engaged level. The engage must still abandon the
-  // pre-E-stop target instead of cancelling out against the release.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 1.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
-
-  // Both messages land between two update cycles.
-  controller_->note_estop_request( true );
-  controller_->note_estop_request( false );
-
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  const double position_at_estop = hw_cmd_values_[0];
-  EXPECT_TRUE( controller_->estop_engaged_.load() ) << "the latched engage must produce one cycle";
-
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  followCommands();
-  EXPECT_FALSE( controller_->estop_engaged_.load() )
-      << "the latch must be consumed, so the release is seen on the next cycle";
-
-  for ( int i = 0; i < 50; ++i ) {
-    hector_test::reference( *controller_, 0 ) = 1.0; // upstream keeps commanding it
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
-        << "the pulse must abandon the pre-E-stop target (cycle " << i << ")";
-  }
-}
-
-TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewCommandOnCommandTopic )
-{
-  // Same contract in non-chained mode. The "~/commands" message stays in the realtime
-  // buffer and is re-read every cycle, so the hold cannot rely on clearing references.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-  ASSERT_FALSE( controller_->is_in_chained_mode() );
-
-  hw_state_values_.fill( 0.0 );
-  sendCommand( { 1.0, 0.0, 0.0 } );
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the command";
-
-  sendEstop( true );
-  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  const double position_at_estop = hw_cmd_values_[0];
-
-  sendEstop( false );
-  for ( int i = 0; i < 50; ++i ) {
-    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-    followCommands();
-    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
-        << "the buffered command must stay abandoned (cycle " << i << ")";
-  }
-
-  sendCommand( { 1.1, 0.0, 0.0 } );
-  for ( int i = 0; i < 20; ++i ) {
-    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
 }
 
 // ============================================================================
@@ -797,7 +596,7 @@ TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
 {
   // A reference that becomes NaN means "no target" and must make the joint brake to a
   // stop and hold. It must NOT keep tracking the target that was valid before: the
-  // reference interfaces are reset to NaN on an E-stop release and on activation, and
+  // reference interfaces are reset to NaN on activation, and
   // resuming the old target there would be unexpected delayed motion.
   initController();
   configureController();
@@ -900,58 +699,6 @@ TEST_F( SafetyPositionControllerTest, StatusPublishesCorrectFields )
   EXPECT_FALSE( captured.compliant_mode );
   EXPECT_FALSE( captured.current_limits_enabled );
   EXPECT_FALSE( captured.collision_check_enabled ); // disabled in params
-  EXPECT_FALSE( captured.estop_engaged );
-}
-
-TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopEngage )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-
-  SafetyPositionControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-  EXPECT_FALSE( captured.estop_engaged );
-
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 0.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-}
-
-TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopRelease )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-
-  SafetyPositionControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 0.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-
-  sendEstop( false );
-  callUpdate();
-  EXPECT_FALSE( captured.estop_engaged );
 }
 
 TEST_F( SafetyPositionControllerTest, StatusReflectsCollisionCheckEnabled )
@@ -1025,123 +772,9 @@ TEST_F( SafetyPositionControllerTest, RepeatedActivateDeactivateCycles )
 
     deactivateController();
 
-    // The engaged E-stop is cleared; the subscriptions outlive the activation
-    EXPECT_FALSE( controller_->estop_engaged_.load() );
-    EXPECT_TRUE( controller_->estop_subscriber_ != nullptr );
+    // The subscription outlives the activation
     EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
   }
-}
-
-TEST_F( SafetyPositionControllerTest, EventStatusReportsTheCurrentCycle )
-{
-  // The status timer never fires in these tests, which is exactly the documented
-  // status_publish_rate=0 mode: what an event publishes is all a consumer ever sees.
-  // An E-stop release parks the pipeline within the same cycle, so the message the
-  // release publishes must already report that.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-
-  SafetyPositionControllerStatus captured;
-  int publishes = 0;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).WillRepeatedly( [&]( const auto &msg ) {
-    captured = msg;
-    ++publishes;
-  } );
-
-  activateController();
-
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 1.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-  for ( int i = 0; i < 5; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-
-  sendEstop( true );
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_TRUE( captured.estop_engaged );
-
-  sendEstop( false );
-  const int publishes_before_release = publishes;
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  ASSERT_GT( publishes, publishes_before_release ) << "the release must publish a status";
-  EXPECT_FALSE( captured.estop_engaged );
-  EXPECT_TRUE( captured.parked ) << "the release parks the pipeline in this very cycle";
-}
-
-TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-
-  activateController();
-
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 0.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-
-  deactivateController();
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-
-  sendEstop( false );
-  activateController();
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-
-  // References should be NaN (fresh activation)
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) );
-  }
-
-  // Verify it works normally after re-activation
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 0.01;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
-  EXPECT_GT( std::abs( hw_cmd_values_[0] ), 0.0 );
-}
-
-TEST_F( SafetyPositionControllerTest, EstopSurvivesReactivation )
-{
-  // estop_active_ tracks the external safety signal, so restarting the controller must
-  // not silently release it: the first cycle after activation re-engages the hold.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  setStateValue( "joint1", 0.5 );
-  hector_test::reference( *controller_, 0 ) = 1.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  sendEstop( true );
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  ASSERT_TRUE( controller_->estop_engaged_.load() );
-
-  deactivateController();
-  EXPECT_TRUE( controller_->estop_active_.load() ) << "the E-stop request must survive";
-
-  activateController();
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_TRUE( controller_->estop_engaged_.load() )
-      << "a still-active E-stop must re-engage instead of resuming motion";
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
 }
 
 TEST_F( SafetyPositionControllerTest, BusyStateHandleSkipsTheCycleWithoutFailing )
@@ -1367,53 +1000,6 @@ TEST_F( SafetyPositionControllerTest, ProlongedMeasurementDivergenceParksOnRecov
   }
 }
 
-TEST_F( SafetyPositionControllerTest, EstopPulseDuringStateReadOutageIsHonored )
-{
-  // An E-stop must not need working joint-state reads: an engage (or a whole
-  // engage+release pulse) inside a read outage previously fell through the skip-cycle
-  // early return and was lost — the arm resumed the pre-outage reference untouched.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  hw_state_values_.fill( 0.0 );
-  hector_test::reference( *controller_, 0 ) = 1.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  for ( int i = 0; i < 5; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 );
-
-  {
-    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
-    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
-    sendEstop( true );
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    EXPECT_TRUE( controller_->estop_engaged_.load() )
-        << "the engage edge must not wait for joint states";
-    sendEstop( false );
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    EXPECT_FALSE( controller_->estop_engaged_.load() );
-  }
-
-  // The E-stop abandoned the reference: recovery must hold and park, not resume the
-  // pre-outage target.
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_TRUE( controller_->pipeline_->parked() )
-      << "the release must park like any E-stop release";
-  const double held = hw_cmd_values_[0];
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    EXPECT_NEAR( hw_cmd_values_[0], held, 1e-9 ) << "the abandoned reference must not be resumed";
-  }
-}
-
 TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
 {
   initController();
@@ -1497,6 +1083,22 @@ TEST_F( SafetyPositionControllerTest, SwitchingChainedModeInvalidatesReferences 
   }
 }
 
+// The controller manager owns the e-stop and stops this controller on it
+TEST_F( SafetyPositionControllerTest, SubscribesToNoEstop )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  EXPECT_FALSE( controller_->get_node()->has_parameter( "e_stop_topic" ) );
+  EXPECT_FALSE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                              node_name + "/safety_estop" ) );
+}
+
 TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
 {
   // Both reference inputs live for the whole controller lifetime. Re-creating them per
@@ -1513,8 +1115,6 @@ TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
   const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
   EXPECT_TRUE( rtest::findSubscription<safety_position_controller::CmdType>(
       controller_->get_node(), node_name + "/commands" ) );
-  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
-                                                             node_name + "/safety_estop" ) );
 
   hw_state_values_.fill( 0.0 );
   sendCommand( { 0.5, 0.0, 0.0 } );
@@ -2112,49 +1712,6 @@ TEST_F( SafetyPositionControllerCollisionTest, InfInputDetectedAsCollision )
   // So this tests the controller's overall handling — commands should still be safe
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
-}
-
-// ============================================================================
-// E-stop holds positions across multiple cycles
-// ============================================================================
-
-TEST_F( SafetyPositionControllerTest, EstopHoldsAcrossMultipleCycles )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  setStateValue( "joint1", 0.5 );
-  setStateValue( "joint2", -0.3 );
-  setStateValue( "joint3", 1.0 );
-
-  hector_test::reference( *controller_, 0 ) = 0.0;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-
-  // First update to read positions
-  callUpdate();
-
-  sendEstop( true );
-  callUpdate();
-
-  // Commands should be held positions regardless of what reference says
-  hector_test::reference( *controller_, 0 ) = 999.0;
-  hector_test::reference( *controller_, 1 ) = 999.0;
-  hector_test::reference( *controller_, 2 ) = 999.0;
-
-  callUpdate();
-
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.3 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
-
-  // Third cycle still holds
-  callUpdate();
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
 }
 
 // ============================================================================

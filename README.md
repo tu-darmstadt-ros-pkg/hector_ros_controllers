@@ -38,9 +38,9 @@ A **safety layer for joint position commands**, usable both
     * `distance_lines_safe` — nearest-point lines for pairs outside the safety zone.
     * `distance_lines_safety_zone` — safety-zone pairs, colored per pair: green = motion increases distance, red = decreases, yellow = no directional info.
     * `distance_lines_collision` — colliding pairs (bright red, thicker).
-* **Status topic** (`~/status`): `SafetyPositionControllerStatus` (latched) at `status_publish_rate` and on events, carrying `min_collision_distance`, `num_pairs_in_safety_zone`, `manipulability`, the QP fields `qp_solved` / `qp_braking` / `qp_push_out_relaxed` / `qp_num_collision_constraints` / `qp_solve_time_us`, the `stalled` and `parked` flags, and the bypass / E-stop / mode flags. With `set_current_limits`, also the active per-joint current limits.
+* **Status topic** (`~/status`): `SafetyPositionControllerStatus` (latched) at `status_publish_rate` and on events, carrying `min_collision_distance`, `num_pairs_in_safety_zone`, `manipulability`, the QP fields `qp_solved` / `qp_braking` / `qp_push_out_relaxed` / `qp_num_collision_constraints` / `qp_solve_time_us`, the `stalled` and `parked` flags, and the bypass / mode flags. With `set_current_limits`, also the active per-joint current limits.
 * **QP introspection** (`~/qp_debug`, `publish_qp_debug`): per-cycle desired vs commanded velocity, the velocity box, per-constraint distance and achieved approach speed, solver state. Dynamically reconfigurable.
-* **E-Stop**: subscribes to `e_stop_topic` (`std_msgs/Bool`, default `~/safety_estop`). Engaging holds the positions latched at the engage edge, with no limit or collision checks. Releasing does **not** resume: the pipeline is rebased and parked, so the arm waits for a new reference. Intended for a *soft* stop; a hard stop that removes drive power faults the hardware and deactivates the controller instead.
+* **E-Stop**: the controller manager owns it. It stops this controller, and the hardware holds.
 * **Safety Bypass Mode** (for folded arm positions):
 
     * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) drops collision checking and widens the joint limits by `safety_bypass_joint_limit_tolerance`.
@@ -78,7 +78,6 @@ A **safety layer for joint position commands**, usable both
 | `stall_park_timeout`               | `double`   | `5.0`   | Stalled this long [s] → park: abandon the reference and hold until a new one. `0` disables. Bounds: [0.0, 3600.0].   |
 | `park_resume_reference_threshold`  | `double`   | `0.01`  | Per-joint reference change [rad] that counts as a new command and releases a park. Bounds: [0.0001, 10.0].           |
 | `state_read_timeout`               | `double`   | `0.1`   | Time [s] of unobservable safety state after which the pipeline is rebased and parked. Set to at least twice the control period. Bounds: [0.001, 10.0]. |
-| `e_stop_topic`                     | `string`   | `~/safety_estop` | Topic carrying the **soft** emergency stop. Subscribed transient-local and reliable, so a publisher must latch. *(read-only)* |
 | `set_current_limits`               | `bool`     | `false` | If `true`, claims and writes `<joint>/current`. *(read-only)*                                                        |
 | `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint limit [A] in compliant mode. Must be positive and ≤ `stiff_limit`. Bounds: (0.0, 30.0).                    |
 | `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint limit [A] in stiff mode. A Dynamixel holds this in a two-byte 0.001 A register, so ≥ 32.768 A does not fit and reaches the motor as **zero**. Bounds: (0.0, 30.0). |
@@ -103,7 +102,6 @@ A **safety layer for joint position commands**, usable both
 | Topic                        | Type                                | Used for                                                                     |
 | ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
 | `~/commands`                 | `std_msgs/Float64MultiArray`        | **Non-chained mode**: position commands, exactly one per joint. Any other length is refused. |
-| `e_stop_topic`               | `std_msgs/Bool`                     | Soft E-Stop. `true` → hold the latched positions; `false` → rebase and park until a new reference. Transient-local, reliable. |
 | `robot_description_semantic` | `std_msgs/String` (transient local) | SRDF XML for self-collision checking.                                        |
 
 **Publications**
@@ -299,10 +297,7 @@ A **safety layer for joint position commands**, usable both
 * **Block-if-too-far**:
 
     * Limits per-cycle motion based on URDF velocity limits and controller update rate.
-* **E-Stop**:
-
-    * Subscribes to `~/safety_estop` (`std_msgs/Bool`).
-    * On activation → records current positions and *holds them* (no limit/collision checks) until E-Stop is released.
+* **E-Stop**: the controller manager owns it. It stops this controller, and the hardware holds.
 * **Safety Bypass Mode** (for folded arm positions):
 
     * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) to temporarily disable collision checks and relax joint limits.
@@ -347,7 +342,6 @@ A **safety layer for joint position commands**, usable both
 | Topic                        | Type                                | Used for                                                                     |
 | ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
 | `~/commands`                 | `std_msgs/Float64MultiArray`        | **Non-chained mode**: incoming position commands (one per joint).            |
-| `~/safety_estop`             | `std_msgs/Bool`                     | E-Stop control. `true` → latch and hold current positions; `false` → resume. |
 | `robot_description_semantic` | `std_msgs/String` (transient local) | SRDF XML for self-collision checking.                                        |
 
 **Publications (debug, optional)**

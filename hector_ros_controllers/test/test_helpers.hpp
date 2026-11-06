@@ -121,8 +121,6 @@ protected:
     derived().findControllerSpecificMocks( node_name );
   }
 
-  void sendEstop( bool active ) { derived().controller_->estop_active_.store( active ); }
-
 private:
   Derived &derived() { return static_cast<Derived &>( *this ); }
   const Derived &derived() const { return static_cast<const Derived &>( *this ); }

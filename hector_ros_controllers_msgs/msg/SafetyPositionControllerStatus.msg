@@ -10,9 +10,6 @@ bool current_limits_enabled    # true if set_current_limits param is on
 # Self-collision checking
 bool collision_check_enabled   # true if check_self_collisions param is on
 
-# E-stop
-bool estop_engaged
-
 # Position limit enforcement
 
 # Collision diagnostics

@@ -130,17 +130,6 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       "~/commands", rclcpp::SystemDefaultsQoS(),
       [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
 
-  // Transient local, matching the e-stop manager, which publishes its aggregated state
-  // once per change and latches it: a volatile subscriber joining afterwards is told
-  // nothing and would run as if no stop were in effect. A depth of one would be enough
-  // for the latch, but an engage and the release after it can arrive together while the
-  // executor is busy, and the engage must not be overwritten before its callback runs.
-  estop_subscriber_ = node->create_subscription<std_msgs::msg::Bool>(
-      params_.e_stop_topic, rclcpp::QoS( rclcpp::KeepLast( 10 ) ).reliable().transient_local(),
-      [this]( const std_msgs::msg::Bool::SharedPtr msg ) { note_estop_request( msg->data ); } );
-  RCLCPP_INFO( node->get_logger(), "Listening for the soft e-stop on '%s'.",
-               params_.e_stop_topic.c_str() );
-
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -191,7 +180,6 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   reference_values_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   joint_index_.assign( n, -1 );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
-  hold_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   all_positions_.assign( all_joint_names_.size(), std::numeric_limits<double>::quiet_NaN() );
 
   if ( !gather_joint_indices() ) {
@@ -335,9 +323,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   state_read_failure_time_ = 0.0;
   park_on_recovery_pending_ = false;
   last_manipulability_ = 0.0;
-  // A pulse received while inactive must not park a freshly activated controller; a
-  // held E-stop is carried by estop_active_ and re-engages on the first cycle.
-  estop_engage_pending_.store( false, std::memory_order_relaxed );
 
   // Last, so a failed activation does not leave a timer publishing status for a
   // controller that never became active.
@@ -356,7 +341,6 @@ controller_interface::CallbackReturn
 SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   status_timer_.reset();
-  estop_engaged_.store( false, std::memory_order_relaxed );
   // A bypass is granted for as long as someone is watching this controller run. It must
   // not outlive the controller and be inherited by whatever activates next.
   clear_bypass();
@@ -461,41 +445,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
   // guarded.
   bool status_event = expire_bypass();
 
-  // E-stop first: it must act even while the joint states are unreadable, otherwise an
-  // engage (or a whole engage+release pulse) during a read outage would be lost.
-  // Consumed unconditionally (not short-circuited): a held E-stop is carried by the
-  // level, and the latch must not survive into the release cycle.
-  const bool engage_pending = estop_engage_pending_.exchange( false, std::memory_order_relaxed );
-  const bool estop_active = estop_active_.load( std::memory_order_relaxed ) || engage_pending;
-
-  if ( estop_active != estop_engaged_.load( std::memory_order_relaxed ) ) {
-    if ( estop_active ) {
-      // Mark the hold as unrecorded; it is taken from the freshest readable states
-      // below. Non-finite entries are never written, so until then nothing moves.
-      hold_positions_.assign( params_.joints.size(), std::numeric_limits<double>::quiet_NaN() );
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints",
-                   params_.joints.size() );
-    } else {
-      // release E-stop; the pipeline is parked, so the arm holds until a new reference
-      RCLCPP_WARN( get_node()->get_logger(),
-                   "E-STOP released: holding until a new reference arrives" );
-    }
-    estop_engaged_.store( estop_active, std::memory_order_relaxed );
-    status_event = true;
-  }
-
-  if ( estop_active ) {
-    // Record the hold from the first read that succeeds — normally the engage cycle
-    // itself; during a read outage (the engage must not wait for one) the first valid
-    // read after it. Once recorded, no state read is needed to keep holding.
-    if ( std::any_of( hold_positions_.begin(), hold_positions_.end(),
-                      []( const double p ) { return !std::isfinite( p ); } ) &&
-         read_current_positions() ) {
-      hold_positions_ = current_positions_;
-    }
-    pipeline_->invalidate();
-    write_position_commands( hold_positions_ );
-  } else if ( !read_current_positions() ) {
+  if ( !read_current_positions() ) {
     // A handle is locked by another thread (async hardware). Skipping the cycle leaves
     // the previous position command in place, which is what re-writing it would do.
     // The safety state is unobservable, so this counts toward the same watchdog as a
@@ -541,17 +491,6 @@ bool SafetyPositionController::expire_bypass()
   }
   RCLCPP_WARN( get_node()->get_logger(), "Safety bypass expired; safety checks are back on." );
   return true;
-}
-
-void SafetyPositionController::note_estop_request( const bool active )
-{
-  const bool prev = estop_active_.exchange( active, std::memory_order_relaxed );
-  if ( active ) {
-    estop_engage_pending_.store( true, std::memory_order_relaxed );
-  }
-  if ( active != prev ) {
-    RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s", active ? "ENGAGED" : "DISENGAGED" );
-  }
 }
 
 void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &period )
@@ -866,7 +805,6 @@ void SafetyPositionController::publish_status()
   SafetyDiagnostics::StatusFlags flags;
   flags.bypass_active = bypass_active();
   flags.compliant_mode = in_compliant_mode_.load( std::memory_order_relaxed );
-  flags.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
   diagnostics_->publishStatus( flags );
 }
 
