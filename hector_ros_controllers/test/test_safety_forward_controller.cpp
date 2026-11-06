@@ -346,23 +346,34 @@ TEST_F( SafetyForwardControllerTest, ChainedModeCleanup )
   controller_->on_set_chained_mode( true );
 
   EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
-  EXPECT_TRUE( controller_->safety_timer_ == nullptr );
+  ASSERT_TRUE( controller_->safety_timer_ != nullptr );
+  EXPECT_TRUE( controller_->safety_timer_->is_canceled() );
 }
 
+// The dead man timer must survive a chained period, or later unchained activations run without it
 TEST_F( SafetyForwardControllerTest, ChainedToUnchainedTransition )
 {
   initController( "velocity" );
   configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
 
-  // Switch to chained mode: subscriber and timer are destroyed
-  controller_->on_set_chained_mode( true );
-  EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
-  EXPECT_TRUE( controller_->safety_timer_ == nullptr );
+  ASSERT_TRUE( controller_->set_chained_mode( true ) );
+  activateController();
+  EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr )
+      << "chained, commands come from upstream";
+  ASSERT_TRUE( controller_->safety_timer_ != nullptr ) << "the dead man timer was destroyed";
+  EXPECT_TRUE( controller_->safety_timer_->is_canceled() );
+  deactivateController();
 
-  // Switch back to unchained: rt buffer is cleared
-  controller_->on_set_chained_mode( false );
+  ASSERT_TRUE( controller_->set_chained_mode( false ) );
   auto cmd = controller_->rt_command_ptr_.readFromRT();
   EXPECT_TRUE( !cmd || !( *cmd ) );
+  activateController();
+  EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
+  ASSERT_TRUE( controller_->safety_timer_ != nullptr ) << "the dead man timer was destroyed";
+  EXPECT_FALSE( controller_->safety_timer_->is_canceled() );
 }
 
 TEST_F( SafetyForwardControllerTest, ChainedModeUpdateForwardsReferences )

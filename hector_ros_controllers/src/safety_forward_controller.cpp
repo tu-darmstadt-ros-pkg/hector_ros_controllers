@@ -176,21 +176,23 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
   }
 
   safety_engaged_.store( false );
-  if ( safety_timer_ ) {
-    safety_timer_->reset();
+  // Chained, the commands come from the preceding controller and the timeout does not apply
+  if ( !is_in_chained_mode() ) {
+    if ( safety_timer_ ) {
+      safety_timer_->reset();
+    }
+    joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
+        "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
+          rt_command_ptr_.writeFromNonRT( msg );
+          const bool was_engaged = safety_engaged_.exchange( false );
+          if ( safety_timer_ ) {
+            safety_timer_->reset();
+          }
+          if ( was_engaged ) {
+            publish_status();
+          }
+        } );
   }
-
-  joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
-      "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
-        rt_command_ptr_.writeFromNonRT( msg );
-        const bool was_engaged = safety_engaged_.exchange( false );
-        if ( safety_timer_ ) {
-          safety_timer_->reset();
-        }
-        if ( was_engaged ) {
-          publish_status();
-        }
-      } );
 
   publish_status();
 
@@ -272,7 +274,10 @@ bool SafetyForwardController::on_set_chained_mode( const bool chained_mode )
 {
   if ( chained_mode ) {
     joints_command_subscriber_.reset();
-    safety_timer_.reset();
+    // Cancelled, not destroyed: an unchained activation later needs it again
+    if ( safety_timer_ ) {
+      safety_timer_->cancel();
+    }
     RCLCPP_INFO( get_node()->get_logger(), "Switched to CHAINED mode" );
   } else {
     RCLCPP_INFO( get_node()->get_logger(), "Switched to UNCHAINED mode" );
