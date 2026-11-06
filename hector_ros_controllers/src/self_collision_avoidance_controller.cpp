@@ -329,7 +329,11 @@ SelfCollisionAvoidanceController::on_deactivate( const rclcpp_lifecycle::State &
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-bool SelfCollisionAvoidanceController::on_set_chained_mode( bool /*chained_mode*/ ) { return true; }
+bool SelfCollisionAvoidanceController::on_set_chained_mode( bool /*chained_mode*/ )
+{
+  // The previous source's last reference must not outlive the switch
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
+}
 
 void SelfCollisionAvoidanceController::update_joint_angles()
 {

@@ -104,6 +104,21 @@ TEST_F( SelfCollisionAvoidanceControllerTest, ABlockAfterReactivationReplaysNoOl
   EXPECT_TRUE( std::isnan( hw_cmd_values_[0] ) ) << "replayed the previous activation's command";
 }
 
+TEST_F( SelfCollisionAvoidanceControllerTest, ChainedModeSwitchInvalidatesReferences )
+{
+  configureController();
+  for ( const bool chained : { true, false } ) {
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      hector_test::reference( *controller_, i ) = 0.5;
+    }
+    ASSERT_TRUE( controller_->on_set_chained_mode( chained ) );
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) )
+          << ( chained ? "chained" : "unchained" ) << " mode kept reference " << i;
+    }
+  }
+}
+
 int main( int argc, char **argv )
 {
   testing::InitGoogleMock( &argc, argv );
