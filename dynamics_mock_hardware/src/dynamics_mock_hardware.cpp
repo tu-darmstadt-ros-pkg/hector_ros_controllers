@@ -395,6 +395,20 @@ DynamicsMockHardware::on_init( const hardware_interface::HardwareComponentInterf
   ddq_ = Eigen::VectorXd::Zero( model_.nv );
   q_next_ = Eigen::VectorXd::Zero( model_.nq );
 
+  // A simulated power cut, for the controller manager's hard e-stop recovery: reads fail, and the
+  // component cannot be configured or activated until the power is back
+  if ( const auto node = get_node() ) {
+    node->declare_parameter( "simulate_power_cut", false );
+    power_cut_callback_ = node->add_post_set_parameters_callback(
+        [this]( const std::vector<rclcpp::Parameter> &params ) {
+          for ( const auto &param : params ) {
+            if ( param.get_name() == "simulate_power_cut" ) {
+              power_cut_ = param.as_bool();
+            }
+          }
+        } );
+  }
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -404,6 +418,10 @@ DynamicsMockHardware::on_init( const hardware_interface::HardwareComponentInterf
 
 CallbackReturn DynamicsMockHardware::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
+  if ( power_cut_ ) {
+    RCLCPP_ERROR( get_logger(), "Cannot configure: the power is cut." );
+    return CallbackReturn::FAILURE;
+  }
   for ( auto &jd : joints_ ) {
     const std::string pos_if = jd.name + "/" + hardware_interface::HW_IF_POSITION;
     const std::string vel_if = jd.name + "/" + hardware_interface::HW_IF_VELOCITY;
@@ -454,6 +472,10 @@ CallbackReturn DynamicsMockHardware::on_configure( const rclcpp_lifecycle::State
 
 CallbackReturn DynamicsMockHardware::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
+  if ( power_cut_ ) {
+    RCLCPP_ERROR( get_logger(), "Cannot activate: the power is cut." );
+    return CallbackReturn::FAILURE;
+  }
   // Seed command interfaces from current states to prevent an initial jump.
   for ( const auto &jd : joints_ ) {
     const auto &n = jd.name;
@@ -490,6 +512,10 @@ CallbackReturn DynamicsMockHardware::on_deactivate( const rclcpp_lifecycle::Stat
   }
   return CallbackReturn::SUCCESS;
 }
+
+// Leaves the component unconfigured, from where the controller manager recovers it
+CallbackReturn DynamicsMockHardware::on_error( const rclcpp_lifecycle::State & /*previous_state*/ )
+{ return CallbackReturn::SUCCESS; }
 
 // =============================================================================
 // Mode switching
@@ -654,6 +680,10 @@ void DynamicsMockHardware::logDebugState() const
 return_type DynamicsMockHardware::read( const rclcpp::Time & /*time*/,
                                         const rclcpp::Duration & /*period*/ )
 {
+  if ( power_cut_ ) {
+    RCLCPP_ERROR_THROTTLE( get_logger(), *get_clock(), 1000, "Read failed: the power is cut." );
+    return return_type::ERROR;
+  }
   // States are already set by the previous write() cycle.
   return return_type::OK;
 }

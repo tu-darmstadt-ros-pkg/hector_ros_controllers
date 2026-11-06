@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "gmock/gmock.h"
@@ -13,12 +14,15 @@
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#include "dynamics_mock_hardware/dynamics_mock_hardware.hpp"
+#include "hardware_interface/component_parser.hpp"
 #include "hardware_interface/loaned_command_interface.hpp"
 #include "hardware_interface/loaned_state_interface.hpp"
 #pragma GCC diagnostic pop
 #include "hardware_interface/resource_manager.hpp"
 #include "hardware_interface/types/lifecycle_state_names.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
+#include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/node.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 
@@ -637,6 +641,41 @@ TEST_F( DynamicsMockHardwareTest, StopOnlyHolds )
   const double stopped_at = pos_s.get_optional().value();
   run_cycles( rm, 100 );
   EXPECT_NEAR( pos_s.get_optional().value(), stopped_at, 0.02 ) << "kept moving after the stop";
+}
+
+// The plant for the hard e-stop recovery: a cut faults the reads and blocks configure and activate
+// until the power is back, and on_error leaves the component unconfigured
+TEST_F( DynamicsMockHardwareTest, PowerCutFaultsAndRecovers )
+{
+  const std::string urdf =
+      std::string( URDF_HEAD ) + makeHardwareBlock( 0.0 ) + std::string( URDF_TAIL );
+  auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+  hardware_interface::HardwareComponentParams params;
+  params.hardware_info = hardware_interface::parse_control_resources_from_urdf( urdf ).at( 0 );
+  params.clock = node_->get_clock();
+  params.logger = node_->get_logger();
+  params.executor = executor;
+  dynamics_mock_hardware::DynamicsMockHardware hw;
+  ASSERT_EQ( hw.init( params ), hardware_interface::CallbackReturn::SUCCESS );
+  std::ignore = hw.on_export_state_interfaces();
+  std::ignore = hw.on_export_command_interfaces();
+  const rclcpp_lifecycle::State state;
+  ASSERT_EQ( hw.on_configure( state ), hardware_interface::CallbackReturn::SUCCESS );
+  ASSERT_EQ( hw.on_activate( state ), hardware_interface::CallbackReturn::SUCCESS );
+  const auto period = rclcpp::Duration::from_seconds( PERIOD_SEC );
+  ASSERT_EQ( hw.read( TIME, period ), hardware_interface::return_type::OK );
+
+  ASSERT_TRUE(
+      hw.get_node()->set_parameter( rclcpp::Parameter( "simulate_power_cut", true ) ).successful );
+  EXPECT_EQ( hw.read( TIME, period ), hardware_interface::return_type::ERROR );
+  EXPECT_EQ( hw.on_error( state ), hardware_interface::CallbackReturn::SUCCESS );
+  EXPECT_EQ( hw.on_configure( state ), hardware_interface::CallbackReturn::FAILURE );
+
+  ASSERT_TRUE(
+      hw.get_node()->set_parameter( rclcpp::Parameter( "simulate_power_cut", false ) ).successful );
+  ASSERT_EQ( hw.on_configure( state ), hardware_interface::CallbackReturn::SUCCESS );
+  ASSERT_EQ( hw.on_activate( state ), hardware_interface::CallbackReturn::SUCCESS );
+  EXPECT_EQ( hw.read( TIME, period ), hardware_interface::return_type::OK );
 }
 
 TEST_F( DynamicsMockHardwareTest, TorqueOffRefusesAMotionInterfaceOnTheSameJoint )

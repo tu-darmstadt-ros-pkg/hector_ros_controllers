@@ -1,6 +1,7 @@
 #ifndef DYNAMICS_MOCK_HARDWARE__DYNAMICS_MOCK_HARDWARE_HPP_
 #define DYNAMICS_MOCK_HARDWARE__DYNAMICS_MOCK_HARDWARE_HPP_
 
+#include <atomic>
 #include <cstddef>
 #include <limits>
 #include <string>
@@ -89,6 +90,8 @@ public:
 
   CallbackReturn on_deactivate( const rclcpp_lifecycle::State &previous_state ) override;
 
+  CallbackReturn on_error( const rclcpp_lifecycle::State &previous_state ) override;
+
   return_type prepare_command_mode_switch( const std::vector<std::string> &start_interfaces,
                                            const std::vector<std::string> &stop_interfaces ) override;
 
@@ -148,6 +151,10 @@ private:
   // Debug logging
   int debug_log_interval_{ 0 }; // 0 = disabled, >0 = every N write() cycles
   int write_cycle_count_{ 0 };
+
+  // Power cut injection through the bool parameter simulate_power_cut on the hardware's node
+  std::atomic<bool> power_cut_{ false };
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr power_cut_callback_;
 };
 
 } // namespace dynamics_mock_hardware
