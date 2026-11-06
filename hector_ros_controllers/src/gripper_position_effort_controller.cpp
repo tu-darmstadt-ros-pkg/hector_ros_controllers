@@ -215,9 +215,10 @@ GripperPositionEffortController::on_activate( const rclcpp_lifecycle::State & )
   velocity_state_interface_ = *vel_state_it;
   effort_state_interface_ = *eff_state_it;
 
-  // Initialise target to current position so the actuator does not jump on activation
-  const double current_position = position_state_interface_->get().get_optional().value_or( 0.0 );
-  target_.position = current_position;
+  // Initialise target to current position so the actuator does not jump on activation. A busy
+  // handle leaves no target, and nothing is written until a command arrives.
+  target_.position = position_state_interface_->get().get_optional().value_or(
+      std::numeric_limits<double>::quiet_NaN() );
   target_.max_effort = params_.default_max_effort;
 
   // Reset action / topic state
@@ -504,8 +505,10 @@ GripperPositionEffortController::update( const rclcpp::Time &time, const rclcpp:
     preempt_active_goal( "preempted by velocity_command topic" );
     last_velocity_msg_time_ = time;
     velocity_cached_valid_ = true;
-    target_.position = clamp_to_limits( target_.position + pending_vel->data * period.seconds(),
-                                        joint_lower_limit_, joint_upper_limit_ );
+    target_.position =
+        clamp_to_limits( ( std::isfinite( target_.position ) ? target_.position : current_position ) +
+                             pending_vel->data * period.seconds(),
+                         joint_lower_limit_, joint_upper_limit_ );
     target_.max_effort = params_.default_max_effort;
     break;
   case InputSource::None:

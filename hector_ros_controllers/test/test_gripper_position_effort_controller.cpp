@@ -5,6 +5,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -325,6 +326,27 @@ TEST_F( GripperPositionEffortControllerTest, ActivateInitialisesTargetToCurrentP
   callUpdate( 0.0 );
   EXPECT_DOUBLE_EQ( cmdPos(), 0.3 );
   EXPECT_DOUBLE_EQ( cmdEffort(), 1.0 ); // default_max_effort
+}
+
+// A position state locked by another thread at activation is no reason to drive to 0
+TEST_F( GripperPositionEffortControllerTest, ABusyStateAtActivationCommandsNothing )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  setPosition( 0.3 );
+  hw_cmd_values_[0] = 0.25;
+  {
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[0]->get_mutex() );
+    activateController();
+  }
+
+  callUpdate( 0.0 );
+  EXPECT_DOUBLE_EQ( cmdPos(), 0.25 ) << "the hardware's goal was overwritten";
+
+  injectVelocityCommand( 1.0 );
+  callUpdate( 0.01 );
+  EXPECT_NEAR( cmdPos(), 0.3 + 1.0 * kPeriodSec, 1e-9 ) << "velocity integrates from where it is";
 }
 
 // ============================================================================
