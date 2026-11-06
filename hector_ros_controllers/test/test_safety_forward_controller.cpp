@@ -296,6 +296,33 @@ TEST_F( SafetyForwardControllerTest, ChainedModeSwitchInvalidatesReferences )
   }
 }
 
+// A malformed command is no command: no target, and no sign of life that restarts the dead man timer
+TEST_F( SafetyForwardControllerTest, AWrongSizeCommandHoldsAndKeepsTheTimeout )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  controller_->safety_engaged_.store( true );
+
+  auto sub = controller_->joints_command_subscriber_;
+  ASSERT_TRUE( sub );
+  auto msg = std::make_shared<std_msgs::msg::Float64MultiArray>();
+  msg->data = { 1.0 };
+  sub->handle_message( msg );
+  EXPECT_TRUE( controller_->safety_engaged_.load() ) << "a malformed message reset the timeout";
+
+  EXPECT_EQ( controller_->update_reference_from_subscribers( rclcpp::Time( 0, 0, RCL_ROS_TIME ),
+                                                             rclcpp::Duration( 0, 10000000 ) ),
+             controller_interface::return_type::OK );
+  for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+    EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) ) << "kept a command";
+  }
+}
+
 // ============================================================================
 // Safety Timer Tests
 // ============================================================================

@@ -119,7 +119,8 @@ TEST_F( SelfCollisionAvoidanceControllerTest, ChainedModeSwitchInvalidatesRefere
   }
 }
 
-TEST_F( SelfCollisionAvoidanceControllerTest, AWrongSizeCommandIsIgnored )
+// Not a command to this controller: no target, so a running velocity does not keep running
+TEST_F( SelfCollisionAvoidanceControllerTest, AWrongSizeCommandHolds )
 {
   configureController();
   activate();
@@ -131,7 +132,8 @@ TEST_F( SelfCollisionAvoidanceControllerTest, AWrongSizeCommandIsIgnored )
   EXPECT_EQ( controller_->update_reference_from_subscribers( rclcpp::Time( 0, 0, RCL_ROS_TIME ),
                                                              rclcpp::Duration( 0, 10000000 ) ),
              controller_interface::return_type::OK );
-  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.2 );
+  EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, 0 ) ) )
+      << "kept the previous command";
 }
 
 int main( int argc, char **argv )

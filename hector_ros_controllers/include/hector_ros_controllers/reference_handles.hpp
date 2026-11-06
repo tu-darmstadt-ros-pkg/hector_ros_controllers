@@ -56,6 +56,20 @@ inline std::size_t write_references( const ReferenceHandles &references,
   return busy;
 }
 
+/// Real-time safe: sets every reference to NaN, "no target". A handle locked by another thread
+/// keeps its old value.
+/// @return the number of handles that were locked
+inline std::size_t clear_references( const ReferenceHandles &references )
+{
+  std::size_t busy = 0;
+  for ( const auto &reference : references ) {
+    if ( !reference->set_value( std::numeric_limits<double>::quiet_NaN() ) ) {
+      ++busy;
+    }
+  }
+  return busy;
+}
+
 } // namespace hector_ros_controllers
 
 #endif // HECTOR_ROS_CONTROLLERS__REFERENCE_HANDLES_HPP_

@@ -3,6 +3,8 @@
 #include "hector_ros_controllers/reference_handles.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
+#include <tuple>
+
 namespace self_collision_avoidance_controller
 {
 
@@ -75,10 +77,12 @@ controller_interface::return_type SelfCollisionAvoidanceController::update_refer
     const auto &data = ( *joint_commands )->data;
     const auto &references = ordered_exported_reference_interfaces_;
     if ( references.size() != data.size() ) {
-      // Not a command to this controller. An ERROR would stop the whole chain for one bad message.
+      // Not a command to this controller, and keeping the previous one would keep a velocity
+      // running. No target holds; an ERROR would stop the whole chain for one bad message.
       RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
-                            "Ignoring a command of size %zu, %zu joints are controlled",
+                            "Holding: a command of size %zu, %zu joints are controlled",
                             data.size(), references.size() );
+      std::ignore = hector_ros_controllers::clear_references( references );
       return controller_interface::return_type::OK;
     }
     if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {

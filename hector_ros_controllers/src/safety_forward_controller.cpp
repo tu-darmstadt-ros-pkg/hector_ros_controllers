@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -106,6 +107,9 @@ SafetyForwardController::on_configure( const rclcpp_lifecycle::State & /*previou
   joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
       "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
         rt_command_ptr_.writeFromNonRT( msg );
+        if ( msg->data.size() != joints_.size() ) {
+          return;
+        }
         const bool was_engaged = safety_engaged_.exchange( false );
         if ( safety_timer_ ) {
           safety_timer_->reset();
@@ -184,6 +188,10 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
     joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
         "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
           rt_command_ptr_.writeFromNonRT( msg );
+          // A malformed message is no sign of life from the commanding side
+          if ( msg->data.size() != joints_.size() ) {
+            return;
+          }
           const bool was_engaged = safety_engaged_.exchange( false );
           if ( safety_timer_ ) {
             safety_timer_->reset();
@@ -255,11 +263,13 @@ SafetyForwardController::update_reference_from_subscribers( const rclcpp::Time &
   const auto &data = ( *joint_commands )->data;
 
   const auto &references = ordered_exported_reference_interfaces_;
-  if ( data.size() < references.size() ) {
-    RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
-                           "Received command of size %zu, but controller expects %zu", data.size(),
-                           references.size() );
-    // Use only the available part
+  if ( data.size() != references.size() ) {
+    // Not a command to this controller, and keeping the previous one would keep a velocity running
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
+                          "Holding: a command of size %zu, %zu joints are controlled", data.size(),
+                          references.size() );
+    std::ignore = hector_ros_controllers::clear_references( references );
+    return controller_interface::return_type::OK;
   }
 
   if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {
