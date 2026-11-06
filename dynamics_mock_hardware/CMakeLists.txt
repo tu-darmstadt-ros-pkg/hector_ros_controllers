@@ -56,6 +56,8 @@ ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gmock REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(hardware_contract_tests REQUIRED)
   find_package(lifecycle_msgs REQUIRED)
   find_package(ros2_control_test_assets REQUIRED)
 
@@ -68,6 +70,10 @@ if(BUILD_TESTING)
     PRIVATE ATHENA_URDF="${CMAKE_CURRENT_SOURCE_DIR}/config/athena.urdf"
             PINOCCHIO_URDFDOM_TYPEDEF_SHARED_PTR
             PINOCCHIO_URDFDOM_USE_STD_SHARED_PTR)
+
+  ament_add_gtest(test_hardware_contract test/test_hardware_contract.cpp)
+  target_link_libraries(test_hardware_contract ${PROJECT_NAME}
+                        hardware_contract_tests::hardware_contract_tests)
 endif()
 
 ament_package()
