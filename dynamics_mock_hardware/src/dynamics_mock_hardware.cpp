@@ -144,7 +144,7 @@ void DynamicsMockHardware::enforceMimicConstraints( Eigen::VectorXd &q, Eigen::V
 // =============================================================================
 
 void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen::VectorXd &v,
-                                           Eigen::VectorXd &tau )
+                                           double dt, Eigen::VectorXd &tau )
 {
   tau.setZero();
 
@@ -167,8 +167,10 @@ void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen
         jd.nan_hold_position = std::numeric_limits<double>::quiet_NaN();
       }
 
-      const double v_cur = v[iv];
-      const double raw_tau = position_kp_ * ( q_cmd - q_cur ) + position_kd_ * ( 0.0 - v_cur );
+      // The PD acts on the next step's state, so a light link cannot make the explicit step diverge
+      const double damping = position_kd_ + position_kp_ * dt;
+      const double raw_tau = ( position_kp_ * ( q_cmd - q_cur ) - damping * v[iv] ) /
+                             ( 1.0 + damping * dt / effective_inertia_[iv] );
       tau[iv] = clampSymmetric( raw_tau, jd.max_torque );
       break;
     }
@@ -178,7 +180,8 @@ void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen
       if ( std::isnan( v_cmd ) )
         v_cmd = 0.0;
 
-      const double raw_tau = velocity_kp_ * ( v_cmd - v[iv] );
+      const double raw_tau =
+          velocity_kp_ * ( v_cmd - v[iv] ) / ( 1.0 + velocity_kp_ * dt / effective_inertia_[iv] );
       tau[iv] = clampSymmetric( raw_tau, jd.max_torque );
       break;
     }
@@ -394,6 +397,7 @@ DynamicsMockHardware::on_init( const hardware_interface::HardwareComponentInterf
   tau_ = Eigen::VectorXd::Zero( model_.nv );
   ddq_ = Eigen::VectorXd::Zero( model_.nv );
   q_next_ = Eigen::VectorXd::Zero( model_.nq );
+  effective_inertia_ = Eigen::VectorXd::Ones( model_.nv );
 
   // A simulated power cut, for the controller manager's hard e-stop recovery: reads fail, and the
   // component cannot be configured or activated until the power is back
@@ -712,13 +716,17 @@ return_type DynamicsMockHardware::write( const rclcpp::Time & /*time*/,
   rosToPin_q( q_ );
   rosToPin_v( v_ );
 
+  // The inertia a joint's own torque moves, with the rest of the robot free
+  pinocchio::computeMinverse( model_, data_, q_ );
+  effective_inertia_ = data_.Minv.diagonal().cwiseInverse();
+
   for ( int step = 0; step < num_steps; ++step ) {
     // Enforce mimic constraints before computing torques so ABA sees consistent state
     enforceMimicConstraints( q_, v_ );
 
     // Compute per-joint torques from commands (re-evaluated each sub-step
     // so position/velocity PD controllers use the latest simulated state)
-    computeTorques( q_, v_, tau_ );
+    computeTorques( q_, v_, dt, tau_ );
 
     // Mimic joints receive no external torque (mechanically constrained)
     for ( const auto &mjd : mimic_joints_ ) { tau_[mjd.idx_v] = 0.0; }

@@ -112,7 +112,8 @@ private:
 
   void enforceMimicConstraints( Eigen::VectorXd &q, Eigen::VectorXd &v ) const;
 
-  void computeTorques( const Eigen::VectorXd &q, const Eigen::VectorXd &v, Eigen::VectorXd &tau );
+  void computeTorques( const Eigen::VectorXd &q, const Eigen::VectorXd &v, double dt,
+                       Eigen::VectorXd &tau );
 
   static double clampSymmetric( double val, double limit );
   static double wrapAngle( double angle );
@@ -138,6 +139,8 @@ private:
   Eigen::VectorXd tau_;
   Eigen::VectorXd ddq_;
   Eigen::VectorXd q_next_;
+  /// Per velocity index, 1 / (M^-1)_ii at the start of the control period.
+  Eigen::VectorXd effective_inertia_;
 
   // Global PD gains for internal position/velocity controllers
   double position_kp_{ 100.0 };

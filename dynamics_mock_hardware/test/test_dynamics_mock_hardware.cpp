@@ -5,6 +5,7 @@
 // into a ResourceManager, and drives the read/write loop directly.
 
 #include <cmath>
+#include <fstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -977,6 +978,52 @@ TEST_F( DynamicsMockHardwareTest, MimicJoint_TracksReference )
   // Mimic velocity should track: mimic_vel = 0.909 * servo_vel
   EXPECT_NEAR( 0.909 * servo_vel, mimic_vel, 0.1 )
       << "Mimic velocity should track reference velocity";
+}
+
+std::string athenaUrdf()
+{
+  std::ifstream file( ATHENA_URDF );
+  return { std::istreambuf_iterator<char>( file ), std::istreambuf_iterator<char>() };
+}
+
+// Athena's light wrist and gripper links made the explicit PD step chatter at the velocity limit,
+// which pushed arm_joint_1 by about 0.64 rad after every activation and every hold
+TEST_F( DynamicsMockHardwareTest, AthenaArmHoldsAfterActivationAndAStop )
+{
+  TestableResourceManager rm( node_, athenaUrdf() );
+  activate_components( rm, { "athena_arm_interface" } );
+  auto joint_1 = rm.claim_state_interface( "arm_joint_1/position" );
+  auto velocity_7 = rm.claim_state_interface( "arm_joint_7/velocity" );
+
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( joint_1.get_optional().value(), 0.0, 0.01 ) << "moved after the activation";
+  EXPECT_NEAR( velocity_7.get_optional().value(), 0.0, 0.01 ) << "the wrist chatters";
+
+  ASSERT_TRUE( rm.perform_command_mode_switch( {}, { "arm_joint_1/position" } ) );
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( joint_1.get_optional().value(), 0.0, 0.01 ) << "moved after a stop";
+}
+
+// A link of a few grams, like Athena's gripper servo, in velocity mode
+TEST_F( DynamicsMockHardwareTest, ALightLinkTracksAVelocity )
+{
+  std::string light_pendulum = URDF_HEAD;
+  for ( const auto &[from, to] : std::vector<std::pair<std::string, std::string>>{
+            { R"(<mass value="1.0"/>)", R"(<mass value="0.001"/>)" },
+            { R"(ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.01")",
+              R"(ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5")" } } ) {
+    ASSERT_NE( light_pendulum.find( from ), std::string::npos ) << from;
+    light_pendulum.replace( light_pendulum.find( from ), from.size(), to );
+  }
+  TestableResourceManager rm( node_, light_pendulum + makeHardwareBlock( 0.0 ) + URDF_TAIL );
+  activate_components( rm );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/velocity" }, { "joint1/position" } ) );
+  auto velocity = rm.claim_command_interface( "joint1/velocity" );
+  auto velocity_s = rm.claim_state_interface( "joint1/velocity" );
+  ASSERT_TRUE( velocity.set_value( 0.5 ) );
+
+  run_cycles( rm, 100 );
+  EXPECT_NEAR( velocity_s.get_optional().value(), 0.5, 0.01 ) << "chatters";
 }
 
 // ===========================================================================

@@ -64,8 +64,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_dynamics_mock_hardware ${PROJECT_NAME}
                         ${lifecycle_msgs_TARGETS})
   target_compile_definitions(
-    test_dynamics_mock_hardware PRIVATE PINOCCHIO_URDFDOM_TYPEDEF_SHARED_PTR
-                                        PINOCCHIO_URDFDOM_USE_STD_SHARED_PTR)
+    test_dynamics_mock_hardware
+    PRIVATE ATHENA_URDF="${CMAKE_CURRENT_SOURCE_DIR}/config/athena.urdf"
+            PINOCCHIO_URDFDOM_TYPEDEF_SHARED_PTR
+            PINOCCHIO_URDFDOM_USE_STD_SHARED_PTR)
 endif()
 
 ament_package()
