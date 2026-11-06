@@ -59,7 +59,7 @@ repos:
   hooks:
   - id: cppcheck
     name: Cppcheck
-    entry: bash -c "cppcheck --force --quiet --inline-suppr --error-exitcode=1 --language=c++ $(find . -type d -name 'cmake-build-*' -prune -false -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' -o -name '*.cc')"
+    entry: bash -c "cppcheck --force --quiet --inline-suppr --error-exitcode=1 --language=c++ --library=googletest $(find . -type d -name 'cmake-build-*' -prune -false -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' -o -name '*.cc')"
     language: system
     files: \.(cpp|cc|hpp|h)$
     pass_filenames: false
