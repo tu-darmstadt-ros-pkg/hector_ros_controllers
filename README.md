@@ -127,12 +127,10 @@ A **safety layer for joint position commands**, usable both
 
 ## 2. Safety Forward Controller
 
-The **Safety Forward Controller** is a chainable ROS 2 controller that forwards joint commands while enforcing three
+The **Safety Forward Controller** is a chainable ROS 2 controller that forwards joint commands while enforcing two
 safety mechanisms:
 
 * **Safety timeout:** If no commands arrive for a specified duration (standalone mode only), outputs are set to zero.
-* **Emergency Stop (E-Stop):** Immediately stops motion; in position mode the controller holds the current joint
-  positions.
 * **Joint Limit Enforcement** Makes sure the command value is within the allowed limits. Warning only checks the limit
   of the used interface (e.g. in velocity mode are no position limits checked).
   It supports *position*, *velocity*, and *effort* command interfaces and can operate in:
@@ -146,13 +144,13 @@ safety mechanisms:
 |--------------------------------|-----------------------------|------------------------|------------------------|
 | Normal operation               | Forward command             | Forward command        | Forward command        |
 | Safety timeout *(not chained)* | (optional) or no-op         | 0.0                    | 0.0                    |
-| E-Stop engaged                 | Hold last measured position | 0.0                    | 0.0                    |
-| E-Stop released                | Resume forwarding           | Resume forwarding      | Resume forwarding      |
 | Chained mode                   | Use upstream reference      | Use upstream reference | Use upstream reference |
 
 **Important:**
 The **safety timer is disabled in chained mode** and is only active when the controller receives commands via
 `~/commands`.
+
+The controller manager owns the emergency stop: it stops this controller, and the hardware holds.
 
 ### Parameters
 
@@ -165,10 +163,9 @@ The **safety timer is disabled in chained mode** and is only active when the con
 
 ### Topics
 
-| Topic            | Type                | Description                                                |
-|------------------|---------------------|------------------------------------------------------------|
-| `~/commands`     | `Float64MultiArray` | Input commands (not used in chained mode).                 |
-| `~/safety_estop` | `Bool`              | Engages (`true`) or releases (`false`) the emergency stop. |
+| Topic        | Type                | Description                                |
+|--------------|---------------------|--------------------------------------------|
+| `~/commands` | `Float64MultiArray` | Input commands (not used in chained mode). |
 
 ---
 

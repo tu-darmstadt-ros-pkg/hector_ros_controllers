@@ -12,7 +12,6 @@
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
-#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
 #include <hector_ros_controllers_msgs/msg/safety_forward_controller_status.hpp>
@@ -59,7 +58,6 @@ protected:
   std::vector<hardware_interface::CommandInterface::SharedPtr>
   on_export_reference_interfaces_list() override;
 
-  void record_hold_positions();
   void publish_status();
   bool on_set_chained_mode( bool chained_mode ) override;
 
@@ -72,7 +70,6 @@ protected:
   std::vector<std::shared_ptr<urdf::JointLimits>> joint_limits_;
 
   std::vector<std::string> command_interface_types_;
-  std::vector<std::string> state_interface_types_;
   std::string interface_type_;
 
   // Safety timer
@@ -80,12 +77,7 @@ protected:
   int safety_timer_period_ms_{ 0 };
   rclcpp::TimerBase::SharedPtr safety_timer_;
 
-  // E-stop
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr safety_estop_subscriber_;
-  std::atomic<bool> estop_active_{ false };  // latest request (callback thread)
-  std::atomic<bool> estop_engaged_{ false }; // actually applied in update() thread
-  std::vector<double> hold_positions_;       // latched positions when e-stop engages
-  std::vector<double> reference_values_;     // references of this cycle, read once from the handles
+  std::vector<double> reference_values_; // references of this cycle, read once from the handles
 
   // External command input (non-chained mode)
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;

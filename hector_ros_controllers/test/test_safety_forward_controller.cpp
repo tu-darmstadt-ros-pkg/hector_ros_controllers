@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <std_msgs/msg/bool.hpp>
+
 using SafetyForwardControllerStatus = hector_ros_controllers_msgs::msg::SafetyForwardControllerStatus;
 
 class SafetyForwardControllerTest
@@ -240,11 +242,8 @@ TEST_F( SafetyForwardControllerTest, PositionClamped )
   EXPECT_DOUBLE_EQ( hw_cmd_values_[1], 1.5 ); // clamped to upper limit
 }
 
-// ============================================================================
-// E-Stop Tests
-// ============================================================================
-
-TEST_F( SafetyForwardControllerTest, EstopEngagePosition )
+// The controller manager owns the e-stop and stops this controller on it
+TEST_F( SafetyForwardControllerTest, SubscribesToNoEstop )
 {
   initController( "position" );
   configureController();
@@ -253,63 +252,10 @@ TEST_F( SafetyForwardControllerTest, EstopEngagePosition )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  // Set current state positions (for hold)
-  hw_state_values_[0] = 0.5;
-  hw_state_values_[1] = -0.3;
-  hw_state_values_[2] = 1.0;
-
-  sendEstop( true );
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-
-  // Commands should be hold positions
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.3 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
-}
-
-TEST_F( SafetyForwardControllerTest, EstopEngageVelocity )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  // Set some non-zero commands first
-  hector_test::reference( *controller_, 0 ) = 1.0;
-  hector_test::reference( *controller_, 1 ) = 1.0;
-  hector_test::reference( *controller_, 2 ) = 1.0;
-
-  sendEstop( true );
-  callUpdate();
-
-  // Velocity e-stop zeros commands
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], 0.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 0.0 );
-}
-
-TEST_F( SafetyForwardControllerTest, EstopRelease )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  sendEstop( true );
-  callUpdate(); // engage
-  sendEstop( false );
-  callUpdate(); // release
-
-  // reference_interfaces_ should be NaN after release
-  for ( size_t i = 0; i < joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) );
-  }
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  EXPECT_FALSE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                              node_name + "/safety_estop" ) );
+  EXPECT_TRUE( controller_->state_interface_configuration().names.empty() );
 }
 
 // ============================================================================
@@ -494,50 +440,7 @@ TEST_F( SafetyForwardControllerTest, StatusPublishesCorrectly )
 
   activateController();
 
-  EXPECT_FALSE( captured.estop_engaged );
   EXPECT_FALSE( captured.safety_timer_engaged );
-}
-
-TEST_F( SafetyForwardControllerTest, StatusUpdatesOnEstopEngage )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-
-  SafetyForwardControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-  EXPECT_FALSE( captured.estop_engaged );
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-  EXPECT_FALSE( captured.safety_timer_engaged );
-}
-
-TEST_F( SafetyForwardControllerTest, StatusUpdatesOnEstopRelease )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-
-  SafetyForwardControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-
-  sendEstop( false );
-  callUpdate();
-  EXPECT_FALSE( captured.estop_engaged );
 }
 
 TEST_F( SafetyForwardControllerTest, StatusUpdatesOnSafetyTimerEngage )
@@ -559,7 +462,6 @@ TEST_F( SafetyForwardControllerTest, StatusUpdatesOnSafetyTimerEngage )
   controller_->safety_engaged_.store( true );
   controller_->publish_status();
   EXPECT_TRUE( captured.safety_timer_engaged );
-  EXPECT_FALSE( captured.estop_engaged );
 }
 
 // ============================================================================
@@ -588,44 +490,9 @@ TEST_F( SafetyForwardControllerTest, RepeatedActivateDeactivateCycles )
     deactivateController();
 
     // Verify state is reset after deactivation
-    EXPECT_FALSE( controller_->estop_active_.load() );
-    EXPECT_FALSE( controller_->estop_engaged_.load() );
     EXPECT_FALSE( controller_->safety_engaged_.load() );
     EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
-    EXPECT_TRUE( controller_->safety_estop_subscriber_ == nullptr );
   }
-}
-
-TEST_F( SafetyForwardControllerTest, ReactivateAfterEstop )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-
-  activateController();
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-
-  deactivateController();
-  // After deactivation, estop should be reset
-  EXPECT_FALSE( controller_->estop_active_.load() );
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-
-  activateController();
-  // Controller should be in clean state
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-  EXPECT_FALSE( controller_->safety_engaged_.load() );
-
-  // Verify it works normally after re-activation
-  hector_test::reference( *controller_, 0 ) = 0.3;
-  hector_test::reference( *controller_, 1 ) = 0.0;
-  hector_test::reference( *controller_, 2 ) = 0.0;
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.3 );
 }
 
 // ============================================================================

@@ -18,8 +18,7 @@ namespace safety_forward_controller
 
 SafetyForwardController::SafetyForwardController()
     : controller_interface::ChainableControllerInterface(), safety_engaged_( false ),
-      safety_timer_period_ms_( 0 ), estop_active_( false ), estop_engaged_( false ),
-      rt_command_ptr_( nullptr ), joints_command_subscriber_( nullptr )
+      safety_timer_period_ms_( 0 ), rt_command_ptr_( nullptr ), joints_command_subscriber_( nullptr )
 {
 }
 
@@ -63,7 +62,6 @@ controller_interface::CallbackReturn SafetyForwardController::read_parameters()
   const urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
 
   command_interface_types_.clear();
-  state_interface_types_.clear();
   joints_.clear();
   joint_limits_.clear();
 
@@ -71,8 +69,6 @@ controller_interface::CallbackReturn SafetyForwardController::read_parameters()
     joints_.push_back( joint );
 
     command_interface_types_.push_back( interface_prefix + joint + "/" + interface_type_ );
-    // For now, we use the same interface type for states
-    state_interface_types_.push_back( joint + "/" + interface_type_ );
 
     if ( urdf && urdf->getJoint( joint ) ) {
       joint_limits_.push_back( urdf->getJoint( joint )->limits );
@@ -81,8 +77,6 @@ controller_interface::CallbackReturn SafetyForwardController::read_parameters()
       RCLCPP_WARN( get_node()->get_logger(), "No URDF limits found for joint '%s'", joint.c_str() );
     }
   }
-
-  hold_positions_.assign( joints_.size(), 0.0 );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -156,13 +150,7 @@ SafetyForwardController::command_interface_configuration() const
 }
 
 controller_interface::InterfaceConfiguration SafetyForwardController::state_interface_configuration() const
-{
-  controller_interface::InterfaceConfiguration state_interface_config;
-  state_interface_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  state_interface_config.names = state_interface_types_;
-
-  return state_interface_config;
-}
+{ return { controller_interface::interface_configuration_type::NONE, {} }; }
 
 controller_interface::CallbackReturn
 SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
@@ -198,17 +186,6 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
         }
       } );
 
-  // E-stop subscription
-  safety_estop_subscriber_ = get_node()->create_subscription<std_msgs::msg::Bool>(
-      "~/safety_estop", rclcpp::SystemDefaultsQoS(),
-      [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
-        if ( msg->data != estop_active_.load() ) {
-          estop_active_.store( msg->data );
-          RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s",
-                       estop_active_ ? "ENGAGED" : "DISENGAGED" );
-        }
-      } );
-
   publish_status();
 
   RCLCPP_INFO( get_node()->get_logger(), "activate successful" );
@@ -224,11 +201,8 @@ SafetyForwardController::on_deactivate( const rclcpp_lifecycle::State & /*previo
     safety_timer_->cancel();
   }
 
-  safety_estop_subscriber_.reset();
   joints_command_subscriber_.reset();
 
-  estop_active_.store( false );
-  estop_engaged_.store( false );
   safety_engaged_.store( false );
 
   return controller_interface::CallbackReturn::SUCCESS;
@@ -288,34 +262,6 @@ SafetyForwardController::update_reference_from_subscribers( const rclcpp::Time &
   return controller_interface::return_type::OK;
 }
 
-static std::size_t find_joint_index( const std::vector<std::string> &joints, const std::string &name )
-{
-  for ( std::size_t i = 0; i < joints.size(); ++i ) {
-    if ( joints[i] == name ) {
-      return i;
-    }
-  }
-  return static_cast<std::size_t>( -1 );
-}
-
-void SafetyForwardController::record_hold_positions()
-{
-  hold_positions_.assign( joints_.size(), 0.0 );
-
-  for ( const auto &state_iface : state_interfaces_ ) {
-    const auto &joint_name = state_iface.get_prefix_name();
-    const auto &iface_name = state_iface.get_interface_name();
-
-    if ( iface_name == "position" ) {
-      const std::size_t idx = find_joint_index( joints_, joint_name );
-      if ( idx < joints_.size() ) {
-        const auto opt = state_iface.get_optional();
-        if ( opt.has_value() )
-          hold_positions_[idx] = opt.value();
-      }
-    }
-  }
-}
 bool SafetyForwardController::on_set_chained_mode( const bool chained_mode )
 {
   if ( chained_mode ) {
@@ -339,45 +285,6 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
                           "%zu reference interfaces were busy; using their last value", busy );
   }
-  const bool estop_active = estop_active_.load();
-  bool estop_engaged = estop_engaged_.load();
-
-  // Detect edge: requested state vs. actually engaged state
-  if ( estop_active != estop_engaged ) {
-    if ( estop_active ) {
-      if ( params_.interface_type == "position" ) {
-        // -------- E-STOP ENGAGE --------
-        // Latch current joint positions (if available from state interfaces)
-        record_hold_positions();
-      }
-
-      estop_engaged_.store( true );
-      estop_engaged = true;
-
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: latching positions for %zu joints",
-                   hold_positions_.size() );
-      publish_status();
-    } else {
-      // -------- E-STOP RELEASE --------
-      estop_engaged_.store( false );
-      estop_engaged = false;
-
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming command output" );
-      publish_status();
-      // on e-stop release, invalidate commands once
-      std::fill( reference_values_.begin(), reference_values_.end(),
-                 std::numeric_limits<double>::quiet_NaN() );
-      if ( const auto busy = hector_ros_controllers::write_references(
-               ordered_exported_reference_interfaces_, reference_values_ );
-           busy > 0 ) {
-        RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
-                              "%zu reference interfaces were busy and keep their command after the "
-                              "e-stop release",
-                              busy );
-      }
-      return controller_interface::return_type::OK;
-    }
-  }
 
   bool successful = true;
 
@@ -385,17 +292,8 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
   for ( std::size_t index = 0; index < command_interfaces_.size(); ++index ) {
     double command_value = 0.0;
 
-    if ( estop_engaged ) {
-      // --- E-STOP BEHAVIOR ---
-      if ( interface_type_ == "position" ) {
-        // Hold current position
-        command_value = hold_positions_[index];
-      } else {
-        // velocity / effort → stop (zero)
-        command_value = 0.0;
-      }
-    } else if ( safety_engaged_.load() ) {
-      // --- SAFETY TIMER BEHAVIOR (no e-stop) ---
+    if ( safety_engaged_.load() ) {
+      // --- SAFETY TIMER BEHAVIOR ---
       command_value = 0.0;
     } else {
       // --- NORMAL OPERATION ---
@@ -444,7 +342,6 @@ void SafetyForwardController::publish_status()
   }
   hector_ros_controllers_msgs::msg::SafetyForwardControllerStatus msg;
   msg.header.stamp = get_node()->now();
-  msg.estop_engaged = estop_engaged_.load();
   msg.safety_timer_engaged = safety_engaged_.load();
   status_pub_->publish( msg );
 }
