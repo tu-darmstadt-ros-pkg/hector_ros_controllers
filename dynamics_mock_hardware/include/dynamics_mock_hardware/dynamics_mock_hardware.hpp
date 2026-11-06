@@ -45,6 +45,8 @@ struct JointData {
   bool wrap_position{ false };
 
   ControlMode control_mode{ ControlMode::POSITION };
+  /// Position held while the position command is NaN, latched at the first NaN.
+  double nan_hold_position{ std::numeric_limits<double>::quiet_NaN() };
 
   /// Accumulated angle for continuous joints (avoids atan2 discontinuity).
   double accumulated_angle{ 0.0 };

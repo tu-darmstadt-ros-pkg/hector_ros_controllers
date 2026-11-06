@@ -151,16 +151,22 @@ void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen
   bool need_rnea = false;
   Eigen::VectorXd a_desired = Eigen::VectorXd::Zero( model_.nv );
 
-  for ( const auto &jd : joints_ ) {
+  for ( auto &jd : joints_ ) {
     const int iv = jd.idx_v;
 
     switch ( jd.control_mode ) {
     case ControlMode::POSITION: {
-      double q_cmd = get_command( jd.name + "/" + hardware_interface::HW_IF_POSITION );
-      if ( std::isnan( q_cmd ) )
-        q_cmd = get_state( jd.name + "/" + hardware_interface::HW_IF_POSITION );
-
       const double q_cur = jd.is_continuous ? jd.accumulated_angle : q[jd.idx_q];
+      double q_cmd = get_command( jd.name + "/" + hardware_interface::HW_IF_POSITION );
+      // Like the real drivers: a NaN holds where the joint was at the first NaN, it does not sag
+      if ( std::isnan( q_cmd ) ) {
+        if ( std::isnan( jd.nan_hold_position ) )
+          jd.nan_hold_position = q_cur;
+        q_cmd = jd.nan_hold_position;
+      } else {
+        jd.nan_hold_position = std::numeric_limits<double>::quiet_NaN();
+      }
+
       const double v_cur = v[iv];
       const double raw_tau = position_kp_ * ( q_cmd - q_cur ) + position_kd_ * ( 0.0 - v_cur );
       tau[iv] = clampSymmetric( raw_tau, jd.max_torque );
@@ -532,10 +538,11 @@ return_type
 DynamicsMockHardware::perform_command_mode_switch( const std::vector<std::string> &start_interfaces,
                                                    const std::vector<std::string> &stop_interfaces )
 {
-  // Torque comes back holding where the joint was left
+  // A joint whose interface stops without a successor holds where it is, and torque comes back
+  // holding where the joint was left
   for ( const auto &key : stop_interfaces ) {
     for ( auto &jd : joints_ ) {
-      if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
+      if ( key.rfind( jd.name + "/", 0 ) == 0 ) {
         jd.control_mode = ControlMode::POSITION;
         const std::string position = jd.name + "/" + hardware_interface::HW_IF_POSITION;
         if ( has_command( position ) )

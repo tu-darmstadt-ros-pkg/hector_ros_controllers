@@ -597,6 +597,48 @@ TEST_F( DynamicsMockHardwareTest, TorqueOffGoesLimpAndHoldsOnRelease )
       << "torque came back driving to the goal from before the torque off";
 }
 
+// The hold rule of the real drivers: a NaN position command holds the position at the first NaN
+TEST_F( DynamicsMockHardwareTest, NaNPositionHoldsLatched )
+{
+  const std::string urdf = std::string( URDF_HEAD ) +
+                           makeHardwareBlock( -9.81, 100.0, 100.0, 20.0, 10.0, 0.001, 0.5 ) +
+                           std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+  auto pos_s = rm.claim_state_interface( "joint1/position" );
+  run_cycles( rm, 50 );
+  const double before = pos_s.get_optional().value();
+  {
+    auto pos_c = rm.claim_command_interface( "joint1/position" );
+    ASSERT_TRUE( pos_c.set_value( std::numeric_limits<double>::quiet_NaN() ) );
+  }
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( pos_s.get_optional().value(), before, 0.05 ) << "sagged under gravity";
+}
+
+// A stop without a successor (hcm's handover) holds instead of keeping the last velocity
+TEST_F( DynamicsMockHardwareTest, StopOnlyHolds )
+{
+  const std::string urdf = std::string( URDF_HEAD ) +
+                           makeHardwareBlock( 0.0, 100.0, 100.0, 20.0, 50.0, 0.001 ) +
+                           std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/velocity" }, { "joint1/position" } ) );
+  auto pos_s = rm.claim_state_interface( "joint1/position" );
+  {
+    auto vel_c = rm.claim_command_interface( "joint1/velocity" );
+    ASSERT_TRUE( vel_c.set_value( 1.0 ) );
+  }
+  run_cycles( rm, 50 );
+
+  ASSERT_TRUE( rm.perform_command_mode_switch( {}, { "joint1/velocity" } ) );
+  run_cycles( rm, 20 );
+  const double stopped_at = pos_s.get_optional().value();
+  run_cycles( rm, 100 );
+  EXPECT_NEAR( pos_s.get_optional().value(), stopped_at, 0.02 ) << "kept moving after the stop";
+}
+
 TEST_F( DynamicsMockHardwareTest, TorqueOffRefusesAMotionInterfaceOnTheSameJoint )
 {
   const std::string urdf = std::string( URDF_HEAD ) + withTorqueOff( makeHardwareBlock( 0.0 ) ) +
