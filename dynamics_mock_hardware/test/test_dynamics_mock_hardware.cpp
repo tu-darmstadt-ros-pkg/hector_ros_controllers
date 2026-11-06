@@ -557,6 +557,60 @@ TEST_F( DynamicsMockHardwareTest, ModeSwitching_RejectsMultipleInterfaces )
 }
 
 // ===========================================================================
+// Test: torque_off is a mode, claimed without a value
+// ===========================================================================
+
+std::string withTorqueOff( std::string block )
+{
+  const std::string anchor = R"(<command_interface name="effort"/>)";
+  block.insert( block.find( anchor ) + anchor.size(), R"(<command_interface name="torque_off"/>)" );
+  return block;
+}
+
+TEST_F( DynamicsMockHardwareTest, TorqueOffGoesLimpAndHoldsOnRelease )
+{
+  const std::string urdf =
+      std::string( URDF_HEAD ) +
+      withTorqueOff( makeHardwareBlock( -9.81, 100.0, 100.0, 20.0, 10.0, 0.001, 0.5 ) ) +
+      std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+
+  auto pos_s = rm.claim_state_interface( "joint1/position" );
+  {
+    auto pos_c = rm.claim_command_interface( "joint1/position" );
+    ASSERT_TRUE( pos_c.set_value( 0.5 ) );
+  }
+  run_cycles( rm, 50 );
+  ASSERT_NEAR( pos_s.get_optional().value(), 0.5, 0.1 );
+
+  ASSERT_TRUE( rm.prepare_command_mode_switch( { "joint1/torque_off" }, { "joint1/position" } ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/torque_off" }, { "joint1/position" } ) );
+  run_cycles( rm, 30 );
+  const double released_at = pos_s.get_optional().value();
+  EXPECT_LT( released_at, 0.3 ) << "a limp pendulum falls under gravity";
+
+  ASSERT_TRUE( rm.prepare_command_mode_switch( {}, { "joint1/torque_off" } ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( {}, { "joint1/torque_off" } ) );
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( pos_s.get_optional().value(), released_at, 0.1 )
+      << "torque came back driving to the goal from before the torque off";
+}
+
+TEST_F( DynamicsMockHardwareTest, TorqueOffRefusesAMotionInterfaceOnTheSameJoint )
+{
+  const std::string urdf = std::string( URDF_HEAD ) + withTorqueOff( makeHardwareBlock( 0.0 ) ) +
+                           std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+
+  EXPECT_FALSE( rm.prepare_command_mode_switch( { "joint1/torque_off", "joint1/position" }, {} ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/torque_off" }, { "joint1/position" } ) );
+  EXPECT_FALSE( rm.prepare_command_mode_switch( { "joint1/position" }, {} ) );
+  EXPECT_TRUE( rm.prepare_command_mode_switch( { "joint1/position" }, { "joint1/torque_off" } ) );
+}
+
+// ===========================================================================
 // Test: different torque limits produce different behavior (sync drift)
 // ===========================================================================
 

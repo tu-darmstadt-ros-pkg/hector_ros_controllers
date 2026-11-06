@@ -195,6 +195,9 @@ void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen
       tau[iv] = clampSymmetric( tau_cmd, jd.max_torque );
       break;
     }
+
+    case ControlMode::TORQUE_OFF:
+      break;
     }
   }
 
@@ -486,19 +489,28 @@ CallbackReturn DynamicsMockHardware::on_deactivate( const rclcpp_lifecycle::Stat
 // Mode switching
 // =============================================================================
 
-return_type DynamicsMockHardware::prepare_command_mode_switch(
-    const std::vector<std::string> &start_interfaces,
-    const std::vector<std::string> & /*stop_interfaces*/ )
+return_type
+DynamicsMockHardware::prepare_command_mode_switch( const std::vector<std::string> &start_interfaces,
+                                                   const std::vector<std::string> &stop_interfaces )
 {
-  // Validate: at most one standard command interface per joint
+  // Validate: at most one command interface per joint, a held torque_off claim included
   std::unordered_map<std::string, int> joint_start_count;
 
+  for ( const auto &jd : joints_ ) {
+    const std::string torque_off = jd.name + "/" + TORQUE_OFF_INTERFACE;
+    if ( jd.control_mode == ControlMode::TORQUE_OFF &&
+         std::find( stop_interfaces.begin(), stop_interfaces.end(), torque_off ) ==
+             stop_interfaces.end() ) {
+      joint_start_count[jd.name]++;
+    }
+  }
   for ( const auto &key : start_interfaces ) {
     for ( const auto &jd : joints_ ) {
       if ( key == jd.name + "/" + hardware_interface::HW_IF_POSITION ||
            key == jd.name + "/" + hardware_interface::HW_IF_VELOCITY ||
            key == jd.name + "/" + hardware_interface::HW_IF_ACCELERATION ||
-           key == jd.name + "/" + hardware_interface::HW_IF_EFFORT ) {
+           key == jd.name + "/" + hardware_interface::HW_IF_EFFORT ||
+           key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
         joint_start_count[jd.name]++;
       }
     }
@@ -516,10 +528,21 @@ return_type DynamicsMockHardware::prepare_command_mode_switch(
   return return_type::OK;
 }
 
-return_type DynamicsMockHardware::perform_command_mode_switch(
-    const std::vector<std::string> &start_interfaces,
-    const std::vector<std::string> & /*stop_interfaces*/ )
+return_type
+DynamicsMockHardware::perform_command_mode_switch( const std::vector<std::string> &start_interfaces,
+                                                   const std::vector<std::string> &stop_interfaces )
 {
+  // Torque comes back holding where the joint was left
+  for ( const auto &key : stop_interfaces ) {
+    for ( auto &jd : joints_ ) {
+      if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
+        jd.control_mode = ControlMode::POSITION;
+        const std::string position = jd.name + "/" + hardware_interface::HW_IF_POSITION;
+        if ( has_command( position ) )
+          set_command( position, get_state( position ) );
+      }
+    }
+  }
   for ( const auto &key : start_interfaces ) {
     for ( auto &jd : joints_ ) {
       if ( key == jd.name + "/" + hardware_interface::HW_IF_POSITION ) {
@@ -533,6 +556,8 @@ return_type DynamicsMockHardware::perform_command_mode_switch(
         jd.control_mode = ControlMode::ACCELERATION;
       } else if ( key == jd.name + "/" + hardware_interface::HW_IF_EFFORT ) {
         jd.control_mode = ControlMode::EFFORT;
+      } else if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
+        jd.control_mode = ControlMode::TORQUE_OFF;
       }
     }
   }
@@ -554,6 +579,8 @@ static const char *controlModeStr( ControlMode m )
     return "A";
   case ControlMode::EFFORT:
     return "E";
+  case ControlMode::TORQUE_OFF:
+    return "T";
   }
   return "?";
 }
@@ -597,6 +624,9 @@ void DynamicsMockHardware::logDebugState() const
       cmd = has_command( name + "/" + hardware_interface::HW_IF_EFFORT )
                 ? get_command( name + "/" + hardware_interface::HW_IF_EFFORT )
                 : std::numeric_limits<double>::quiet_NaN();
+      break;
+    case ControlMode::TORQUE_OFF:
+      cmd = std::numeric_limits<double>::quiet_NaN();
       break;
     }
 
