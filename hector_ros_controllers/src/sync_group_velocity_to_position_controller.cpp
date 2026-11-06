@@ -510,7 +510,10 @@ SyncGroupVelocityToPositionController::update_reference_from_subscribers(
 }
 
 bool SyncGroupVelocityToPositionController::on_set_chained_mode( bool /*chained_mode*/ )
-{ return true; }
+{
+  // The previous source's last reference must not outlive the switch
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
+}
 
 // ---------------------------------------------------------------------------
 // State reading

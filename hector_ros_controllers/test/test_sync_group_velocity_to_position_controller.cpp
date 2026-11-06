@@ -504,6 +504,22 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SubscribesToNoEstop )
                                                               "/estop_board/hard_estop" ) );
 }
 
+TEST_F( SyncGroupVelocityToPositionControllerTest, ChainedModeSwitchInvalidatesReferences )
+{
+  initController();
+  configureController();
+  for ( const bool chained : { true, false } ) {
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      hector_test::reference( *controller_, i ) = 0.5;
+    }
+    ASSERT_TRUE( controller_->on_set_chained_mode( chained ) );
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) )
+          << ( chained ? "chained" : "unchained" ) << " mode kept reference " << i;
+    }
+  }
+}
+
 // ============================================================================
 // NaN Reference Tests
 // ============================================================================
