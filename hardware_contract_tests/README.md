@@ -1,8 +1,7 @@
 # hardware_contract_tests
 
 A gtest suite that checks a ros2_control hardware plugin against what `hector_controller_manager`
-relies on. These rows of the plugin contract (rulebook 2.1) and the torque_off decisions are
-checked:
+relies on. These parts of the plugin contract and the torque_off decisions are checked:
 
 - a stop alone holds a moving joint, and a start alone takes commands;
 - a NaN position command stops a moving joint within its braking distance (0.1 rad) and holds it

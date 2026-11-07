@@ -367,7 +367,8 @@ TEST_F( SafetyForwardControllerTest, ChainedModeCleanup )
   initController( "velocity" );
   configureController();
 
-  EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
+  // Subscribed only while active and unchained, so a command cannot arrive before activation
+  EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
   EXPECT_TRUE( controller_->safety_timer_ != nullptr );
 
   controller_->on_set_chained_mode( true );

@@ -103,22 +103,6 @@ SafetyForwardController::on_configure( const rclcpp_lifecycle::State & /*previou
     return ret;
   }
 
-  // Subscriber for external commands (used when NOT in chained mode)
-  joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
-      "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
-        rt_command_ptr_.writeFromNonRT( msg );
-        if ( msg->data.size() != joints_.size() ) {
-          return;
-        }
-        const bool was_engaged = safety_engaged_.exchange( false );
-        if ( safety_timer_ ) {
-          safety_timer_->reset();
-        }
-        if ( was_engaged ) {
-          publish_status();
-        }
-      } );
-
   // Safety timer: if no commands for some time, engage safety (zero commands)
   if ( params_.interface_type != "position" ) // Position controllers don't need a safety timer
   {
@@ -284,7 +268,7 @@ bool SafetyForwardController::on_set_chained_mode( const bool chained_mode )
 {
   if ( chained_mode ) {
     joints_command_subscriber_.reset();
-    // Cancelled, not destroyed: an unchained activation later needs it again
+    // Cancelled, not destroyed, because an unchained activation later needs it again
     if ( safety_timer_ ) {
       safety_timer_->cancel();
     }

@@ -4,7 +4,7 @@
 > hardware interface have no e-stop of their own: `hector_controller_manager` stops them on a hard
 > or soft e-stop. Run it with both e-stop topics configured (`estop_topics`, hard and soft). Under
 > the stock `ros2_control` controller manager nothing stops them on an e-stop. Do not deploy this
-> branch with athena's current launch before it moves to hcm (team 5 phase L1).
+> branch with a launch that still starts the stock controller manager.
 
 A set of ROS 2 controllers focused on **safety**, **self-collision avoidance**, **safe position command handling**, and **gripper control with effort limiting**.
 All controllers are compatible with **ros2_control**; most can be inserted as **chain controllers** (the gripper action controller is a terminal endpoint).
@@ -401,8 +401,8 @@ other tooling, and additionally accepts goals via two topics for teleop / script
       effort stays above `is_grasped_effort_threshold` for `is_grasped_dwell_cycles` consecutive update cycles.
     * Published at `action_monitor_rate`. Informational only — does not end an active action goal.
 * **Joint limit clamping** from URDF for revolute/prismatic joints (continuous joints are unclamped).
-* **Holds last position** with `default_max_effort` whenever no goal is active, so the actuator does not jump on
-  controller activation.
+* **No target on activation**: the controller writes nothing until the first command arrives, so the hardware keeps
+  its current goal and a held grasp is not released.
 
 ### Required Hardware Interfaces
 
@@ -486,6 +486,28 @@ ros2 topic pub --rate 20 /gripper_controller/velocity_command std_msgs/msg/Float
 
 # Grasp detection
 ros2 topic echo /gripper_controller/is_grasped
+```
+
+---
+
+## 6. Claim Only Controller
+
+`claim_only_controller/ClaimOnlyController` claims the listed command interfaces and writes nothing to them. It is
+meant for interfaces where the claim itself is the command, such as `<joint>/torque_off` on a Dynamixel joint: while
+the controller is active the joint is limp and the hardware refuses any motion claim on it.
+
+Mark it `protected: true` in the controller manager, so a conflicting switch or an e-stop does not end the claim.
+
+```yaml
+controller_manager:
+  ros__parameters:
+    arm_torque_off_controller:
+      type: claim_only_controller/ClaimOnlyController
+      protected: true
+
+arm_torque_off_controller:
+  ros__parameters:
+    command_interfaces: [ arm_joint_1/torque_off, arm_joint_2/torque_off ]
 ```
 
 ---
