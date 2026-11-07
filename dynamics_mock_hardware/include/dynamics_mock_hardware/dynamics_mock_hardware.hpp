@@ -23,7 +23,7 @@ namespace dynamics_mock_hardware
 using hardware_interface::return_type;
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-/// TORQUE_OFF is claimed through <joint>/torque_off: the motor applies no torque and the joint goes limp.
+/// TORQUE_OFF is claimed through <joint>/torque_off. The motor applies no torque and the joint goes limp.
 enum class ControlMode { POSITION, VELOCITY, ACCELERATION, EFFORT, TORQUE_OFF };
 
 /// Per-joint data bridging ros2_control and pinocchio.

@@ -610,7 +610,7 @@ TEST_F( DynamicsMockHardwareTest, TorqueOffGoesLimpAndHoldsOnlyWithAMotionStart 
       << "torque came back driving to the goal from before the torque off";
 }
 
-// The hold rule of the real drivers: a NaN position command holds the position at the first NaN
+// Like the real drivers, a NaN position command holds the position at the first NaN
 TEST_F( DynamicsMockHardwareTest, NaNPositionHoldsLatched )
 {
   const std::string urdf = std::string( URDF_HEAD ) +
@@ -652,7 +652,25 @@ TEST_F( DynamicsMockHardwareTest, StopOnlyHolds )
   EXPECT_NEAR( pos_s.get_optional().value(), stopped_at, 0.02 ) << "kept moving after the stop";
 }
 
-// The plant for the hard e-stop recovery: a cut faults the reads and blocks configure and activate
+// hcm runs the successor's first update before the perform that hands the joint over
+TEST_F( DynamicsMockHardwareTest, AHandoverKeepsTheSuccessorsFirstCommand )
+{
+  const std::string urdf =
+      std::string( URDF_HEAD ) + makeHardwareBlock( 0.0 ) + std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/velocity" }, { "joint1/position" } ) );
+  run_cycles( rm, 10 );
+  {
+    auto pos_c = rm.claim_command_interface( "joint1/position" );
+    ASSERT_TRUE( pos_c.set_value( 0.5 ) );
+  }
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/position" }, { "joint1/velocity" } ) );
+  auto pos_c = rm.claim_command_interface( "joint1/position" );
+  EXPECT_EQ( pos_c.get_optional().value(), 0.5 );
+}
+
+// The plant for the hard e-stop recovery. A cut faults the reads and blocks configure and activate
 // until the power is back, and on_error leaves the component unconfigured
 TEST_F( DynamicsMockHardwareTest, PowerCutFaultsAndRecovers )
 {

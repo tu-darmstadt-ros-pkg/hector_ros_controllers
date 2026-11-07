@@ -158,7 +158,7 @@ void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen
     case ControlMode::POSITION: {
       const double q_cur = jd.is_continuous ? jd.accumulated_angle : q[jd.idx_q];
       double q_cmd = get_command( jd.name + "/" + hardware_interface::HW_IF_POSITION );
-      // Like the real drivers: a NaN holds where the joint was at the first NaN, it does not sag
+      // Like the real drivers, a NaN holds where the joint was at the first NaN instead of sagging
       if ( std::isnan( q_cmd ) ) {
         if ( std::isnan( jd.nan_hold_position ) )
           jd.nan_hold_position = q_cur;
@@ -399,7 +399,7 @@ DynamicsMockHardware::on_init( const hardware_interface::HardwareComponentInterf
   q_next_ = Eigen::VectorXd::Zero( model_.nq );
   effective_inertia_ = Eigen::VectorXd::Ones( model_.nv );
 
-  // A simulated power cut, for the controller manager's hard e-stop recovery: reads fail, and the
+  // A simulated power cut for the controller manager's hard e-stop recovery. Reads fail, and the
   // component cannot be configured or activated until the power is back
   if ( const auto node = get_node() ) {
     node->declare_parameter( "simulate_power_cut", false );
@@ -533,7 +533,7 @@ return_type
 DynamicsMockHardware::prepare_command_mode_switch( const std::vector<std::string> &start_interfaces,
                                                    const std::vector<std::string> &stop_interfaces )
 {
-  // Validate: at most one command interface per joint, a held torque_off claim included
+  // At most one command interface per joint, a held torque_off claim included
   std::unordered_map<std::string, int> joint_start_count;
 
   for ( const auto &jd : joints_ ) {
@@ -573,11 +573,19 @@ DynamicsMockHardware::perform_command_mode_switch( const std::vector<std::string
 {
   // A joint whose motion interface stops without a successor holds where it is. A released
   // torque_off stays limp, and a motion start brings torque back holding where the joint was left.
+  // A handover keeps the successor's command, which hcm writes before this call.
+  const auto handed_over = [&]( const JointData &jd ) {
+    const auto moves = [&]( const std::string &key ) {
+      return key.rfind( jd.name + "/", 0 ) == 0 && key != jd.name + "/" + TORQUE_OFF_INTERFACE;
+    };
+    return std::any_of( start_interfaces.begin(), start_interfaces.end(), moves ) &&
+           std::any_of( stop_interfaces.begin(), stop_interfaces.end(), moves );
+  };
   for ( const auto &key : stop_interfaces ) {
     for ( auto &jd : joints_ ) {
       if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
         jd.torque_off_claimed = false;
-      } else if ( key.rfind( jd.name + "/", 0 ) == 0 ) {
+      } else if ( key.rfind( jd.name + "/", 0 ) == 0 && !handed_over( jd ) ) {
         jd.control_mode = ControlMode::POSITION;
         const std::string position = jd.name + "/" + hardware_interface::HW_IF_POSITION;
         if ( has_command( position ) )
@@ -590,7 +598,7 @@ DynamicsMockHardware::perform_command_mode_switch( const std::vector<std::string
       if ( key == jd.name + "/" + hardware_interface::HW_IF_POSITION ) {
         jd.control_mode = ControlMode::POSITION;
         // Seed position command to current position to prevent jump
-        if ( has_command( key ) )
+        if ( has_command( key ) && !handed_over( jd ) )
           set_command( key, get_state( key ) );
       } else if ( key == jd.name + "/" + hardware_interface::HW_IF_VELOCITY ) {
         jd.control_mode = ControlMode::VELOCITY;
