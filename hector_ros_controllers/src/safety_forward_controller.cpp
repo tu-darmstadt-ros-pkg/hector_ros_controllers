@@ -155,7 +155,7 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // Reset command buffer if a command came through callback when controller was inactive
+  // Drop the last command of an earlier activation
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
   // No target until a new command arrives, so the hardware holds instead of resuming an old one
   if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
