@@ -612,10 +612,16 @@ Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
   // normal and must be flipped, otherwise the gradient points into the collision.
   const Eigen::Vector3d diff = ( dres.min_distance < 0.0 ) ? ( p1 - p2 ).eval() : ( p2 - p1 ).eval();
   const double dist_norm = diff.norm();
-  if ( dist_norm < 1e-12 ) {
-    return grad; // points coincide, gradient undefined
+  Eigen::Vector3d n;
+  if ( dist_norm >= 1e-12 ) {
+    n = diff / dist_norm;
+  } else if ( dres.normal.allFinite() && dres.normal.norm() > 1e-12 ) {
+    // Exact contact: the witness points coincide, but the separation normal (from the
+    // first object to the second, i.e. toward increasing distance) is still defined.
+    n = dres.normal.normalized();
+  } else {
+    return grad;
   }
-  const Eigen::Vector3d n = diff / dist_norm;
 
   // Point Jacobians and gradient: dd/dv = n^T * (Jp2 - Jp1)
   // where Jp = J_linear - skew(r) * J_angular

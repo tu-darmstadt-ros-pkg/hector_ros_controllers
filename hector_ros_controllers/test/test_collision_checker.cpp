@@ -1264,6 +1264,43 @@ TEST_F( CollisionCheckerTest, PenetrationGradientPointsOutward )
   EXPECT_GT( d1, d0 ) << "moving along the gradient must increase the pair distance";
 }
 
+TEST_F( CollisionCheckerTest, ExactContactKeepsTheGradient )
+{
+  // Two spheres touching at one point: the witness points coincide, so they give no
+  // direction. The pair is exactly at the padding, where its damper row must still
+  // forbid closing in; a zero gradient would drop the row and let the slider move
+  // straight into the base.
+  const std::string urdf = R"(<?xml version="1.0"?>
+<robot name="test_exact_contact">
+  <link name="base_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <link name="slider_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <joint name="slide_joint" type="prismatic">
+    <parent link="base_link"/><child link="slider_link"/>
+    <origin xyz="0.25 0 0"/><axis xyz="1 0 0"/>
+    <limit lower="-1.0" upper="1.0" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>)";
+
+  for ( const bool broadphase : { false, true } ) {
+    CollisionChecker checker( node_ );
+    checker.setBroadphase( broadphase );
+    ASSERT_TRUE( checker.initFromXml( urdf, "", { "slide_joint" } ) );
+    checker.setSafetyZoneThreshold( 0.05 );
+
+    const auto &result = checker.checkCollisionQ( checker.neutralConfiguration() );
+    ASSERT_EQ( result.safety_zone_pairs.size(), 1u ) << "broadphase " << broadphase;
+    const auto &pair = result.safety_zone_pairs.front();
+    ASSERT_EQ( pair.distance, 0.0 ) << "broadphase " << broadphase;
+    const int vi = checker.getJointVelocityIndex( "slide_joint" );
+    EXPECT_NEAR( pair.gradient[vi], 1.0, 1e-9 )
+        << "sliding away (+x) increases the distance; broadphase " << broadphase;
+  }
+}
+
 // __gcov_dump is only available when compiled with --coverage.
 // Use a weak symbol so the call is a no-op in normal (non-coverage) builds.
 #if defined( __GNUC__ )
