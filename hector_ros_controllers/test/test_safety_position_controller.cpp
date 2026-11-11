@@ -997,6 +997,7 @@ TEST_F( SafetyPositionControllerTest, DebugJointStatesArePublishedOffTheControlT
   controller_->diagnostics_->publishDebug();
 
   EXPECT_EQ( in_msg.name, controlled_joints_ );
+  ASSERT_EQ( in_msg.position.size(), controlled_joints_.size() );
   EXPECT_EQ( in_msg.position[0], 1.0 );
   EXPECT_EQ( out_msg.name, controlled_joints_ );
   EXPECT_EQ( out_msg.position, std::vector<double>( hw_cmd_values_.begin(), hw_cmd_values_.end() ) )
