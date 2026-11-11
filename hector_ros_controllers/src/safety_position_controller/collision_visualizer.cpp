@@ -91,14 +91,23 @@ void CollisionVisualizer::setModel( const CollisionChecker &checker )
   const auto &geom_model = checker.geometryModel();
   num_geometries_ = geom_model.geometryObjects.size();
   num_pairs_ = geom_model.collisionPairs.size();
-  const auto reserve = [this]( Snapshot &snap ) {
+  // A new model starts without a capture: the last one belongs to the previous
+  // activation and counts as published.
+  const std::lock_guard<std::mutex> lock( model_mutex_ );
+  const auto reset = [this]( Snapshot &snap ) {
+    snap.stamp_ns = 0;
+    snap.geometry.clear();
+    snap.lines.clear();
     snap.geometry.reserve( num_geometries_ );
     snap.lines.reserve( num_pairs_ + 1 ); // + the closest pair drawn on its own
   };
-  reserve( staging_ );
-  box_.set( reserve );
+  reset( staging_ );
+  box_.set( [&]( Snapshot &snap ) {
+    reset( snap );
+    snap.seq = staging_.seq;
+  } );
+  published_seq_ = staging_.seq;
 
-  const std::lock_guard<std::mutex> lock( model_mutex_ );
   root_frame_ = checker.rootFrame();
   geometry_templates_.clear();
   for ( std::size_t i = 0; i < num_geometries_; ++i ) {

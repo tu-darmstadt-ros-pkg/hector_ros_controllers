@@ -80,22 +80,32 @@ void SafetyDiagnostics::configure( std::vector<std::string> joint_names,
 {
   const auto n = static_cast<Eigen::Index>( joint_names.size() );
   const auto m = static_cast<Eigen::Index>( max_constraints );
-  QpDebugSnapshot &qp = qp_staging_;
-  for ( auto *v : { &qp.v_des, &qp.v_cmd, &qp.box_lb, &qp.box_ub, &qp.q_cmd } ) {
-    v->setZero( n );
-  }
-  qp.q_ref.assign( joint_names.size(), 0.0 );
-  qp.pair_indices.assign( max_constraints, 0 );
-  for ( auto *v : { &qp.pair_distances, &qp.pair_rhs, &qp.pair_velocities } ) {
-    v->setZero( m );
-  }
-  qp_box_.set( qp_staging_ );
-  for ( auto *channel : { &js_in_, &js_out_ } ) {
-    channel->staging.position.assign( joint_names.size(), 0.0 );
-    channel->box.set( channel->staging );
-  }
   {
+    // A new activation starts without a capture: what the previous one left must
+    // neither be published again nor be read against arrays sized for another limit.
+    // The sequence numbers continue, and the empty snapshots count as published.
     const std::lock_guard<std::mutex> lock( debug_mutex_ );
+    const uint64_t qp_seq = qp_staging_.seq;
+    QpDebugSnapshot &qp = qp_staging_;
+    qp = QpDebugSnapshot{};
+    qp.seq = qp_seq;
+    for ( auto *v : { &qp.v_des, &qp.v_cmd, &qp.box_lb, &qp.box_ub, &qp.q_cmd } ) {
+      v->setZero( n );
+    }
+    qp.q_ref.assign( joint_names.size(), 0.0 );
+    qp.pair_indices.assign( max_constraints, 0 );
+    for ( auto *v : { &qp.pair_distances, &qp.pair_rhs, &qp.pair_velocities } ) {
+      v->setZero( m );
+    }
+    qp_box_.set( qp );
+    qp_published_seq_ = qp_seq;
+    for ( auto *channel : { &js_in_, &js_out_ } ) {
+      channel->staging.stamp_ns = 0;
+      channel->staging.position.assign( joint_names.size(), 0.0 );
+      channel->box.set( channel->staging );
+      channel->published_seq = channel->staging.seq;
+    }
+
     debug_joint_names_ = joint_names;
     pair_names_.clear();
     const std::size_t num_pairs = checker_ ? checker_->getNumCollisionPairs() : 0;

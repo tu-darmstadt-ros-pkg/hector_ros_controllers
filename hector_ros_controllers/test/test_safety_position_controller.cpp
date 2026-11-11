@@ -1002,6 +1002,50 @@ TEST_F( SafetyPositionControllerTest, DebugJointStatesArePublishedOffTheControlT
       << "the commands written in the last cycle";
 }
 
+TEST_F( SafetyPositionControllerTest, ReactivationDoesNotRepublishThePreviousCapture )
+{
+  // The debug snapshots outlive a deactivation. What the last activation captured is
+  // stale, and with a lower constraint limit its pair count no longer fits the arrays
+  // the new activation sized.
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", true ),
+                    rclcpp::Parameter( "publish_debug_joint_states", true ),
+                    rclcpp::Parameter( "debug_visualize_collisions", true ),
+                    rclcpp::Parameter( "collision_visualization_rate", 0.0 ),
+                    rclcpp::Parameter( "qp_max_pair_constraints", 10 ),
+                    rclcpp::Parameter( "collision_safety_zone", 0.5 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node = controller_->get_node();
+  const auto node_name = std::string( node->get_fully_qualified_name() );
+  auto qp_debug_mock = rtest::findPublisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>(
+      node, node_name + "/qp_debug" );
+  auto in_mock =
+      rtest::findPublisher<sensor_msgs::msg::JointState>( node, node_name + "/debug_in_joint_states" );
+  auto marker_mock = rtest::findPublisher<visualization_msgs::msg::MarkerArray>(
+      node, node_name + "/debug_collision_geometry" );
+  ASSERT_TRUE( qp_debug_mock && in_mock && marker_mock );
+
+  controller_->reference_interfaces_ = { 0.3, 0.2, 0.1 };
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( controller_->pipeline_->lastResult().num_collision_constraints, 2 );
+
+  deactivateController();
+  node->set_parameter( rclcpp::Parameter( "qp_max_pair_constraints", 2 ) );
+  activateController();
+
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).Times( 0 );
+  EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).Times( 0 );
+  EXPECT_CALL( *marker_mock, publish( ::testing::_ ) ).Times( 0 );
+  controller_->publish_debug();
+}
+
 // ============================================================================
 // Status Publishing
 // ============================================================================
