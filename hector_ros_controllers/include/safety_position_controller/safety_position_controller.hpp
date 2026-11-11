@@ -182,7 +182,7 @@ private:
    * write. Translates pipeline/observer events into logs.
    * @return true if an event occurred that the caller should publish a status for
    */
-  bool run_safety_pipeline();
+  bool run_safety_pipeline( const rclcpp::Duration &period );
 
   /// True while safety checks are bypassed.
   bool bypass_active() const
@@ -204,7 +204,7 @@ private:
    * pipeline is invalidated, so recovery rebases and parks instead of resuming the
    * pre-failure motion.
    */
-  void note_state_unobservable();
+  void note_state_unobservable( const rclcpp::Duration &period );
 
   /**
    * @brief Clear the unobservable-state accounting on a good cycle.

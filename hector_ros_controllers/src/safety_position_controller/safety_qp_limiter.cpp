@@ -299,20 +299,20 @@ double SafetyQpLimiter::desiredVelocity( const double diff, const double v_max, 
   return std::copysign( mag, diff );
 }
 
-void SafetyQpLimiter::brakingVelocity( const Eigen::VectorXd &v_prev, Eigen::VectorXd &v ) const
+void SafetyQpLimiter::brakingVelocity( const Eigen::VectorXd &v_prev, const double dt,
+                                       Eigen::VectorXd &v ) const
 {
   v.resize( v_prev.size() );
   for ( Eigen::Index i = 0; i < v_prev.size(); ++i ) {
-    const double step = params_.a_dec[i] * params_.dt;
+    const double step = params_.a_dec[i] * dt;
     v[i] = v_prev[i] - std::copysign( std::min( std::abs( v_prev[i] ), step ), v_prev[i] );
   }
 }
 
-void SafetyQpLimiter::computeVelocityBounds( const SafetyQpInput &input, const bool crawl,
-                                             bool &conflict )
+void SafetyQpLimiter::computeVelocityBounds( const SafetyQpInput &input, const double dt,
+                                             const bool crawl, bool &conflict )
 {
   conflict = false;
-  const double dt = params_.dt;
 
   for ( Eigen::Index i = 0; i < static_cast<Eigen::Index>( n_ ); ++i ) {
     const double v_prev = input.v_prev[i];
@@ -372,6 +372,8 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   const auto t0 = std::chrono::steady_clock::now();
   const auto ni = static_cast<Eigen::Index>( n_ );
   const QpCollisionConstraints &collisions = input.collisions;
+  const double dt = input.dt.value_or( params_.dt );
+  assert( dt > 0.0 );
 
   // Reused across solves so the per-cycle vectors keep their capacity; the flags are
   // cleared by name (a new field must be reset here too).
@@ -396,7 +398,7 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
       }
     }
   }
-  computeVelocityBounds( input, crawl, result.bounds_conflict );
+  computeVelocityBounds( input, dt, crawl, result.bounds_conflict );
   l_.head( ni ) = box_lb_;
   u_.head( ni ) = box_ub_;
 
@@ -415,7 +417,7 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
     const double damper_rhs = -params_.damper_xi * ( distance - params_.d_pad ) / zone_width;
     const double a_pair = C_.row( row ).cwiseAbs().dot( params_.a_dec.transpose() );
     const double braking_rhs =
-        -positionLimitBound( distance - params_.d_pad, std::max( a_pair, 1e-9 ), params_.dt );
+        -positionLimitBound( distance - params_.d_pad, std::max( a_pair, 1e-9 ), dt );
     l_[row] = std::min( std::max( damper_rhs, braking_rhs ), params_.max_repulsion_speed );
     u_[row] = kInf;
   }
@@ -477,7 +479,7 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   } else {
     // Still infeasible (e.g. braking transient) or solver failure -> predictable
     // degradation: brake to zero at the deceleration limit.
-    brakingVelocity( input.v_prev, result.v );
+    brakingVelocity( input.v_prev, dt, result.v );
     result.braking = true;
   }
 

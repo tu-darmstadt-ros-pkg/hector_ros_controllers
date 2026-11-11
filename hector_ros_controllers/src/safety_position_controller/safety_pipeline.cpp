@@ -80,8 +80,14 @@ SafetyPipeline::SafetyPipeline( Config config )
 }
 
 bool SafetyPipeline::prepare( const std::vector<double> &reference,
-                              const std::vector<double> &measured, const bool bypass_active )
+                              const std::vector<double> &measured, const bool bypass_active,
+                              const double period )
 {
+  period_ = std::isfinite( period ) && period > 0.0 ? period : 0.0;
+  // The step the desired velocity aims to cover; without time passing nothing moves
+  // anyway, so the nominal step keeps it well-defined.
+  const double step = period_ > 0.0 ? period_ : config_.qp.dt;
+  input_.dt = step;
   const std::size_t n = config_.joints.size();
   reference_.assign( reference.begin(), reference.end() );
 
@@ -131,7 +137,7 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     }
     ref_leashed_[idx] = cmd_[idx] + diff;
     input_.v_des[idx] = SafetyQpLimiter::desiredVelocity( diff, config_.qp.v_max[idx],
-                                                          config_.qp.a_dec[idx], config_.qp.dt );
+                                                          config_.qp.a_dec[idx], step );
     wants_motion_ |= std::abs( input_.v_des[idx] ) > config_.stall_velocity_threshold;
 
     // Per-joint deviation box around the leashed reference: bounds how far every link
@@ -245,15 +251,19 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
     }
   }
 
+  Events events;
+  if ( period_ <= 0.0 ) {
+    return events; // no time passed: nothing moves, no timer runs
+  }
+
   // ---- Solve, integrate, clamp ----
   const SafetyQpResult &result = limiter_->solve( input_ );
   vel_ = result.v;
-  cmd_ += vel_ * config_.qp.dt;
+  cmd_ += vel_ * period_;
 
   // ---- Stall detection: reference demands motion but the QP output is ~zero ----
-  Events events;
   const bool moving = vel_.cwiseAbs().maxCoeff() > config_.stall_velocity_threshold;
-  events.stall = monitor_.update( wants_motion_, moving, config_.qp.dt );
+  events.stall = monitor_.update( wants_motion_, moving, period_ );
   if ( events.stall.parked ) {
     parked_reference_ = reference_;
   }

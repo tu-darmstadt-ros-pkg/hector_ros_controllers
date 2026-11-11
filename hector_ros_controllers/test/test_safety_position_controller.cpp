@@ -1548,6 +1548,41 @@ TEST_F( SafetyPositionControllerTest, ProlongedBusyStateHandleParksOnRecovery )
   EXPECT_GT( hw_cmd_values_[0], resume_start ) << "tracking must resume toward the new reference";
 }
 
+TEST_F( SafetyPositionControllerTest, StateReadWatchdogCountsMeasuredTime )
+{
+  // The watchdog limits how long the safety state may stay unobservable. Cycles in which
+  // no time passed (a paused clock) must not count, and a late cycle counts in full.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  controller_->reference_interfaces_ = { 1.0, 0.0, 0.0 };
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+
+  const auto update = [this]( const std::chrono::milliseconds period ) {
+    return controller_->update_and_write_commands( rclcpp::Time( 0, 0, RCL_ROS_TIME ),
+                                                   rclcpp::Duration( period ) );
+  };
+  const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+  std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+  for ( int i = 0; i < 50; ++i ) {
+    ASSERT_EQ( update( std::chrono::milliseconds( 0 ) ), controller_interface::return_type::OK );
+  }
+  EXPECT_EQ( controller_->state_read_failure_time_, 0.0 );
+  EXPECT_FALSE( controller_->park_on_recovery_pending_ );
+
+  // default state_read_timeout is 0.1 s
+  ASSERT_EQ( update( std::chrono::milliseconds( 60 ) ), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->park_on_recovery_pending_ );
+  ASSERT_EQ( update( std::chrono::milliseconds( 60 ) ), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->park_on_recovery_pending_ );
+}
+
 TEST_F( SafetyPositionControllerTest, ProlongedNonFiniteJointStateParksOnRecovery )
 {
   // The dead-encoder variant of the prolonged failure: non-finite reads accumulate into

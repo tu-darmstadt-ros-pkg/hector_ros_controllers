@@ -52,9 +52,10 @@ Pipeline::Config makeConfig( const size_t n = 2 )
 /// One cycle; the hardware follows the command perfectly.
 Pipeline::Events cycle( Pipeline &pipeline, const std::vector<double> &reference,
                         std::vector<double> &measured,
-                        const Pipeline::CollisionObservation &obs = {}, const bool bypass = false )
+                        const Pipeline::CollisionObservation &obs = {}, const bool bypass = false,
+                        const double period = kDt )
 {
-  pipeline.prepare( reference, measured, bypass );
+  pipeline.prepare( reference, measured, bypass, period );
   const auto events = pipeline.step( obs );
   for ( size_t i = 0; i < measured.size(); ++i ) {
     measured[i] = pipeline.commandedPositions()[static_cast<Eigen::Index>( i )];
@@ -179,7 +180,7 @@ TEST( SafetyPipeline, TrackingLeashFollowsContinuousJointsAcrossTheWrap )
   double previous = 3.0;
   for ( int i = 0; i < 100; ++i ) {
     const double reference = wrap( pipeline.commandedPositions()[0] + 0.3 );
-    pipeline.prepare( { reference }, measured, false );
+    pipeline.prepare( { reference }, measured, false, kDt );
     pipeline.step( {} );
     const double cmd = pipeline.commandedPositions()[0];
     ASSERT_LE( std::abs( cmd - previous ), kVMax * kDt + 1e-9 ) << "command jumped in cycle " << i;
@@ -199,7 +200,7 @@ TEST( SafetyPipeline, TrackingLeashStillBoundsContinuousJointLag )
   // Hardware stuck at 0 while the reference pulls away: the command must not wind up.
   std::vector<double> measured{ 0.0 };
   for ( int i = 0; i < 100; ++i ) {
-    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.prepare( { 1.5 }, measured, false, kDt );
     pipeline.step( {} );
     ASSERT_LE( pipeline.commandedPositions()[0], 0.2 + 1e-3 )
         << "the leash must bound every cycle, not just the settled state; cycle " << i;
@@ -222,7 +223,7 @@ TEST( SafetyPipeline, TrackingLeashRespectsVelocityAndAccelerationBoxes )
   double previous_cmd = 0.0;
   double previous_vel = 0.0;
   for ( int i = 0; i < 100; ++i ) {
-    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.prepare( { 1.5 }, measured, false, kDt );
     pipeline.step( {} );
     const double cmd = pipeline.commandedPositions()[0];
     const double vel = pipeline.velocity()[0];
@@ -252,7 +253,7 @@ TEST( SafetyPipeline, TrackingLeashHoldsWhenTheMeasurementJumpsAway )
 
   measured[0] = -1.0; // the joint left on its own
   for ( int i = 0; i < 20; ++i ) {
-    pipeline.prepare( { 0.0 }, measured, false );
+    pipeline.prepare( { 0.0 }, measured, false, kDt );
     pipeline.step( {} );
     ASSERT_NEAR( pipeline.commandedPositions()[0], 0.0, 1e-9 )
         << "the command must hold, not chase the measurement, in cycle " << i;
@@ -276,20 +277,20 @@ TEST( SafetyPipeline, MeasurementRunningAwayIsReportedAsDiverged )
   // trip the watchdog, however long it pushes.
   for ( int i = 0; i < 200; ++i ) {
     measured[0] = 0.0;
-    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.prepare( { 1.5 }, measured, false, kDt );
     pipeline.step( {} );
     ASSERT_FALSE( pipeline.measurementDiverged() ) << "leash-pinned is not diverged, cycle " << i;
   }
 
   // The joint leaving on its own is.
   measured[0] = -0.5; // 0.7 from the command, past 2x the leash
-  pipeline.prepare( { 1.5 }, measured, false );
+  pipeline.prepare( { 1.5 }, measured, false, kDt );
   pipeline.step( {} );
   EXPECT_TRUE( pipeline.measurementDiverged() );
 
   // And it clears once the joint is back within reach.
   measured[0] = pipeline.commandedPositions()[0] - 0.1;
-  pipeline.prepare( { 1.5 }, measured, false );
+  pipeline.prepare( { 1.5 }, measured, false, kDt );
   pipeline.step( {} );
   EXPECT_FALSE( pipeline.measurementDiverged() );
 }
@@ -315,7 +316,7 @@ TEST( SafetyPipeline, ContinuousJointDivergenceIsCaughtBeforeTheWrapAliases )
   for ( int i = 0; i < 200; ++i ) {
     true_position -= 6.0 * kDt;                                   // dragged at 6 rad/s
     measured[0] = spc::get_signed_distance( 0.0, true_position ); // hardware wraps
-    pipeline.prepare( { -1.0 }, measured, false );
+    pipeline.prepare( { -1.0 }, measured, false, kDt );
     pipeline.step( {} );
     const double true_lag = pipeline.commandedPositions()[0] - true_position;
     if ( pipeline.measurementDiverged() ) {
@@ -361,7 +362,7 @@ TEST( SafetyPipeline, BlockedJointKeepsPushingAtTheLeash )
   double reference = 0.0;
   for ( int i = 0; i < 300; ++i ) {
     reference += kVMax * kDt; // upstream integrates on, unaware of the blockage
-    pipeline.prepare( { reference }, measured, false );
+    pipeline.prepare( { reference }, measured, false, kDt );
     pipeline.step( {} );
   }
   EXPECT_NEAR( pipeline.commandedPositions()[0], 0.2, 1e-3 )
@@ -373,7 +374,7 @@ TEST( SafetyPipeline, BlockedJointKeepsPushingAtTheLeash )
   const double settled = pipeline.commandedPositions()[0];
   for ( int i = 0; i < 30000; ++i ) { // ten minutes at 50 Hz
     reference += kVMax * kDt;
-    pipeline.prepare( { reference }, measured, false );
+    pipeline.prepare( { reference }, measured, false, kDt );
     pipeline.step( {} );
   }
   EXPECT_NEAR( pipeline.commandedPositions()[0], settled, 1e-9 ) << "the leash must not creep";
@@ -390,12 +391,12 @@ TEST( SafetyPipeline, ReferenceOutsideThePositionLimitsHoldsWithoutStalling )
   Pipeline pipeline( cfg );
 
   std::vector<double> measured{ 1.15 };
-  pipeline.prepare( { 1.15 }, measured, false ); // rebase the command outside the limit
+  pipeline.prepare( { 1.15 }, measured, false, kDt ); // rebase the command outside the limit
   pipeline.step( {} );
   measured[0] = 1.2; // hardware sits slightly further out than the command
 
   for ( int i = 0; i < 200; ++i ) {
-    pipeline.prepare( { 1.5 }, measured, false );
+    pipeline.prepare( { 1.5 }, measured, false, kDt );
     pipeline.step( {} );
   }
   EXPECT_NEAR( pipeline.commandedPositions()[0], 1.15, 1e-6 );
@@ -404,7 +405,7 @@ TEST( SafetyPipeline, ReferenceOutsideThePositionLimitsHoldsWithoutStalling )
 
   // A reference back inside the limits is still followed.
   for ( int i = 0; i < 200; ++i ) {
-    pipeline.prepare( { 0.5 }, measured, false );
+    pipeline.prepare( { 0.5 }, measured, false, kDt );
     pipeline.step( {} );
     measured[0] = pipeline.commandedPositions()[0];
   }
@@ -420,7 +421,7 @@ TEST( SafetyPipeline, DeviationBoxAroundLeashedReferenceDroppedDuringBypass )
   // leash: v_max(1.0) * 0.3 s → leashed reference 0.3
   const std::vector<double> reference{ 0.5, 0.0 };
 
-  pipeline.prepare( reference, measured, false );
+  pipeline.prepare( reference, measured, false, kDt );
   pipeline.step( {} );
   // joint0 (limit 0.1): box = [min(0.3-0.1, cmd~0), 0.3+0.1] = [0.0, 0.4]
   EXPECT_NEAR( pipeline.qpInput().q_hi[0], 0.4, 1e-6 );
@@ -432,14 +433,14 @@ TEST( SafetyPipeline, DeviationBoxAroundLeashedReferenceDroppedDuringBypass )
   // Bypass drops the deviation boxes. The tracking leash is anti-windup for the
   // hardware, not a collision constraint, so it survives the bypass exactly as the
   // position limits do.
-  pipeline.prepare( reference, measured, true );
+  pipeline.prepare( reference, measured, true, kDt );
   EXPECT_NEAR( pipeline.qpInput().q_hi[0], 0.5, 1e-9 );
   EXPECT_NEAR( pipeline.qpInput().q_lo[0], -0.5, 1e-9 );
 
   auto no_leash = cfg;
   no_leash.tracking_leash = 0.0;
   Pipeline unleashed( no_leash );
-  unleashed.prepare( reference, measured, true );
+  unleashed.prepare( reference, measured, true, kDt );
   EXPECT_NEAR( unleashed.qpInput().q_hi[0], 3.0, 1e-9 ) << "only the position limits remain";
   EXPECT_NEAR( unleashed.qpInput().q_lo[0], -3.0, 1e-9 );
 }
@@ -484,7 +485,7 @@ TEST( SafetyPipeline, HeadOnBlockStallsParksAndResumesOnNewReference )
 
   // A NEW reference (retreat, allowed by the constraint) releases the park
   reference[0] = -0.5;
-  pipeline.prepare( reference, measured, false );
+  pipeline.prepare( reference, measured, false, kDt );
   EXPECT_FALSE( pipeline.parked() );
   pipeline.step( obs );
   // Tolerance matches the boundary-constraint solver slop documented in makeConfig().
@@ -507,10 +508,10 @@ TEST( SafetyPipeline, ResumeFromParkIsReportedByPrepare )
   for ( int i = 0; i < 60; ++i ) { cycle( pipeline, { 2.0, 0.0 }, measured, obs ); }
   ASSERT_TRUE( pipeline.parked() );
 
-  EXPECT_FALSE( pipeline.prepare( { 2.0, 0.0 }, measured, false ) )
+  EXPECT_FALSE( pipeline.prepare( { 2.0, 0.0 }, measured, false, kDt ) )
       << "same reference stays parked";
   pipeline.step( obs );
-  EXPECT_TRUE( pipeline.prepare( { 2.0, 0.3 }, measured, false ) )
+  EXPECT_TRUE( pipeline.prepare( { 2.0, 0.3 }, measured, false, kDt ) )
       << "reference change on any joint releases the park";
   pipeline.step( obs );
   EXPECT_FALSE( pipeline.parked() );
@@ -632,6 +633,77 @@ TEST( SafetyPipeline, NonFiniteGradientBrakesToAStop )
   EXPECT_FALSE( pipeline.wantsMotion() );
 }
 
+TEST( SafetyPipeline, StepFollowsTheMeasuredPeriod )
+{
+  // The command is integrated over the time that actually passed, so a late cycle moves
+  // as far as the commanded velocity covers in that time, not one nominal step.
+  Pipeline pipeline( makeConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+  const std::vector<double> reference{ 2.0, 0.0 };
+  for ( int i = 0; i < 30; ++i ) { cycle( pipeline, reference, measured ); }
+  ASSERT_NEAR( pipeline.velocity()[0], kVMax, 1e-6 );
+
+  double before = measured[0];
+  cycle( pipeline, reference, measured );
+  const double nominal_step = measured[0] - before;
+  before = measured[0];
+  cycle( pipeline, reference, measured, {}, false, 2.0 * kDt );
+  EXPECT_NEAR( measured[0] - before, 2.0 * nominal_step, 1e-12 );
+}
+
+TEST( SafetyPipeline, StallTimerFollowsTheMeasuredPeriod )
+{
+  Pipeline pipeline( makeConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+  Eigen::VectorXd gradient( 2 );
+  gradient << -1.0, 0.0;
+  std::vector<Pipeline::PairCandidate> pairs{ { 0.0, &gradient, 0 } };
+  Pipeline::CollisionObservation obs;
+  obs.checks_active = true;
+  obs.state_valid = true;
+  obs.pairs = &pairs;
+  const std::vector<double> reference{ 2.0, 0.0 };
+  for ( int i = 0; i < 5; ++i ) { cycle( pipeline, reference, measured, obs ); }
+  ASSERT_GT( pipeline.stallTime(), 0.0 );
+
+  double before = pipeline.stallTime();
+  cycle( pipeline, reference, measured, obs, false, 2.0 * kDt );
+  EXPECT_NEAR( pipeline.stallTime() - before, 2.0 * kDt, 1e-12 );
+}
+
+TEST( SafetyPipeline, ZeroPeriodMovesNothingAndStopsTheTimers )
+{
+  // No time passed (a paused clock): the command, the velocity it carries into the next
+  // cycle and the stall/park timers must all stay where they are.
+  Pipeline pipeline( makeConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+  const std::vector<double> reference{ 2.0, 0.0 };
+  for ( int i = 0; i < 30; ++i ) { cycle( pipeline, reference, measured ); }
+  const double cmd = measured[0];
+  const double velocity = pipeline.velocity()[0];
+  ASSERT_GT( velocity, 0.0 );
+  for ( int i = 0; i < 100; ++i ) { cycle( pipeline, reference, measured, {}, false, 0.0 ); }
+  EXPECT_EQ( measured[0], cmd );
+  EXPECT_EQ( pipeline.velocity()[0], velocity );
+
+  Eigen::VectorXd gradient( 2 );
+  gradient << -1.0, 0.0;
+  std::vector<Pipeline::PairCandidate> pairs{ { 0.0, &gradient, 0 } };
+  Pipeline::CollisionObservation obs;
+  obs.checks_active = true;
+  obs.state_valid = true;
+  obs.pairs = &pairs;
+  for ( int i = 0; i < 30; ++i ) { cycle( pipeline, reference, measured, obs ); }
+  const double stall_time = pipeline.stallTime();
+  ASSERT_GT( stall_time, 0.0 );
+  for ( int i = 0; i < 200; ++i ) {
+    const auto events = cycle( pipeline, reference, measured, obs, false, 0.0 );
+    EXPECT_FALSE( events.stall.parked );
+  }
+  EXPECT_EQ( pipeline.stallTime(), stall_time );
+  EXPECT_FALSE( pipeline.parked() );
+}
+
 TEST( SafetyPipeline, ConstructorValidatesConfig )
 {
   auto cfg = makeConfig();
@@ -736,11 +808,11 @@ TEST( SafetyPipeline, HoldFlagsFollowTheDesiredVelocity )
 
   std::vector<double> measured{ 0.0, 0.0 };
   // Joint 0 far from its target, joint 1 already there.
-  pipeline.prepare( { 1.0, 0.0 }, measured, false );
+  pipeline.prepare( { 1.0, 0.0 }, measured, false, kDt );
   EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 0, 1 ) );
 
   // A NaN reference means "no target", which is not a request to move either.
-  pipeline.prepare( { kNaN, 0.0 }, measured, false );
+  pipeline.prepare( { kNaN, 0.0 }, measured, false, kDt );
   EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 1, 1 ) );
 }
 
@@ -748,7 +820,7 @@ TEST( SafetyPipeline, HoldIsOffByDefault )
 {
   Pipeline pipeline( makeConfig() );
   std::vector<double> measured{ 0.0, 0.0 };
-  pipeline.prepare( { 0.0, 0.0 }, measured, false );
+  pipeline.prepare( { 0.0, 0.0 }, measured, false, kDt );
   EXPECT_THAT( pipeline.heldJoints(), ::testing::ElementsAre( 0, 0 ) );
 }
 

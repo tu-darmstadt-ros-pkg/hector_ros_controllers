@@ -47,8 +47,8 @@ class SafetyPipeline
 public:
   struct Config {
     std::vector<JointInfo> joints; ///< per controlled joint, defines n
-    /// v_max/a_acc/a_dec must be sized like joints. qp.dt is the cycle time for
-    /// everything: the QP limits, the integration and the stall/park timers.
+    /// v_max/a_acc/a_dec must be sized like joints. qp.dt is the nominal cycle time;
+    /// every cycle steps by the period passed to prepare().
     SafetyQpParams qp;
     /// Per-joint max deviation [rad] of the command from the leashed reference while
     /// flowing around collisions; 0 disables for that joint.
@@ -117,10 +117,13 @@ public:
    * for continuous joints the shortest path to the target is taken
    * @param measured measured positions per joint
    * @param bypass_active relaxes position limits and drops the deviation boxes
+   * @param period time this cycle covers [s]: the QP's step, the integration and the
+   * stall/park timers. 0 (or non-finite) means no time passed: step() then leaves the
+   * command, the velocity and the timers as they are.
    * @return true if a new reference released the parked state this cycle
    */
   bool prepare( const std::vector<double> &reference, const std::vector<double> &measured,
-                bool bypass_active );
+                bool bypass_active, double period );
 
   /// Current commanded configuration: evaluate the collision check here after prepare();
   /// after step() these are the positions to write to the hardware.
@@ -172,6 +175,7 @@ private:
   /// reference the upstream controller is holding there is a live target.
   bool park_pending_{ false };
   bool wants_motion_{ false };
+  double period_{ 0.0 }; ///< this cycle's step [s]; 0 = no time passed
   bool measurement_diverged_{ false };
   Eigen::VectorXd cmd_;         ///< commanded positions (integration state)
   Eigen::VectorXd vel_;         ///< commanded velocities

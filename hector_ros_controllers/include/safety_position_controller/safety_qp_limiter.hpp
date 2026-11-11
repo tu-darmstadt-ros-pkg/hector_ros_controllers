@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace safety_position_controller
@@ -81,6 +82,9 @@ struct SafetyQpInput {
   /// the QP cannot recruit it to flow around or push out of a collision.
   std::vector<uint8_t> hold;
   QpCollisionConstraints collisions; ///< sorted closest-first; extra rows dropped
+  /// Time step this solve covers [s], > 0: the acceleration box and the braking bounds
+  /// are per step. Unset: params.dt.
+  std::optional<double> dt;
 };
 
 /// Per-cycle output.
@@ -171,10 +175,10 @@ private:
   /// @param crawl if true, additionally clamp toward +-contact_crawl_speed (decaying
   /// from the previous velocity at the deceleration limit). Joints flagged in
   /// input.hold get the same clamp toward zero, which overrides the crawl speed.
-  void computeVelocityBounds( const SafetyQpInput &input, bool crawl, bool &conflict );
+  void computeVelocityBounds( const SafetyQpInput &input, double dt, bool crawl, bool &conflict );
 
-  /// Velocity that brakes toward zero at the deceleration limit, written into @p v.
-  void brakingVelocity( const Eigen::VectorXd &v_prev, Eigen::VectorXd &v ) const;
+  /// Velocity that brakes toward zero at the deceleration limit over @p dt, written into @p v.
+  void brakingVelocity( const Eigen::VectorXd &v_prev, double dt, Eigen::VectorXd &v ) const;
 
   std::size_t n_;
   SafetyQpParams params_;

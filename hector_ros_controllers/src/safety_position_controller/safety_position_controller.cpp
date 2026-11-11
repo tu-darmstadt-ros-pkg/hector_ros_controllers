@@ -458,7 +458,7 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 
 controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
-                                                     const rclcpp::Duration & )
+                                                     const rclcpp::Duration &period )
 {
   // Debug: incoming joint states
   diagnostics_->captureJointStateIn( reference_interfaces_ );
@@ -508,9 +508,9 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
     // the previous position command in place, which is what re-writing it would do.
     // The safety state is unobservable, so this counts toward the same watchdog as a
     // failed collision-state read below.
-    note_state_unobservable();
+    note_state_unobservable( period );
   } else {
-    status_event |= run_safety_pipeline();
+    status_event |= run_safety_pipeline( period );
     if ( params_.set_current_limits ) {
       write_current_limits();
     }
@@ -562,11 +562,12 @@ void SafetyPositionController::note_estop_request( const bool active )
   }
 }
 
-void SafetyPositionController::note_state_unobservable()
+void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &period )
 {
-  // Counted in the pipeline's cycle time, like its stall and park timers: the reported
-  // period is 0 on the first cycle and frozen under a paused sim clock.
-  state_read_failure_time_ += pipeline_->config().qp.dt;
+  // Measured time, like the pipeline's stall and park timers: a cycle in which no time
+  // passed (paused clock) does not count.
+  const double seconds = period.seconds();
+  state_read_failure_time_ += std::isfinite( seconds ) && seconds > 0.0 ? seconds : 0.0;
   // Only on the edge: invalidate() rebases the command onto the measured position, so
   // repeating it every cycle would turn the hold into "follow the measurement" and let
   // a loaded limb sag away under gravity.
@@ -708,7 +709,7 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   return true;
 }
 
-bool SafetyPositionController::run_safety_pipeline()
+bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &period )
 {
   const size_t n = params_.joints.size();
   const bool bypass_active = this->bypass_active();
@@ -716,7 +717,8 @@ bool SafetyPositionController::run_safety_pipeline()
       !bypass_active && params_.check_self_collisions && collision_checker_ != nullptr;
 
   bool status_event = false;
-  if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active ) ) {
+  if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active,
+                           period.seconds() ) ) {
     RCLCPP_INFO( get_node()->get_logger(), "New reference received — resuming from parked state." );
     status_event = true;
   }
@@ -741,7 +743,7 @@ bool SafetyPositionController::run_safety_pipeline()
     // recovery instead of jump-starting toward the still-live reference.
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "Failed to setup collision checking. Braking to a stop." );
-    note_state_unobservable();
+    note_state_unobservable( period );
   } else if ( pipeline_->measurementDiverged() ) {
     // A joint is further from its command than the tracking leash can explain, so it
     // left on its own (backdriven, slipping, a re-homed encoder). The collision check
@@ -751,7 +753,7 @@ bool SafetyPositionController::run_safety_pipeline()
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "A joint is far from its command; the checked configuration no "
                           "longer describes the robot. Braking to a stop." );
-    note_state_unobservable();
+    note_state_unobservable( period );
   } else {
     // Recovered: the pipeline parks on this cycle, which is an event worth publishing.
     status_event |= take_recovery_event();
