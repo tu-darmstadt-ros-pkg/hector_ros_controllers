@@ -451,7 +451,7 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 
 controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
-                                                     const rclcpp::Duration &period )
+                                                     const rclcpp::Duration & )
 {
   // Debug: incoming joint states
   diagnostics_->publishJointStateIn( reference_interfaces_ );
@@ -501,9 +501,9 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
     // the previous position command in place, which is what re-writing it would do.
     // The safety state is unobservable, so this counts toward the same watchdog as a
     // failed collision-state read below.
-    note_state_unobservable( period );
+    note_state_unobservable();
   } else {
-    status_event |= run_safety_pipeline( period );
+    status_event |= run_safety_pipeline();
     if ( params_.set_current_limits ) {
       write_current_limits();
     }
@@ -555,13 +555,11 @@ void SafetyPositionController::note_estop_request( const bool active )
   }
 }
 
-void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &period )
+void SafetyPositionController::note_state_unobservable()
 {
-  // Nominal dt where the reported period is unusable (0 on the first cycle, paused sim
-  // clock); get_update_rate() is the same rate the pipeline integrates with.
-  const double rate = get_update_rate();
-  const double dt = period.seconds() > 0.0 ? period.seconds() : ( rate > 0.0 ? 1.0 / rate : 0.0 );
-  state_read_failure_time_ += dt;
+  // Counted in the pipeline's cycle time, like its stall and park timers: the reported
+  // period is 0 on the first cycle and frozen under a paused sim clock.
+  state_read_failure_time_ += pipeline_->config().qp.dt;
   // Only on the edge: invalidate() rebases the command onto the measured position, so
   // repeating it every cycle would turn the hold into "follow the measurement" and let
   // a loaded limb sag away under gravity.
@@ -631,7 +629,6 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   const double dt = 1.0 / get_update_rate();
 
   SafetyPipeline::Config cfg;
-  cfg.dt = dt;
   cfg.joints = joint_infos_;
   cfg.qp.dt = dt;
   cfg.qp.v_max.resize( ni );
@@ -704,7 +701,7 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   return true;
 }
 
-bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &period )
+bool SafetyPositionController::run_safety_pipeline()
 {
   const size_t n = params_.joints.size();
   const bool bypass_active = this->bypass_active();
@@ -737,7 +734,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
     // recovery instead of jump-starting toward the still-live reference.
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "Failed to setup collision checking. Braking to a stop." );
-    note_state_unobservable( period );
+    note_state_unobservable();
   } else if ( pipeline_->measurementDiverged() ) {
     // A joint is further from its command than the tracking leash can explain, so it
     // left on its own (backdriven, slipping, a re-homed encoder). The collision check
@@ -747,7 +744,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
                           "A joint is far from its command; the checked configuration no "
                           "longer describes the robot. Braking to a stop." );
-    note_state_unobservable( period );
+    note_state_unobservable();
   } else {
     // Recovered: the pipeline parks on this cycle, which is an event worth publishing.
     status_event |= take_recovery_event();

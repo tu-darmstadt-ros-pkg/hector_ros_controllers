@@ -116,7 +116,7 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
     }
     ref_leashed_[idx] = cmd_[idx] + diff;
     input_.v_des[idx] = SafetyQpLimiter::desiredVelocity( diff, config_.qp.v_max[idx],
-                                                          config_.qp.a_dec[idx], config_.dt );
+                                                          config_.qp.a_dec[idx], config_.qp.dt );
     wants_motion_ |= std::abs( input_.v_des[idx] ) > config_.stall_velocity_threshold;
 
     // Per-joint deviation box around the leashed reference: bounds how far every link
@@ -237,12 +237,12 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
   // ---- Solve, integrate, clamp ----
   const SafetyQpResult &result = limiter_->solve( input_ );
   vel_ = result.v;
-  cmd_ += vel_ * config_.dt;
+  cmd_ += vel_ * config_.qp.dt;
 
   // ---- Stall detection: reference demands motion but the QP output is ~zero ----
   Events events;
   const bool moving = vel_.cwiseAbs().maxCoeff() > config_.stall_velocity_threshold;
-  events.stall = monitor_.update( wants_motion_, moving, config_.dt );
+  events.stall = monitor_.update( wants_motion_, moving, config_.qp.dt );
   if ( events.stall.parked ) {
     parked_reference_ = reference_;
   }

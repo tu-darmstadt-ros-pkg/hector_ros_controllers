@@ -20,7 +20,6 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 Pipeline::Config makeConfig( const size_t n = 2 )
 {
   Pipeline::Config cfg;
-  cfg.dt = kDt;
   spc::JointInfo joint;
   joint.type = spc::JointType::REVOLUTE_BOUNDED;
   joint.has_position_limits = true;

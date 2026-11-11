@@ -40,9 +40,10 @@ class SafetyPipeline
 {
 public:
   struct Config {
-    double dt{ 0.01 };
     std::vector<JointInfo> joints; ///< per controlled joint, defines n
-    SafetyQpParams qp;             ///< v_max/a_acc/a_dec must be sized like joints
+    /// v_max/a_acc/a_dec must be sized like joints. qp.dt is the cycle time for
+    /// everything: the QP limits, the integration and the stall/park timers.
+    SafetyQpParams qp;
     /// Per-joint max deviation [rad] of the command from the leashed reference while
     /// flowing around collisions; 0 disables for that joint.
     std::vector<double> deviation_limits;
