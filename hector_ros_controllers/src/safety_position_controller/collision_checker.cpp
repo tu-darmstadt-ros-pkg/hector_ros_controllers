@@ -19,6 +19,20 @@
 #include <pinocchio/multibody/fcl.hpp>
 #include <pinocchio/multibody/model.hpp>
 
+namespace
+{
+/// A distance coal could not determine is unknown, not far: report it as the deepest
+/// penetration, so the pair counts as in collision and reaches the safety pipeline,
+/// which brakes on a non-finite distance.
+double knownOrPenetrating( coal::DistanceResult &dres )
+{
+  if ( !std::isfinite( dres.min_distance ) ) {
+    dres.min_distance = -std::numeric_limits<double>::infinity();
+  }
+  return dres.min_distance;
+}
+} // namespace
+
 /// Custom coal broadphase distance callback that collects all safety-zone pairs
 /// and tracks the global minimum distance. Follows the same pattern as
 /// pinocchio::CollisionCallBackDefault (broadphase-callbacks.hpp:90-96).
@@ -73,7 +87,8 @@ struct CollisionChecker::SafetyZoneDistanceCallback : coal::DistanceCallBackBase
     // Narrow phase through the pair's persistent solver, in pair order (first, second):
     // nearest_points[0] belongs to cp.first, as the gradient requires.
     geom_data_ptr->distanceRequests[k].enable_nearest_points = true;
-    const double d = pinocchio::computeDistance( *geom_model_ptr, *geom_data_ptr, k ).min_distance;
+    const double d =
+        knownOrPenetrating( pinocchio::computeDistance( *geom_model_ptr, *geom_data_ptr, k ) );
     visited_indices.push_back( k );
 
     // Update outputs
@@ -388,7 +403,8 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
     pinocchio::computeDistances( geom_model_, geom_data_ );
 
     for ( std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k ) {
-      const auto &dres = geom_data_.distanceResults[k];
+      auto &dres = geom_data_.distanceResults[k];
+      knownOrPenetrating( dres );
 
       if ( dres.min_distance < global_min_distance ) {
         global_min_distance = dres.min_distance;
@@ -564,13 +580,15 @@ bool CollisionChecker::isBroadphaseEnabled() const { return use_broadphase_; }
 void CollisionChecker::computePairGradient( const std::size_t pair_k, Eigen::VectorXd &grad )
 {
   grad.setZero( model_.nv );
+  // An undefined gradient is NaN, not zero: zero reads as "the controlled joints cannot
+  // move this pair", which drops it, while NaN makes the pipeline brake.
+  const auto undefined = [&grad]() { grad.setConstant( std::numeric_limits<double>::quiet_NaN() ); };
 
   const auto &dres = geom_data_.distanceResults[pair_k];
 
-  // Validate nearest points
-  if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
-       !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() ) {
-    return; // zero gradient = no directional preference (safe fallback)
+  if ( !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() ) {
+    undefined();
+    return;
   }
 
   const auto &cp = geom_model_.collisionPairs[pair_k];
@@ -605,6 +623,7 @@ void CollisionChecker::computePairGradient( const std::size_t pair_k, Eigen::Vec
     // first object to the second, i.e. toward increasing distance) is still defined.
     n = dres.normal.normalized();
   } else {
+    undefined();
     return;
   }
 

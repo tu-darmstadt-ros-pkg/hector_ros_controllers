@@ -22,6 +22,8 @@
 
 #include "safety_position_controller/collision_checker.hpp"
 
+#include <coal/shape/geometric_shapes.h>
+
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
@@ -1310,6 +1312,46 @@ TEST_F( CollisionCheckerTest, ExactContactKeepsTheGradient )
     const int vi = checker.getJointVelocityIndex( "slide_joint" );
     EXPECT_NEAR( pair.gradient[vi], 1.0, 1e-9 )
         << "sliding away (+x) increases the distance; broadphase " << broadphase;
+  }
+}
+
+TEST_F( CollisionCheckerTest, UndeterminedDistanceCountsAsPenetration )
+{
+  // A distance coal cannot determine is unknown, not far. It must reach the pipeline as
+  // a collision without a usable gradient, so the arm brakes instead of ignoring the
+  // pair (every comparison with NaN is false: never in the zone, never the minimum).
+  const std::string urdf = R"(<?xml version="1.0"?>
+<robot name="test_undetermined_distance">
+  <link name="base_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <link name="slider_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <joint name="slide_joint" type="prismatic">
+    <parent link="base_link"/><child link="slider_link"/>
+    <origin xyz="0.5 0 0"/><axis xyz="1 0 0"/>
+    <limit lower="-1.0" upper="1.0" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>)";
+
+  for ( const bool broadphase : { false, true } ) {
+    CollisionChecker checker( node_ );
+    checker.setBroadphase( broadphase );
+    ASSERT_TRUE( checker.initFromXml( urdf, "", { "slide_joint" } ) );
+    checker.setSafetyZoneThreshold( 0.05 );
+    // The geometry is shared, so a degenerate shape can be injected after init.
+    std::static_pointer_cast<coal::Sphere>( checker.geometryModel().geometryObjects[1].geometry )
+        ->radius = std::numeric_limits<double>::quiet_NaN();
+
+    const auto &result = checker.checkCollisionQ( checker.neutralConfiguration() );
+    EXPECT_TRUE( result.in_collision ) << "broadphase " << broadphase;
+    ASSERT_EQ( result.safety_zone_pairs.size(), 1u ) << "broadphase " << broadphase;
+    const auto &pair = result.safety_zone_pairs.front();
+    EXPECT_EQ( pair.distance, -std::numeric_limits<double>::infinity() );
+    EXPECT_FALSE( pair.gradient.allFinite() )
+        << "a zero gradient would read as a pair the joints cannot influence; broadphase "
+        << broadphase;
   }
 }
 

@@ -32,8 +32,8 @@ struct CollisionResult {
   /// Per-pair info for pairs within the safety zone (only populated when gradient computation requested).
   struct PairInfo {
     std::size_t pair_index;   ///< index into geom_model_.collisionPairs
-    double distance;          ///< pairwise distance [m]
-    Eigen::VectorXd gradient; ///< dd/dv (size model_.nv): positive = moving apart
+    double distance;          ///< pairwise distance [m]; -inf if it could not be determined
+    Eigen::VectorXd gradient; ///< dd/dv (size model_.nv): positive = moving apart; NaN if undefined
   };
   std::vector<PairInfo> safety_zone_pairs; ///< pairs with distance < safety_zone_threshold
 };

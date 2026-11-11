@@ -611,6 +611,27 @@ TEST( SafetyPipeline, NonFinitePairDistanceBrakesToAStop )
   }
 }
 
+TEST( SafetyPipeline, NonFiniteGradientBrakesToAStop )
+{
+  // The checker marks an undefined gradient as NaN. A zero would drop the pair as one the
+  // controlled joints cannot influence; NaN must brake like an unknown distance.
+  Pipeline pipeline( makeConfig() );
+  std::vector<double> measured{ 0.0, 0.0 };
+  const std::vector<double> reference{ 2.0, 0.0 };
+  for ( int i = 0; i < 30; ++i ) { cycle( pipeline, reference, measured ); }
+  ASSERT_NEAR( pipeline.velocity()[0], kVMax, 1e-6 );
+
+  const Eigen::VectorXd gradient = Eigen::VectorXd::Constant( 2, kNaN );
+  std::vector<Pipeline::PairCandidate> pairs{ { 0.02, &gradient, 0 } };
+  Pipeline::CollisionObservation obs;
+  obs.checks_active = true;
+  obs.state_valid = true;
+  obs.pairs = &pairs;
+  for ( int i = 0; i < 20; ++i ) { cycle( pipeline, reference, measured, obs ); }
+  EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-6 );
+  EXPECT_FALSE( pipeline.wantsMotion() );
+}
+
 TEST( SafetyPipeline, ConstructorValidatesConfig )
 {
   auto cfg = makeConfig();
