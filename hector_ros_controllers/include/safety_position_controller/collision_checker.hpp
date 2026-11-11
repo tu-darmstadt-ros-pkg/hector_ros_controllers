@@ -71,16 +71,6 @@ public:
   std::vector<std::string> getJointNames() const;
 
   /**
-   * @brief Collision check from name→position map.
-   * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
-   * @param joint_positions rad (rev) / m (prismatic)
-   * @return the latched result (collision flag, minimum clearance, optional per-pair
-   * gradients); valid until the next collision query
-   */
-  const CollisionResult &
-  checkCollision( const std::unordered_map<std::string, double> &joint_positions );
-
-  /**
    * @brief Collision check for full q.
    * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
    * @param q size == model_.nq
@@ -117,15 +107,6 @@ public:
   const Eigen::VectorXd &neutralConfiguration() const { return q_default_; }
 
   /**
-   * @brief Build a full pinocchio configuration vector from a name→position map.
-   * Unknown joints are ignored (warn-throttled); unset joints keep their neutral value.
-   * Handles 1-DoF joints and continuous joints ([cos, sin]).
-   * @param joint_positions rad (revolute) / m (prismatic)
-   * @return q of size model_.nq
-   */
-  Eigen::VectorXd buildConfiguration( const std::unordered_map<std::string, double> &joint_positions );
-
-  /**
    * @brief Set the safety-zone threshold used by subsequent collision queries.
    * When > 0, the next query computes per-pair distance gradients (dd/dv) for all
    * pairs with distance < threshold; otherwise gradient computation is skipped.
@@ -134,11 +115,6 @@ public:
    * @param threshold new threshold in [m]; 0 disables gradient computation
    */
   void setSafetyZoneThreshold( double threshold );
-
-  /**
-   * @brief Currently configured safety-zone threshold [m].
-   */
-  double getSafetyZoneThreshold() const;
 
   /**
    * @brief Get the velocity-space index for a named joint.

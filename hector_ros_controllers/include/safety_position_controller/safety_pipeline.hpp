@@ -132,7 +132,6 @@ public:
   const SafetyQpResult &lastResult() const { return limiter_->lastResult(); }
   const SafetyQpInput &qpInput() const { return input_; }
   const Eigen::VectorXd &velocity() const { return vel_; }
-  const Eigen::VectorXd &leashedReference() const { return ref_leashed_; }
   /// Collision-pair indices of the constraints in qpInput().collisions (same order).
   const std::vector<std::size_t> &constraintPairIndices() const { return constraint_pair_indices_; }
   const SafetyQpLimiter &limiter() const { return *limiter_; }

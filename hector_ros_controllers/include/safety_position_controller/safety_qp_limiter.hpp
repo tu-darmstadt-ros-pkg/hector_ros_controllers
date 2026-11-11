@@ -164,9 +164,6 @@ public:
   const Eigen::VectorXd &lastBoxLower() const { return box_lb_; }
   const Eigen::VectorXd &lastBoxUpper() const { return box_ub_; }
 
-  /// Update damper distances (e.g. after a parameter change). Gains/limits stay fixed.
-  void setCollisionDistances( double d_pad, double d_zone );
-
 private:
   /// Per-joint velocity box from velocity/acceleration/position limits.
   /// On a per-joint conflict (cannot satisfy both), the box collapses to the braking

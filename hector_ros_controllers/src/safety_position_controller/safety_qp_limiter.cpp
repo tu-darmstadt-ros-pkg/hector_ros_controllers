@@ -292,15 +292,6 @@ SafetyQpLimiter::SafetyQpLimiter( const std::size_t n, SafetyQpParams params )
 
 SafetyQpLimiter::~SafetyQpLimiter() = default;
 
-void SafetyQpLimiter::setCollisionDistances( const double d_pad, const double d_zone )
-{
-  if ( !( d_zone > d_pad ) ) {
-    throw std::invalid_argument( "SafetyQpLimiter: d_zone must be > d_pad" );
-  }
-  params_.d_pad = d_pad;
-  params_.d_zone = d_zone;
-}
-
 double SafetyQpLimiter::desiredVelocity( const double diff, const double v_max, const double a_dec,
                                          const double dt )
 {

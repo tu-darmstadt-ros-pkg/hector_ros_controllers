@@ -68,7 +68,7 @@ TEST_F( CollisionVisualizerTest, PublishesWithoutDirectionalInfo )
 {
   // The first cycle publishes before any directional info exists; an out-of-range read
   // here is only caught by -D_GLIBCXX_ASSERTIONS or a sanitizer.
-  const auto &result = checker_->checkCollision( {} );
+  const auto &result = checker_->checkCollisionQ( checker_->neutralConfiguration() );
   ASSERT_FALSE( result.safety_zone_pairs.empty() ) << "need a zone pair to reach the color branch";
 
   visualizer_->publish( *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
@@ -77,7 +77,7 @@ TEST_F( CollisionVisualizerTest, PublishesWithoutDirectionalInfo )
 
 TEST_F( CollisionVisualizerTest, PublishesWithMismatchedAndMatchingDirectionalInfo )
 {
-  checker_->checkCollision( {} );
+  checker_->checkCollisionQ( checker_->neutralConfiguration() );
   const std::size_t num_pairs = checker_->getNumCollisionPairs();
   ASSERT_GT( num_pairs, 0u );
 

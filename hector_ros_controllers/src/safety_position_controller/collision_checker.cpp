@@ -286,21 +286,6 @@ const CollisionResult &CollisionChecker::unsafeResult()
   return kUnsafe;
 }
 
-const CollisionResult &
-CollisionChecker::checkCollision( const std::unordered_map<std::string, double> &joint_positions )
-{
-  for ( const auto &[name, position] : joint_positions ) {
-    if ( !std::isfinite( position ) ) {
-      RCLCPP_ERROR( node_->get_logger(),
-                    "Joint position for joint '%s' is not finite (%.3f). Assuming the robot is "
-                    "in collision.",
-                    name.c_str(), position );
-      return unsafeResult();
-    }
-  }
-  return checkCollisionQ( buildConfiguration( joint_positions ) );
-}
-
 CollisionChecker::JointQSlot CollisionChecker::getJointQSlot( const std::string &joint_name ) const
 {
   const auto it = name_to_id_.find( joint_name );
@@ -333,23 +318,6 @@ void CollisionChecker::writeJointPosition( Eigen::VectorXd &q, const JointQSlot 
   }
 }
 
-Eigen::VectorXd
-CollisionChecker::buildConfiguration( const std::unordered_map<std::string, double> &joint_positions )
-{
-  // transforms the joint positions into the pinocchio format
-  Eigen::VectorXd q = q_default_;
-  for ( const auto &[name, position] : joint_positions ) {
-    const JointQSlot slot = getJointQSlot( name );
-    if ( slot.index < 0 ) {
-      RCLCPP_WARN_THROTTLE( node_->get_logger(), *node_->get_clock(), 2000,
-                            "Joint '%s' is unknown or has an unsupported DoF layout (ignored).",
-                            name.c_str() );
-      continue;
-    }
-    writeJointPosition( q, slot, position );
-  }
-  return q;
-}
 const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd &q )
 {
   const double safety_zone_threshold = safety_zone_threshold_;
@@ -553,8 +521,6 @@ void CollisionChecker::setSafetyZoneThreshold( double threshold )
     safety_zone_threshold_ = threshold;
   }
 }
-
-double CollisionChecker::getSafetyZoneThreshold() const { return safety_zone_threshold_; }
 
 void CollisionChecker::setMaxSafetyZonePairs( const std::size_t max_pairs )
 {
