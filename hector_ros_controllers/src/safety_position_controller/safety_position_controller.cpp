@@ -38,6 +38,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
   try {
     param_listener_ = std::make_shared<ParamListener>( get_node() );
     params_ = param_listener_->get_params();
+    safety_bypass_timeout_.store( params_.safety_bypass_timeout, std::memory_order_relaxed );
   } catch ( const std::exception &e ) {
     RCLCPP_WARN( get_node()->get_logger(), "Exception thrown during init stage with message: %s",
                  e.what() );
@@ -104,7 +105,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       [this]( const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
               std::shared_ptr<std_srvs::srv::SetBool::Response> response ) {
         if ( request->data ) {
-          const double timeout_sec = params_.safety_bypass_timeout;
+          const double timeout_sec = safety_bypass_timeout_.load( std::memory_order_relaxed );
           const auto deadline = std::chrono::steady_clock::now() +
                                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                     std::chrono::duration<double>( timeout_sec ) );
@@ -231,6 +232,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
+  safety_bypass_timeout_.store( params_.safety_bypass_timeout, std::memory_order_relaxed );
   if ( params_.check_self_collisions && params_.collision_safety_zone <= params_.collision_padding ) {
     RCLCPP_ERROR( get_node()->get_logger(),
                   "collision_safety_zone (%.4f) must be > collision_padding (%.4f)",

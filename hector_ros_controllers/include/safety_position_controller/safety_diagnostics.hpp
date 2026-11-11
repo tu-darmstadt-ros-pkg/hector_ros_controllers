@@ -50,10 +50,11 @@ public:
   SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr node, const Params &params,
                      const CollisionChecker *checker );
 
-  /// Store the activation-resolved joint names and current limits: publishStatus() runs
-  /// on executor threads (status timer, service callbacks) and must not read the
-  /// controller's mutable Params fields, which on_activate rewrites in place. Held in a
-  /// box because on_activate can run while a service callback publishes.
+  /// Store the activation-resolved joint names, current limits and status flags:
+  /// publishStatus() runs on executor threads (status timer, service callbacks) and must
+  /// not read the controller's mutable Params fields, which on_activate rewrites in
+  /// place. Held in a box because on_activate can run while a service callback publishes.
+  /// Call from the thread that writes the Params.
   void configure( std::vector<std::string> joint_names, std::vector<double> stiff_current_limits,
                   std::vector<double> compliant_current_limits );
 
@@ -110,6 +111,8 @@ private:
     std::vector<std::string> joint_names;
     std::vector<double> stiff_current_limits;
     std::vector<double> compliant_current_limits;
+    bool current_limits_enabled{ false };
+    bool collision_check_enabled{ false };
   };
   realtime_tools::RealtimeThreadSafeBox<StatusConfig> config_box_;
 

@@ -238,6 +238,9 @@ private:
   /// A wall timer would be worse still, being a shared_ptr across the same threads and
   /// destroyed inside the control loop.
   std::atomic<std::chrono::steady_clock::rep> safety_bypass_deadline_{ 0 };
+  /// params_.safety_bypass_timeout for the bypass service, which runs on an executor
+  /// thread while on_activate may rewrite params_.
+  std::atomic<double> safety_bypass_timeout_{ 0.0 };
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr
       bypass_safety_checks_service_; ///< service to toggle bypass
 
