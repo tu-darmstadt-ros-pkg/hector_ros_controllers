@@ -197,6 +197,7 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
   constraint_pair_indices_.clear();
   if ( obs.checks_active ) {
     if ( obs.state_valid && obs.pairs ) {
+      bool pairs_finite = true;
       for ( const auto &candidate : *obs.pairs ) {
         for ( std::size_t i = 0; i < n; ++i ) {
           const int v_idx = config_.joint_v_index[i];
@@ -205,18 +206,22 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
                   ? ( *candidate.gradient )[v_idx]
                   : 0.0;
         }
+        // A non-finite row never binds, so the pair would silently stop constraining.
+        if ( !std::isfinite( candidate.distance ) || !normal_.allFinite() ) {
+          pairs_finite = false;
+          continue;
+        }
         // A pair the controlled joints cannot influence must not constrain (or even
-        // infeasible-block) the QP.
-        if ( normal_.norm() > 1e-12 ) {
-          if ( !input_.collisions.push( normal_, candidate.distance ) ) {
-            break; // candidates are sorted closest-first; the QP drops the rest anyway
-          }
+        // infeasible-block) the QP. Candidates are sorted closest-first, so a full
+        // storage keeps the closest ones.
+        if ( normal_.norm() > 1e-12 && input_.collisions.push( normal_, candidate.distance ) ) {
           constraint_pair_indices_.push_back( candidate.pair_index );
         }
       }
-      if ( obs.in_collision && input_.collisions.empty() ) {
-        // In collision but no usable constraints (e.g. NaN/Inf positions → blanket
-        // collision without pairs): state untrusted → stop demanding motion, QP brakes.
+      if ( !pairs_finite || ( obs.in_collision && input_.collisions.empty() ) ) {
+        // A pair without a usable distance, or in collision without usable constraints
+        // (e.g. NaN/Inf positions → blanket collision without pairs): state untrusted →
+        // stop demanding motion, QP brakes.
         input_.v_des.setZero();
         wants_motion_ = false;
         holdAll();

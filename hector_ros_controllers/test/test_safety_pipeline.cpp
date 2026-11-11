@@ -586,6 +586,32 @@ TEST( SafetyPipeline, UnobservableSafetyStateBrakesToAStop )
   EXPECT_FALSE( pipeline.wantsMotion() );
 }
 
+TEST( SafetyPipeline, NonFinitePairDistanceBrakesToAStop )
+{
+  // A pair whose distance is NaN or inf gives a damper row that can never bind: the
+  // pair is there, but how close it is is unknown. That is an unobservable collision
+  // state, not a free path.
+  for ( const double distance : { kNaN, std::numeric_limits<double>::infinity() } ) {
+    Pipeline pipeline( makeConfig() );
+    std::vector<double> measured{ 0.0, 0.0 };
+    const std::vector<double> reference{ 2.0, 0.0 };
+    for ( int i = 0; i < 30; ++i ) { cycle( pipeline, reference, measured ); }
+    ASSERT_NEAR( pipeline.velocity()[0], kVMax, 1e-6 );
+
+    Eigen::VectorXd gradient( 2 );
+    gradient << -1.0, 0.0;
+    std::vector<Pipeline::PairCandidate> pairs{ { distance, &gradient, 0 } };
+    Pipeline::CollisionObservation obs;
+    obs.checks_active = true;
+    obs.state_valid = true;
+    obs.pairs = &pairs;
+    for ( int i = 0; i < 20; ++i ) { cycle( pipeline, reference, measured, obs ); }
+    EXPECT_NEAR( pipeline.velocity()[0], 0.0, 1e-6 ) << "distance " << distance;
+    EXPECT_FALSE( pipeline.wantsMotion() ) << "distance " << distance;
+    EXPECT_TRUE( pipeline.qpInput().collisions.empty() ) << "distance " << distance;
+  }
+}
+
 TEST( SafetyPipeline, ConstructorValidatesConfig )
 {
   auto cfg = makeConfig();
