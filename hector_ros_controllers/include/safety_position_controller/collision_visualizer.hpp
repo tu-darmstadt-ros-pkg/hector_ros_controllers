@@ -127,6 +127,10 @@ private:
   void appendGeometryMarkers( const Snapshot &snap, visualization_msgs::msg::MarkerArray &array,
                               const rclcpp::Time &stamp ) const;
 
+  /// Build the markers of a not yet published capture into @p array; false if there is
+  /// none. Requires model_mutex_.
+  bool buildPending( visualization_msgs::msg::MarkerArray &array );
+
   /// Build the distance-line markers into @p array.
   void appendDistanceLines( const Snapshot &snap, visualization_msgs::msg::MarkerArray &array,
                             const rclcpp::Time &stamp ) const;
@@ -151,7 +155,6 @@ private:
   std::vector<visualization_msgs::msg::Marker> geometry_templates_;
   Snapshot pending_;          ///< publishPending()'s copy
   uint64_t published_seq_{ 0 };
-  visualization_msgs::msg::MarkerArray msg_; ///< Reused between publishes to keep its capacity
   /// Geometry markers of the last publish; a change re-sends DELETEALL so ids that no
   /// longer exist cannot linger.
   std::size_t last_geometry_count_{ 0 };

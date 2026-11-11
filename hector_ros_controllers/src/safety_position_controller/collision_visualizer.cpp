@@ -436,16 +436,26 @@ void CollisionVisualizer::capture( const CollisionChecker &checker, const Level 
 
 void CollisionVisualizer::publishPending()
 {
-  const std::lock_guard<std::mutex> lock( model_mutex_ );
+  // Built under the lock, published outside it: a slow subscriber must not hold up an
+  // activation waiting in setModel().
+  visualization_msgs::msg::MarkerArray array;
+  {
+    const std::lock_guard<std::mutex> lock( model_mutex_ );
+    if ( !buildPending( array ) ) {
+      return;
+    }
+  }
+  pub_->publish( array );
+}
+
+bool CollisionVisualizer::buildPending( visualization_msgs::msg::MarkerArray &array )
+{
   box_.get( pending_ );
   if ( pending_.seq == published_seq_ ) {
-    return;
+    return false;
   }
   published_seq_ = pending_.seq;
   const rclcpp::Time stamp( pending_.stamp_ns, RCL_ROS_TIME );
-
-  auto &array = msg_;
-  array.markers.clear();
 
   // DELETEALL only when the marker set can have shrunk. Sending it every cycle makes
   // RViz destroy and rebuild every scene node between two frames, which both flickers
@@ -463,8 +473,7 @@ void CollisionVisualizer::publishPending()
 
   appendGeometryMarkers( pending_, array, stamp );
   appendDistanceLines( pending_, array, stamp );
-
-  pub_->publish( msg_ );
+  return true;
 }
 
 } // namespace safety_position_controller

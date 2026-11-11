@@ -1,5 +1,6 @@
 #include "test_helpers.hpp"
 
+#include <future>
 #include <shared_mutex>
 #include <thread>
 
@@ -1044,6 +1045,49 @@ TEST_F( SafetyPositionControllerTest, ReactivationDoesNotRepublishThePreviousCap
   EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).Times( 0 );
   EXPECT_CALL( *marker_mock, publish( ::testing::_ ) ).Times( 0 );
   controller_->diagnostics_->publishDebug();
+}
+
+TEST_F( SafetyPositionControllerTest, DebugIsPublishedWithoutHoldingTheModelLocks )
+{
+  // A reliable publisher can block on a slow subscriber. Activation waits for these
+  // locks to resize the snapshots, so they must not be held while publishing.
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", true ),
+                    rclcpp::Parameter( "debug_visualize_collisions", true ),
+                    rclcpp::Parameter( "collision_visualization_rate", 0.0 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node = controller_->get_node();
+  const auto node_name = std::string( node->get_fully_qualified_name() );
+  auto qp_debug_mock = rtest::findPublisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>(
+      node, node_name + "/qp_debug" );
+  auto marker_mock = rtest::findPublisher<visualization_msgs::msg::MarkerArray>(
+      node, node_name + "/debug_collision_geometry" );
+  ASSERT_TRUE( qp_debug_mock && marker_mock );
+
+  const auto lockable_elsewhere = []( std::mutex &mutex ) {
+    return std::async( std::launch::async, [&mutex]() {
+             if ( !mutex.try_lock() ) {
+               return false;
+             }
+             mutex.unlock();
+             return true;
+           } ).get();
+  };
+  bool qp_lock_free = false, marker_lock_free = false;
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).WillOnce( [&]( const auto & ) {
+    qp_lock_free = lockable_elsewhere( controller_->diagnostics_->debug_mutex_ );
+  } );
+  EXPECT_CALL( *marker_mock, publish( ::testing::_ ) ).WillOnce( [&]( const auto & ) {
+    marker_lock_free = lockable_elsewhere( controller_->collision_visualizer_->model_mutex_ );
+  } );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  controller_->diagnostics_->publishDebug();
+  EXPECT_TRUE( qp_lock_free );
+  EXPECT_TRUE( marker_lock_free );
 }
 
 TEST_F( SafetyPositionControllerTest, DebugTimerRunsOnlyWhileDebugOutputIsEnabled )

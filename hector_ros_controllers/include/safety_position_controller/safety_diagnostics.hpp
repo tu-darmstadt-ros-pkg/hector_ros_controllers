@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -145,7 +146,9 @@ private:
   void captureJointState( JointStateChannel &channel, const std::vector<double> &positions );
   /// Run the debug timer iff some output is enabled. Requires timer_mutex_.
   void updateDebugTimer();
-  void publishJointState( JointStateChannel &channel );
+  /// The message of a not yet published capture, or nothing. Require debug_mutex_.
+  std::optional<sensor_msgs::msg::JointState> buildJointState( JointStateChannel &channel );
+  std::optional<hector_ros_controllers_msgs::msg::SafetyQpDebug> buildQpDebug();
 
   /// Trivially-copyable view of the status fields written from the controller update
   /// thread; see updateSnapshot() for the synchronization contract.
@@ -191,7 +194,7 @@ private:
   JointStateChannel js_out_;
 
   /// Read by publishDebug(); written by configure(). Guarded by debug_mutex_, which
-  /// publishDebug() holds while it builds.
+  /// publishDebug() holds while it builds (not while it publishes).
   std::mutex debug_mutex_;
   std::vector<std::string> debug_joint_names_;
   std::vector<std::string> pair_names_; ///< "a<->b" per collision pair index

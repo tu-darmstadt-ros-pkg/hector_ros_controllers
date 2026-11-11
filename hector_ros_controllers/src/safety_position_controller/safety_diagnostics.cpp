@@ -264,18 +264,37 @@ void SafetyDiagnostics::publishDebug()
     visualizer->publishPending();
   }
 
-  const std::lock_guard<std::mutex> lock( debug_mutex_ );
-  if ( debug_js_enabled_.load( std::memory_order_relaxed ) ) {
-    publishJointState( js_in_ );
-    publishJointState( js_out_ );
+  // Built under the lock, published outside it: a slow subscriber must not hold up an
+  // activation waiting in configure().
+  std::optional<sensor_msgs::msg::JointState> js_in, js_out;
+  std::optional<hector_ros_controllers_msgs::msg::SafetyQpDebug> qp_debug;
+  {
+    const std::lock_guard<std::mutex> lock( debug_mutex_ );
+    if ( debug_js_enabled_.load( std::memory_order_relaxed ) ) {
+      js_in = buildJointState( js_in_ );
+      js_out = buildJointState( js_out_ );
+    }
+    if ( qp_debug_enabled_.load( std::memory_order_relaxed ) ) {
+      qp_debug = buildQpDebug();
+    }
   }
-  if ( !qp_debug_enabled_.load( std::memory_order_relaxed ) ) {
-    return;
+  if ( js_in && js_in_.pub ) {
+    js_in_.pub->publish( *js_in );
   }
+  if ( js_out && js_out_.pub ) {
+    js_out_.pub->publish( *js_out );
+  }
+  if ( qp_debug && qp_debug_pub_ ) {
+    qp_debug_pub_->publish( *qp_debug );
+  }
+}
+
+std::optional<hector_ros_controllers_msgs::msg::SafetyQpDebug> SafetyDiagnostics::buildQpDebug()
+{
   qp_box_.get( qp_pending_ );
   const QpDebugSnapshot &snap = qp_pending_;
-  if ( snap.seq == qp_published_seq_ || !qp_debug_pub_ ) {
-    return;
+  if ( snap.seq == qp_published_seq_ ) {
+    return std::nullopt;
   }
   qp_published_seq_ = snap.seq;
 
@@ -307,23 +326,23 @@ void SafetyDiagnostics::publishDebug()
   msg.bounds_conflict = snap.bounds_conflict;
   msg.solve_time_us = snap.solve_time_us;
   msg.iterations = snap.iterations;
-
-  qp_debug_pub_->publish( msg );
+  return msg;
 }
 
-void SafetyDiagnostics::publishJointState( JointStateChannel &channel )
+std::optional<sensor_msgs::msg::JointState>
+SafetyDiagnostics::buildJointState( JointStateChannel &channel )
 {
   channel.box.get( channel.pending );
   const JointStateSnapshot &snap = channel.pending;
-  if ( snap.seq == channel.published_seq || !channel.pub ) {
-    return;
+  if ( snap.seq == channel.published_seq ) {
+    return std::nullopt;
   }
   channel.published_seq = snap.seq;
   sensor_msgs::msg::JointState msg;
   msg.header.stamp = rclcpp::Time( snap.stamp_ns );
   msg.name = debug_joint_names_;
   msg.position = snap.position;
-  channel.pub->publish( msg );
+  return msg;
 }
 
 std::string SafetyDiagnostics::formatBlockedDirections( const SafetyPipeline &pipeline ) const
