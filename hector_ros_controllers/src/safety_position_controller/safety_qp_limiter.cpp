@@ -229,6 +229,28 @@ private:
   Eigen::Matrix<uint8_t, Eigen::Dynamic, 1> is_active_;
 };
 
+void QpCollisionConstraints::reserve( const Eigen::Index capacity, const Eigen::Index n )
+{
+  normals_.resize( capacity, n );
+  distances_.resize( capacity );
+  size_ = 0;
+}
+
+bool QpCollisionConstraints::push( const Eigen::Ref<const Eigen::VectorXd> &normal,
+                                   const double distance )
+{
+  if ( normal.size() != normals_.cols() ) {
+    throw std::invalid_argument( "QpCollisionConstraints: normal size mismatch" );
+  }
+  if ( size_ == distances_.size() ) {
+    return false;
+  }
+  normals_.row( size_ ) = normal.transpose();
+  distances_[size_] = distance;
+  ++size_;
+  return true;
+}
+
 SafetyQpLimiter::SafetyQpLimiter( const std::size_t n, SafetyQpParams params )
     : n_( n ), params_( std::move( params ) )
 {
@@ -258,6 +280,9 @@ SafetyQpLimiter::SafetyQpLimiter( const std::size_t n, SafetyQpParams params )
   u_ = Eigen::VectorXd::Constant( m, kInf );
   box_lb_ = Eigen::VectorXd::Zero( ni );
   box_ub_ = Eigen::VectorXd::Zero( ni );
+  result_.v = Eigen::VectorXd::Zero( ni );
+  result_.collision_rhs = Eigen::VectorXd::Zero( m - ni );
+  result_.collision_velocity = Eigen::VectorXd::Zero( m - ni );
 
   // Box rows are the identity block; they only change through l_/u_.
   C_.topRows( ni ) = Eigen::MatrixXd::Identity( ni, ni );
@@ -356,6 +381,10 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
 {
   const auto t0 = std::chrono::steady_clock::now();
   const auto ni = static_cast<Eigen::Index>( n_ );
+  const QpCollisionConstraints &collisions = input.collisions;
+  if ( !collisions.empty() && collisions.joints() != ni ) {
+    throw std::invalid_argument( "SafetyQpLimiter: collision normals must have size n" );
+  }
 
   // Reused across solves so the per-cycle vectors keep their capacity; the flags are
   // cleared by name (a new field must be reset here too).
@@ -373,8 +402,8 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   // Contact crawl: engage when any pair is inside the padding.
   bool crawl = false;
   if ( params_.contact_crawl_speed > 0.0 ) {
-    for ( const auto &c : input.collisions ) {
-      if ( c.distance <= params_.d_pad ) {
+    for ( Eigen::Index k = 0; k < collisions.size(); ++k ) {
+      if ( collisions.distance( k ) <= params_.d_pad ) {
         crawl = true;
         break;
       }
@@ -385,35 +414,29 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   u_.head( ni ) = box_ub_;
 
   // ---- Rows [n, n+M): collision velocity dampers ----
-  const auto max_cc = params_.max_collision_constraints;
+  const Eigen::Index cc = std::min(
+      collisions.size(), static_cast<Eigen::Index>( params_.max_collision_constraints ) );
   const double zone_width = params_.d_zone - params_.d_pad;
-  std::size_t cc = 0;
-  for ( const auto &c : input.collisions ) {
-    if ( cc >= max_cc ) {
-      break;
-    }
-    if ( c.normal.size() != ni ) {
-      continue; // malformed constraint — skip rather than abort the cycle
-    }
-    const Eigen::Index row = ni + static_cast<Eigen::Index>( cc );
-    C_.row( row ) = c.normal.transpose();
+  for ( Eigen::Index k = 0; k < cc; ++k ) {
+    const Eigen::Index row = ni + k;
+    const double distance = collisions.distance( k );
+    C_.row( row ) = collisions.normal( k );
     // Damper: g^T v >= -xi * (d - d_pad) / (d_zone - d_pad); capped push-out when
     // penetrating. The approach speed is ALSO bounded by the braking envelope that can
     // still stop at the padding (the damper alone admits speeds the acceleration limits
     // cannot brake from): effective deceleration of g^T v <= sum_i |g_i| * a_dec_i.
-    const double damper_rhs = -params_.damper_xi * ( c.distance - params_.d_pad ) / zone_width;
-    const double a_pair = c.normal.cwiseAbs().dot( params_.a_dec );
+    const double damper_rhs = -params_.damper_xi * ( distance - params_.d_pad ) / zone_width;
+    const double a_pair = C_.row( row ).cwiseAbs().dot( params_.a_dec.transpose() );
     const double braking_rhs =
-        -positionLimitBound( c.distance - params_.d_pad, std::max( a_pair, 1e-9 ), params_.dt );
+        -positionLimitBound( distance - params_.d_pad, std::max( a_pair, 1e-9 ), params_.dt );
     l_[row] = std::min( std::max( damper_rhs, braking_rhs ), params_.max_repulsion_speed );
     u_[row] = kInf;
-    ++cc;
   }
   result.num_collision_constraints = static_cast<int>( cc );
 
   // ---- Solve: min 0.5 * (1 + regularization) * ||v||^2 - v_des^T v over the used rows ----
   const double hessian_scale = 1.0 + params_.regularization;
-  const Eigen::Index rows = ni + static_cast<Eigen::Index>( cc );
+  const Eigen::Index rows = ni + cc;
   bool solved = qp_->solve( hessian_scale, input.v_des, C_, l_, u_, rows );
   result.iterations = qp_->iterations();
 
@@ -424,22 +447,21 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
     // from the worst contact. 2b: relax that one too; v = 0 then satisfies every row,
     // so 2b stays feasible up to transient acceleration-box conflicts, while
     // tangential/outward escape motion remains possible.
-    std::size_t k_deep = cc;
+    Eigen::Index k_deep = cc;
     double d_deep = std::numeric_limits<double>::max();
-    for ( std::size_t k = 0; k < cc; ++k ) {
-      const Eigen::Index row = ni + static_cast<Eigen::Index>( k );
-      if ( l_[row] > 0.0 && input.collisions[k].distance < d_deep ) {
-        d_deep = input.collisions[k].distance;
+    for ( Eigen::Index k = 0; k < cc; ++k ) {
+      if ( l_[ni + k] > 0.0 && collisions.distance( k ) < d_deep ) {
+        d_deep = collisions.distance( k );
         k_deep = k;
       }
     }
 
     bool relaxed_any = false;
-    for ( std::size_t k = 0; k < cc; ++k ) {
+    for ( Eigen::Index k = 0; k < cc; ++k ) {
       if ( k == k_deep ) {
         continue; // stage 2a keeps the deepest push-out demand
       }
-      const Eigen::Index row = ni + static_cast<Eigen::Index>( k );
+      const Eigen::Index row = ni + k;
       if ( l_[row] > 0.0 ) {
         l_[row] = 0.0;
         relaxed_any = true;
@@ -452,8 +474,7 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
     }
     if ( !solved && k_deep < cc ) {
       // Stage 2b: even the deepest push-out is incompatible (true vise) — full no-worsen
-      const Eigen::Index row = ni + static_cast<Eigen::Index>( k_deep );
-      l_[row] = 0.0;
+      l_[ni + k_deep] = 0.0;
       solved = qp_->solve( hessian_scale, input.v_des, C_, l_, u_, rows );
       result.iterations += qp_->iterations();
       relaxed_any = true;
@@ -474,13 +495,8 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   }
 
   // Per-constraint debug info: final RHS (after any relaxation) and achieved g^T v
-  result.collision_rhs.resize( static_cast<Eigen::Index>( cc ) );
-  result.collision_velocity.resize( static_cast<Eigen::Index>( cc ) );
-  for ( std::size_t k = 0; k < cc; ++k ) {
-    const Eigen::Index row = ni + static_cast<Eigen::Index>( k );
-    result.collision_rhs[static_cast<Eigen::Index>( k )] = l_[row];
-    result.collision_velocity[static_cast<Eigen::Index>( k )] = C_.row( row ).dot( result.v );
-  }
+  result.collision_rhs.head( cc ) = l_.segment( ni, cc );
+  result.collision_velocity.head( cc ).noalias() = C_.middleRows( ni, cc ) * result.v;
 
   result.solve_time_us = static_cast<double>( std::chrono::duration_cast<std::chrono::nanoseconds>(
                                                   std::chrono::steady_clock::now() - t0 )

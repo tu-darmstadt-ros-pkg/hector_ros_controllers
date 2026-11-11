@@ -55,7 +55,9 @@ SafetyPipeline::SafetyPipeline( Config config )
   input_.q = Eigen::VectorXd::Zero( ni );
   input_.q_lo = Eigen::VectorXd::Constant( ni, -std::numeric_limits<double>::infinity() );
   input_.q_hi = Eigen::VectorXd::Constant( ni, std::numeric_limits<double>::infinity() );
-  input_.collisions.reserve( config_.qp.max_collision_constraints );
+  input_.collisions.reserve( static_cast<Eigen::Index>( config_.qp.max_collision_constraints ),
+                             ni );
+  normal_ = Eigen::VectorXd::Zero( ni );
   constraint_pair_indices_.reserve( config_.qp.max_collision_constraints );
   input_.hold.assign( n, 0 );
   reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
@@ -196,20 +198,19 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
   if ( obs.checks_active ) {
     if ( obs.state_valid && obs.pairs ) {
       for ( const auto &candidate : *obs.pairs ) {
-        QpCollisionConstraint c;
-        c.distance = candidate.distance;
-        c.normal.resize( static_cast<Eigen::Index>( n ) );
         for ( std::size_t i = 0; i < n; ++i ) {
           const int v_idx = config_.joint_v_index[i];
-          c.normal[static_cast<Eigen::Index>( i )] =
+          normal_[static_cast<Eigen::Index>( i )] =
               ( candidate.gradient && v_idx >= 0 && v_idx < candidate.gradient->size() )
                   ? ( *candidate.gradient )[v_idx]
                   : 0.0;
         }
         // A pair the controlled joints cannot influence must not constrain (or even
         // infeasible-block) the QP.
-        if ( c.normal.norm() > 1e-12 ) {
-          input_.collisions.push_back( std::move( c ) );
+        if ( normal_.norm() > 1e-12 ) {
+          if ( !input_.collisions.push( normal_, candidate.distance ) ) {
+            break; // candidates are sorted closest-first; the QP drops the rest anyway
+          }
           constraint_pair_indices_.push_back( candidate.pair_index );
         }
       }

@@ -38,11 +38,34 @@ struct SafetyQpParams {
   std::size_t max_collision_constraints{ 10 }; ///< preallocated collision rows (closest kept)
 };
 
-/// One linearized collision constraint: normal^T v >= damper(distance).
-/// normal is dd/dv projected onto the controlled joints (size n).
-struct QpCollisionConstraint {
-  Eigen::VectorXd normal;
-  double distance{ 0.0 };
+/// Linearized collision constraints normal(k)^T v >= damper(distance(k)), k < size().
+/// A normal is dd/dv projected onto the controlled joints. The storage is sized once by
+/// reserve(), so refilling it every cycle does not allocate.
+class QpCollisionConstraints
+{
+public:
+  /// Room for @p capacity constraints over @p n joints; drops the stored ones.
+  void reserve( Eigen::Index capacity, Eigen::Index n );
+
+  void clear() { size_ = 0; }
+
+  /// Append a constraint.
+  /// @return false (nothing stored) if the storage is full
+  /// @throws std::invalid_argument if @p normal does not have size n
+  bool push( const Eigen::Ref<const Eigen::VectorXd> &normal, double distance );
+
+  Eigen::Index size() const { return size_; }
+  bool empty() const { return size_ == 0; }
+  Eigen::Index joints() const { return normals_.cols(); }
+  auto normal( const Eigen::Index k ) const { return normals_.row( k ); }
+  double distance( const Eigen::Index k ) const { return distances_[k]; }
+  /// The normals of the stored constraints, one per row.
+  auto normals() const { return normals_.topRows( size_ ); }
+
+private:
+  Eigen::MatrixXd normals_;
+  Eigen::VectorXd distances_;
+  Eigen::Index size_{ 0 };
 };
 
 /// Per-cycle input. All vectors size n.
@@ -56,7 +79,7 @@ struct SafetyQpInput {
   /// clamped toward zero velocity at its deceleration limit and then pinned there, so
   /// the QP cannot recruit it to flow around or push out of a collision.
   std::vector<uint8_t> hold;
-  std::vector<QpCollisionConstraint> collisions; ///< sorted closest-first; extra rows dropped
+  QpCollisionConstraints collisions; ///< sorted closest-first; extra rows dropped
 };
 
 /// Per-cycle output.
@@ -72,7 +95,8 @@ struct SafetyQpResult {
   int num_collision_constraints{ 0 };
   double solve_time_us{ 0.0 };
   long iterations{ 0 }; ///< active-set additions and drops, summed over all solve stages
-  // Per collision constraint (size num_collision_constraints), for debugging:
+  // Per collision constraint, for debugging. Sized max_collision_constraints; the first
+  // num_collision_constraints entries are valid.
   Eigen::VectorXd collision_rhs;      ///< final required minimum of g^T v (after relaxation)
   Eigen::VectorXd collision_velocity; ///< achieved g^T v at the returned v
 };
@@ -91,8 +115,8 @@ struct SafetyQpResult {
  * falls back to braking to zero at the deceleration limit. The QP is solved exactly by a
  * dual active-set method (Goldfarb-Idnani).
  *
- * Not thread-safe; call solve() from a single (control) thread. The QP matrices are
- * allocated in the constructor; solve() still allocates its result vectors.
+ * Not thread-safe; call solve() from a single (control) thread. All storage is allocated
+ * in the constructor; solve() does not allocate.
  */
 class SafetyQpLimiter
 {
@@ -111,6 +135,7 @@ public:
   /**
    * @brief Solve the per-cycle QP.
    * @param input see SafetyQpInput; all vectors must have size n
+   * @throws std::invalid_argument if the collision normals do not have size n
    * @return velocity command + diagnostics (never NaN; falls back to braking). Refers
    * to a member workspace: valid until the next solve(), like lastBoxLower()/Upper().
    */

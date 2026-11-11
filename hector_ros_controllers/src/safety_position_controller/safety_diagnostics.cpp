@@ -159,13 +159,9 @@ void SafetyDiagnostics::maybePublishQpDebug( const SafetyPipeline &pipeline,
   msg.pair_velocities.resize( num_pairs );
   for ( size_t k = 0; k < num_pairs; ++k ) {
     const auto idx = static_cast<Eigen::Index>( k );
-    msg.pair_distances[k] = qp_input.collisions[k].distance;
-    msg.pair_rhs[k] = ( idx < qp_result.collision_rhs.size() )
-                          ? qp_result.collision_rhs[idx]
-                          : std::numeric_limits<double>::quiet_NaN();
-    msg.pair_velocities[k] = ( idx < qp_result.collision_velocity.size() )
-                                 ? qp_result.collision_velocity[idx]
-                                 : std::numeric_limits<double>::quiet_NaN();
+    msg.pair_distances[k] = qp_input.collisions.distance( idx );
+    msg.pair_rhs[k] = qp_result.collision_rhs[idx];
+    msg.pair_velocities[k] = qp_result.collision_velocity[idx];
   }
 
   msg.solved = qp_result.solved;
@@ -220,19 +216,22 @@ std::string SafetyDiagnostics::formatBlockedDirections( const SafetyPipeline &pi
     const double dir = v_des > 0.0 ? 1.0 : -1.0;
     // Most opposing constraint: largest -(normal_i * dir)
     double worst_opposition = 0.0;
-    size_t worst_k = qp_input.collisions.size();
-    for ( size_t k = 0; k < qp_input.collisions.size(); ++k ) {
-      const double opposition = -qp_input.collisions[k].normal[idx] * dir;
+    const auto num_constraints = static_cast<size_t>( qp_input.collisions.size() );
+    size_t worst_k = num_constraints;
+    for ( size_t k = 0; k < num_constraints; ++k ) {
+      const double opposition =
+          -qp_input.collisions.normal( static_cast<Eigen::Index>( k ) )[idx] * dir;
       if ( opposition > worst_opposition ) {
         worst_opposition = opposition;
         worst_k = k;
       }
     }
     oss << " " << params_.joints[i] << "[" << ( dir > 0.0 ? "+" : "-" ) << "]: ";
-    if ( worst_k < qp_input.collisions.size() && worst_k < pair_indices.size() && checker_ ) {
+    if ( worst_k < num_constraints && worst_k < pair_indices.size() && checker_ ) {
       const auto [name_a, name_b] = checker_->getPairNames( pair_indices[worst_k] );
       oss << "blocked by '" << name_a << "<->" << name_b << "' (d=" << std::fixed
-          << std::setprecision( 4 ) << qp_input.collisions[worst_k].distance
+          << std::setprecision( 4 )
+          << qp_input.collisions.distance( static_cast<Eigen::Index>( worst_k ) )
           << " m, g_i=" << std::setprecision( 3 ) << -worst_opposition * dir << ");";
     } else {
       oss << "no opposing collision constraint (velocity/position bounds?);";

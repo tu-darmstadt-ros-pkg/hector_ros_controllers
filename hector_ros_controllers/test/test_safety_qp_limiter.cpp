@@ -13,7 +13,6 @@
 
 #include "safety_position_controller/safety_qp_limiter.hpp"
 
-using safety_position_controller::QpCollisionConstraint;
 using safety_position_controller::SafetyQpInput;
 using safety_position_controller::SafetyQpLimiter;
 using safety_position_controller::SafetyQpParams;
@@ -46,15 +45,8 @@ SafetyQpInput makeInput( const int n )
   in.q = Eigen::VectorXd::Zero( n );
   in.q_lo = Eigen::VectorXd::Constant( n, -kInf );
   in.q_hi = Eigen::VectorXd::Constant( n, kInf );
+  in.collisions.reserve( 128, n );
   return in;
-}
-
-QpCollisionConstraint makeCollision( const Eigen::VectorXd &normal, const double distance )
-{
-  QpCollisionConstraint c;
-  c.normal = normal;
-  c.distance = distance;
-  return c;
 }
 } // namespace
 
@@ -192,8 +184,7 @@ TEST( SafetyQpLimiter, BlockedDirectionSlidesTangentially )
   auto in = makeInput( 2 );
   in.v_des << -0.8, -0.5; // wants to move INTO the obstacle and sideways
   in.v_prev = in.v_des;   // acceleration not binding
-  in.collisions.push_back(
-      makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), /*distance=*/0.01 ) );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), /*distance=*/0.01 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -211,7 +202,7 @@ TEST( SafetyQpLimiter, DamperLimitsApproachSpeedInsideZone )
   in.v_prev << -1.0;
 
   const double d = 0.03; // halfway between pad (0.01) and zone (0.05)
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 1 ) << 1.0 ).finished(), d ) );
+  in.collisions.push( ( Eigen::VectorXd( 1 ) << 1.0 ).finished(), d );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -226,8 +217,7 @@ TEST( SafetyQpLimiter, PenetrationCausesCappedPushOut )
   SafetyQpLimiter limiter( 1, params );
   auto in = makeInput( 1 );
   in.v_des << 0.0; // no desire to move — push-out must come from the damper
-  in.collisions.push_back(
-      makeCollision( ( Eigen::VectorXd( 1 ) << 1.0 ).finished(), /*distance=*/0.0 ) );
+  in.collisions.push( ( Eigen::VectorXd( 1 ) << 1.0 ).finished(), /*distance=*/0.0 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -242,8 +232,8 @@ TEST( SafetyQpLimiter, OpposingConstraintsStopOnlyThatAxis )
   in.v_des << 0.7, 0.4;
   in.v_prev = in.v_des;
   // Two opposing walls at the padding on the x axis: v_x >= 0 and v_x <= 0
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.01 ) );
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << -1.0, 0.0 ).finished(), 0.01 ) );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.01 );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << -1.0, 0.0 ).finished(), 0.01 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -259,7 +249,7 @@ TEST( SafetyQpLimiter, ExcessConstraintsAreDropped )
   auto in = makeInput( 2 );
   in.v_des << 0.1, 0.1;
   for ( int k = 0; k < 5; ++k ) {
-    in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.04 ) );
+    in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.04 );
   }
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -278,8 +268,8 @@ TEST( SafetyQpLimiter, WedgedRelaxesPushOutAndAllowsEscape )
   auto in = makeInput( 2 );
   in.v_des << 0.6, 0.4;  // x is wedged, y is free
   in.v_prev << 0.0, 0.0; // standstill: the old pure-braking fallback would stay frozen
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), -0.02 ) );
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << -1.0, 0.0 ).finished(), -0.02 ) );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), -0.02 );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << -1.0, 0.0 ).finished(), -0.02 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -297,14 +287,37 @@ TEST( SafetyQpLimiter, WedgedOutwardMotionIsAllowed )
   auto in = makeInput( 2 );
   in.v_des << 0.0, 0.8;
   in.v_prev << 0.0, 0.8; // acceleration not binding
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), -0.02 ) );
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << -1.0, 0.0 ).finished(), -0.02 ) );
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 0.0, 1.0 ).finished(), -0.01 ) );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), -0.02 );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << -1.0, 0.0 ).finished(), -0.02 );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 0.0, 1.0 ).finished(), -0.01 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
   EXPECT_TRUE( res.push_out_relaxed );
   EXPECT_NEAR( res.v[1], 0.8, 1e-5 ); // moving out of the -y contact is unrestricted
+}
+
+TEST( SafetyQpLimiter, WedgeKeepsTheDeepestPushOut )
+{
+  // Two shallow contacts wedge x; the deepest contact, listed last, pushes out along y.
+  // Relaxing only the shallow ones makes the problem feasible, so the deepest pair must
+  // still get its push-out instead of the no-worsen fallback that would leave it as
+  // deep as it is.
+  auto params = makeParams( 2 );
+  SafetyQpLimiter limiter( 2, params );
+  auto in = makeInput( 2 );
+  in.collisions.push( Eigen::Vector2d( 1.0, 0.0 ), -0.005 );
+  in.collisions.push( Eigen::Vector2d( -1.0, 0.0 ), -0.005 );
+  in.collisions.push( Eigen::Vector2d( 0.0, 1.0 ), -0.02 );
+
+  const auto &res = limiter.solve( in );
+  ASSERT_TRUE( res.solved );
+  EXPECT_TRUE( res.push_out_relaxed );
+  EXPECT_EQ( res.collision_rhs[0], 0.0 );
+  EXPECT_EQ( res.collision_rhs[1], 0.0 );
+  EXPECT_EQ( res.collision_rhs[2], params.max_repulsion_speed );
+  EXPECT_NEAR( res.v[0], 0.0, 1e-9 );
+  EXPECT_NEAR( res.v[1], params.max_repulsion_speed, 1e-9 ) << "the deepest pair is pushed out";
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +334,7 @@ TEST( SafetyQpLimiter, ContactCrawlClampsTangentialSpeedInsidePadding )
   in.v_des << 0.0, 0.9; // fast tangential grind along the contact
   in.v_prev << 0.0, 0.2;
   // Pair inside the padding (0.005 < 0.01) → crawl engages; push-out demanded on x
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.005 ) );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.005 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -339,7 +352,7 @@ TEST( SafetyQpLimiter, ContactCrawlDeceleratesFromEntrySpeed )
   auto in = makeInput( 2 );
   in.v_des << 0.0, 1.0;
   in.v_prev << 0.0, 1.0; // entered the padding still fast
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.002 ) );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), 0.002 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -367,7 +380,7 @@ TEST( SafetyQpLimiter, ContactCrawlInactiveOutsidePadding )
   in.v_prev << 0.8;
   // In the zone but outside the padding → no crawl (tangential pair: zero gradient on
   // the moving joint would be skipped upstream; here use an orthogonal-ish weak normal)
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 1 ) << 0.01 ).finished(), 0.03 ) );
+  in.collisions.push( ( Eigen::VectorXd( 1 ) << 0.01 ).finished(), 0.03 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -386,10 +399,9 @@ TEST( SafetyQpLimiter, DeepestPairKeepsPushOutInPocket )
   SafetyQpLimiter limiter( 2, makeParams( 2 ) );
   auto in = makeInput( 2 );
   in.v_des << 0.0, 0.0;
-  in.collisions.push_back(
-      makeCollision( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), -0.02 ) ); // deepest
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 0.0, 1.0 ).finished(), -0.005 ) );
-  in.collisions.push_back( makeCollision( ( Eigen::VectorXd( 2 ) << 0.0, -1.0 ).finished(), -0.004 ) );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 1.0, 0.0 ).finished(), -0.02 ); // deepest
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 0.0, 1.0 ).finished(), -0.005 );
+  in.collisions.push( ( Eigen::VectorXd( 2 ) << 0.0, -1.0 ).finished(), -0.004 );
 
   const auto res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -411,8 +423,7 @@ TEST( SafetyQpLimiter, InfeasibleFallsBackToBraking )
   auto in = makeInput( 1 );
   in.v_des << 0.0;
   in.v_prev << -0.4; // still moving toward the obstacle
-  in.collisions.push_back(
-      makeCollision( ( Eigen::VectorXd( 1 ) << 1.0 ).finished(), /*distance=*/-0.01 ) );
+  in.collisions.push( ( Eigen::VectorXd( 1 ) << 1.0 ).finished(), /*distance=*/-0.01 );
 
   const auto res = limiter.solve( in );
   EXPECT_TRUE( res.braking );
@@ -436,14 +447,16 @@ TEST( SafetyQpLimiter, InfeasibleFallsBackToBraking )
 namespace
 {
 /// Damper row bound before any relaxation, as computed by the limiter.
-double unrelaxedCollisionRhs( const SafetyQpParams &params, const QpCollisionConstraint &c )
+double unrelaxedCollisionRhs( const SafetyQpParams &params, const SafetyQpInput &in, const int k )
 {
+  const double distance = in.collisions.distance( k );
   const double damper =
-      -params.damper_xi * ( c.distance - params.d_pad ) / ( params.d_zone - params.d_pad );
-  const double dist = c.distance - params.d_pad;
+      -params.damper_xi * ( distance - params.d_pad ) / ( params.d_zone - params.d_pad );
+  const double dist = distance - params.d_pad;
   double braking = 0.0;
   if ( dist > 0.0 ) {
-    const double a = std::max( c.normal.cwiseAbs().dot( params.a_dec ), 1e-9 );
+    const double a =
+        std::max( in.collisions.normal( k ).cwiseAbs().dot( params.a_dec.transpose() ), 1e-9 );
     const double half_step = 0.5 * a * params.dt;
     braking = -std::min( dist / params.dt,
                          -half_step + std::sqrt( half_step * half_step + 2.0 * a * dist ) );
@@ -575,7 +588,7 @@ TEST( SafetyQpLimiter, SolutionIsOptimalAndRelaxesOnlyWhenInfeasible )
     for ( int k = 0; k < num_collisions; ++k ) {
       const Eigen::VectorXd normal =
           Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.3 * unit( rng ); } );
-      in.collisions.push_back( makeCollision( normal, 0.12 * std::abs( unit( rng ) ) ) );
+      in.collisions.push( normal, 0.12 * std::abs( unit( rng ) ) );
     }
     const auto &res = limiter.solve( in );
     const int m = res.num_collision_constraints;
@@ -586,7 +599,7 @@ TEST( SafetyQpLimiter, SolutionIsOptimalAndRelaxesOnlyWhenInfeasible )
     l.head( n ) = limiter.lastBoxLower();
     u.head( n ) = limiter.lastBoxUpper();
     for ( int k = 0; k < m; ++k ) {
-      C.row( n + k ) = in.collisions[k].normal.transpose();
+      C.row( n + k ) = in.collisions.normal( k );
       l[n + k] = res.collision_rhs[k];
       u[n + k] = kInf;
     }
@@ -607,9 +620,9 @@ TEST( SafetyQpLimiter, SolutionIsOptimalAndRelaxesOnlyWhenInfeasible )
       Eigen::VectorXd l_stage = l;
       int deepest = -1;
       for ( int k = 0; k < m; ++k ) {
-        l_stage[n + k] = unrelaxedCollisionRhs( params, in.collisions[k] );
+        l_stage[n + k] = unrelaxedCollisionRhs( params, in, k );
         if ( l_stage[n + k] > 0.0 &&
-             ( deepest < 0 || in.collisions[k].distance < in.collisions[deepest].distance ) ) {
+             ( deepest < 0 || in.collisions.distance( k ) < in.collisions.distance( deepest ) ) ) {
           deepest = k;
         }
       }
@@ -644,19 +657,20 @@ TEST( SafetyQpLimiter, DuplicateAndNearParallelRowsKeepTheTightest )
   in.v_des << -0.8, 0.3;
   in.v_prev = in.v_des;
   for ( const double distance : { 0.03, 0.02, 0.03, 0.025 } ) {
-    in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, 0.0 ), distance ) );
+    in.collisions.push( Eigen::Vector2d( 1.0, 0.0 ), distance );
   }
-  in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, 1e-9 ), 0.02 ) );
-  in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, -1e-9 ), 0.021 ) );
+  in.collisions.push( Eigen::Vector2d( 1.0, 1e-9 ), 0.02 );
+  in.collisions.push( Eigen::Vector2d( 1.0, -1e-9 ), 0.021 );
 
   const auto &res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
   EXPECT_FALSE( res.push_out_relaxed );
-  const double tightest = res.collision_rhs.maxCoeff();
+  const auto m = res.num_collision_constraints;
+  const double tightest = res.collision_rhs.head( m ).maxCoeff();
   ASSERT_GT( tightest, in.v_des[0] );
   EXPECT_NEAR( res.v[0], tightest, 1e-8 );
   EXPECT_NEAR( res.v[1], 0.3, 1e-8 );
-  EXPECT_GE( ( res.collision_velocity - res.collision_rhs ).minCoeff(), -1e-9 );
+  EXPECT_GE( ( res.collision_velocity - res.collision_rhs ).head( m ).minCoeff(), -1e-9 );
 }
 
 TEST( SafetyQpLimiter, ZeroNormalPushOutIsRelaxed )
@@ -668,7 +682,7 @@ TEST( SafetyQpLimiter, ZeroNormalPushOutIsRelaxed )
   auto in = makeInput( 2 );
   in.v_des << 0.4, -0.2;
   in.v_prev = in.v_des;
-  in.collisions.push_back( makeCollision( Eigen::Vector2d::Zero(), -0.02 ) );
+  in.collisions.push( Eigen::Vector2d::Zero(), -0.02 );
 
   const auto &res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -690,11 +704,10 @@ TEST( SafetyQpLimiter, KeepsExactlyMaxCollisionConstraintsRows )
   in.v_prev = in.v_des;
   for ( int k = 0; k < 63; ++k ) {
     const double angle = 0.1 * k;
-    in.collisions.push_back(
-        makeCollision( 0.3 * Eigen::Vector2d( std::cos( angle ), std::sin( angle ) ), 0.2 ) );
+    in.collisions.push( 0.3 * Eigen::Vector2d( std::cos( angle ), std::sin( angle ) ), 0.2 );
   }
-  in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, 0.0 ), 0.015 ) );
-  in.collisions.push_back( makeCollision( Eigen::Vector2d( 0.0, 1.0 ), 0.015 ) );
+  in.collisions.push( Eigen::Vector2d( 1.0, 0.0 ), 0.015 );
+  in.collisions.push( Eigen::Vector2d( 0.0, 1.0 ), 0.015 );
 
   const auto &res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -715,7 +728,7 @@ TEST( SafetyQpLimiter, CollisionFlowsAroundPinnedJoints )
   in.v_des << -1.0, 0.0, 0.0;
   in.v_prev << -0.8, 0.5, 0.0;
   in.hold = { 0, 1, 1 };
-  in.collisions.push_back( makeCollision( Eigen::Vector3d( 1.0, 1.0, 1.0 ), 0.02 ) );
+  in.collisions.push( Eigen::Vector3d( 1.0, 1.0, 1.0 ), 0.02 );
 
   const auto &res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
@@ -738,13 +751,14 @@ TEST( SafetyQpLimiter, DegenerateVertexWithMoreTightRowsThanJoints )
   for ( const Eigen::Vector2d &normal :
         { Eigen::Vector2d( 1.0, 0.0 ), Eigen::Vector2d( 0.0, 1.0 ), Eigen::Vector2d( 0.5, 0.5 ),
           Eigen::Vector2d( 0.7, 0.3 ) } ) {
-    in.collisions.push_back( makeCollision( normal, -0.005 ) );
+    in.collisions.push( normal, -0.005 );
   }
 
   const auto &res = limiter.solve( in );
   ASSERT_TRUE( res.solved );
   EXPECT_FALSE( res.push_out_relaxed );
-  ASSERT_TRUE( ( res.collision_rhs.array() == 0.05 ).all() );
+  ASSERT_EQ( res.num_collision_constraints, 4 );
+  ASSERT_TRUE( ( res.collision_rhs.head( 4 ).array() == 0.05 ).all() );
   EXPECT_NEAR( res.v[0], 0.05, 1e-9 );
   EXPECT_NEAR( res.v[1], 0.05, 1e-9 );
 }
@@ -766,21 +780,24 @@ TEST( SafetyQpLimiter, FeasibleStandstillIsNeverReportedInfeasible )
     in.v_prev = Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.04 * unit( rng ); } );
     for ( int k = 0; k < 64; ++k ) {
       Eigen::VectorXd normal = Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.3 * unit( rng ); } );
+      const auto previous = [&]() { return in.collisions.normal( k - 1 ).transpose(); };
       if ( k > 0 && cycle % 4 == 1 ) {
-        normal = in.collisions.back().normal;
+        normal = previous();
       } else if ( k > 0 && cycle % 4 == 2 ) {
-        normal = -in.collisions.back().normal;
+        normal = -previous();
       } else if ( k > 0 && cycle % 4 == 3 ) {
-        normal = in.collisions.back().normal +
+        normal = previous() +
                  1e-9 * Eigen::VectorXd::NullaryExpr( n, [&]() { return unit( rng ); } );
       }
       const double distance = params.d_pad + ( k % 3 == 0 ? 0.0 : 0.05 * std::abs( unit( rng ) ) );
-      in.collisions.push_back( makeCollision( normal, distance ) );
+      in.collisions.push( normal, distance );
     }
     const auto &res = limiter.solve( in );
     ASSERT_TRUE( res.solved ) << "cycle " << cycle;
     EXPECT_FALSE( res.push_out_relaxed ) << "cycle " << cycle;
-    EXPECT_GE( ( res.collision_velocity - res.collision_rhs ).minCoeff(), -1e-9 ) << "cycle " << cycle;
+    const auto m = res.num_collision_constraints;
+    EXPECT_GE( ( res.collision_velocity - res.collision_rhs ).head( m ).minCoeff(), -1e-9 )
+        << "cycle " << cycle;
   }
 }
 
@@ -844,7 +861,7 @@ int simulateDiscScenario( SafetyQpLimiter &limiter, const SafetyQpParams &params
     const double d = diff.norm() - obstacle_radius;
     in.collisions.clear();
     if ( d < params.d_zone ) {
-      in.collisions.push_back( makeCollision( diff.normalized(), d ) );
+      in.collisions.push( diff.normalized(), d );
     }
 
     const auto res = limiter.solve( in );
@@ -938,7 +955,7 @@ TEST( SafetyQpLimiter, HeldJointCannotBePushedOutOfACollision )
   in.v_des << 0.5, 0.0;
   in.hold = { 0, 1 };
   // Penetrating: the damper RHS is positive, i.e. it actively demands separation.
-  in.collisions.push_back( makeCollision( Eigen::Vector2d( -1.0, 1.0 ), -0.005 ) );
+  in.collisions.push( Eigen::Vector2d( -1.0, 1.0 ), -0.005 );
 
   const auto &r = limiter.solve( in );
   EXPECT_NEAR( r.v[1], 0.0, 1e-9 ) << "the resting joint must not be swept away";

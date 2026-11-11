@@ -9,7 +9,7 @@
 
 #include "safety_position_controller/safety_qp_limiter.hpp"
 
-using safety_position_controller::QpCollisionConstraint;
+using safety_position_controller::QpCollisionConstraints;
 using safety_position_controller::SafetyQpInput;
 using safety_position_controller::SafetyQpLimiter;
 using safety_position_controller::SafetyQpParams;
@@ -38,11 +38,11 @@ SafetyQpInput makeInput( const int n, const int num_collisions, std::mt19937 &rn
   in.q = Eigen::VectorXd::NullaryExpr( n, [&]() { return unit( rng ); } );
   in.q_lo = Eigen::VectorXd::Constant( n, -2.5 );
   in.q_hi = Eigen::VectorXd::Constant( n, 2.5 );
+  in.collisions.reserve( num_collisions, n );
   for ( int k = 0; k < num_collisions; ++k ) {
-    QpCollisionConstraint c;
-    c.normal = Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.2 * unit( rng ); } );
-    c.distance = 0.015 + 0.03 * std::abs( unit( rng ) ); // inside the safety zone
-    in.collisions.push_back( std::move( c ) );
+    const Eigen::VectorXd normal =
+        Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.2 * unit( rng ); } );
+    in.collisions.push( normal, 0.015 + 0.03 * std::abs( unit( rng ) ) ); // inside the safety zone
   }
   return in;
 }
@@ -91,9 +91,13 @@ void solveSequence( benchmark::State &state, const int n, const SafetyQpParams &
   std::vector<SafetyQpInput> inputs;
   for ( int i = 0; i < 64; ++i ) {
     SafetyQpInput in = makeInput( n, num_collisions, rng );
-    for ( auto &c : in.collisions ) {
-      c.distance = params.d_pad + ( params.d_zone - params.d_pad ) * std::abs( unit( rng ) );
+    QpCollisionConstraints spread;
+    spread.reserve( num_collisions, n );
+    for ( Eigen::Index k = 0; k < in.collisions.size(); ++k ) {
+      spread.push( in.collisions.normal( k ).transpose(),
+                   params.d_pad + ( params.d_zone - params.d_pad ) * std::abs( unit( rng ) ) );
     }
+    in.collisions = spread;
     inputs.push_back( std::move( in ) );
   }
 
