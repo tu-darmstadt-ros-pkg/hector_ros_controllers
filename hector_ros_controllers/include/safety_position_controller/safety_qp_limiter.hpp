@@ -71,7 +71,7 @@ struct SafetyQpResult {
   bool push_out_relaxed{ false };
   int num_collision_constraints{ 0 };
   double solve_time_us{ 0.0 };
-  long iterations{ 0 };
+  long iterations{ 0 }; ///< active-set additions and drops, summed over all solve stages
   // Per collision constraint (size num_collision_constraints), for debugging:
   Eigen::VectorXd collision_rhs;      ///< final required minimum of g^T v (after relaxation)
   Eigen::VectorXd collision_velocity; ///< achieved g^T v at the returned v
@@ -159,7 +159,7 @@ private:
 
   std::unique_ptr<DualActiveSetQp> qp_;
 
-  // Preallocated QP matrices: rows = n (box) + max_collision_constraints + 1 (deviation)
+  // Preallocated QP matrices: rows = n (box) + max_collision_constraints
   Eigen::MatrixXd C_;
   Eigen::VectorXd l_, u_;
   Eigen::VectorXd box_lb_, box_ub_; // per-joint bounds (also used to clamp the solution)
