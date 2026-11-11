@@ -65,11 +65,71 @@ void BM_SolveWarmStarted( benchmark::State &state )
   }
 }
 
+/// Athena's limb configuration (athena_simulation_controllers.yaml): 64 collision rows,
+/// deceleration = 3x acceleration, 3 cm padding inside a 10-12 cm safety zone.
+SafetyQpParams makeAthenaParams( const int n, const double a_acc, const double d_zone )
+{
+  SafetyQpParams p;
+  p.dt = 0.02;
+  p.v_max = Eigen::VectorXd::Constant( n, 1.0 );
+  p.a_acc = Eigen::VectorXd::Constant( n, a_acc );
+  p.a_dec = 3.0 * p.a_acc;
+  p.d_pad = 0.03;
+  p.d_zone = d_zone;
+  p.contact_crawl_speed = 0.15;
+  p.max_collision_constraints = 64;
+  return p;
+}
+
+/// Cycles through distinct problems: every control cycle sees new bounds and normals.
+void solveSequence( benchmark::State &state, const int n, const SafetyQpParams &params )
+{
+  const int num_collisions = static_cast<int>( state.range( 0 ) );
+  std::mt19937 rng( 7 );
+  std::uniform_real_distribution<double> unit( -1.0, 1.0 );
+
+  std::vector<SafetyQpInput> inputs;
+  for ( int i = 0; i < 64; ++i ) {
+    SafetyQpInput in = makeInput( n, num_collisions, rng );
+    for ( auto &c : in.collisions ) {
+      c.distance = params.d_pad + ( params.d_zone - params.d_pad ) * std::abs( unit( rng ) );
+    }
+    inputs.push_back( std::move( in ) );
+  }
+
+  SafetyQpLimiter limiter( static_cast<std::size_t>( n ), params );
+  limiter.solve( inputs.front() );
+
+  std::size_t k = 0;
+  long iterations = 0;
+  for ( auto _ : state ) {
+    const auto &result = limiter.solve( inputs[k++ % inputs.size()] );
+    iterations += result.iterations;
+    benchmark::DoNotOptimize( result.v.data() );
+  }
+  state.counters["qp_iter"] =
+      benchmark::Counter( static_cast<double>( iterations ), benchmark::Counter::kAvgIterations );
+}
+
+void BM_AthenaArm( benchmark::State &state )
+{
+  solveSequence( state, 7, makeAthenaParams( 7, 5.28, 0.12 ) );
+}
+
+void BM_AthenaFlipper( benchmark::State &state )
+{
+  solveSequence( state, 4, makeAthenaParams( 4, 8.0, 0.1 ) );
+}
+
 } // namespace
 
 // 7-DoF arm: free space, few obstacles, many obstacles
 BENCHMARK( BM_SolveWarmStarted )->Args( { 7, 0 } )->Args( { 7, 3 } )->Args( { 7, 10 } );
 // Small and large joint groups
 BENCHMARK( BM_SolveWarmStarted )->Args( { 3, 3 } )->Args( { 12, 10 } );
+
+// Athena's arm and flipper safety controllers: free space up to many close pairs
+BENCHMARK( BM_AthenaArm )->Arg( 0 )->Arg( 4 )->Arg( 16 )->Arg( 64 );
+BENCHMARK( BM_AthenaFlipper )->Arg( 0 )->Arg( 4 )->Arg( 16 );
 
 BENCHMARK_MAIN();
