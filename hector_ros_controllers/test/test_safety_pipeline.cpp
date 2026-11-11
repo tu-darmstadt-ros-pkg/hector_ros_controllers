@@ -647,6 +647,10 @@ TEST( SafetyPipeline, ConstructorValidatesConfig )
   EXPECT_THROW( Pipeline{ cfg }, std::invalid_argument );
 
   cfg = makeConfig();
+  cfg.qp.max_collision_constraints = 0;
+  EXPECT_THROW( Pipeline{ cfg }, std::invalid_argument ) << "0 would drop every collision row";
+
+  cfg = makeConfig();
   cfg.joint_v_index.clear(); // allowed: no collision model
   EXPECT_NO_THROW( Pipeline{ cfg } );
 }

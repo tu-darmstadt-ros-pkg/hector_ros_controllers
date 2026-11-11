@@ -42,6 +42,11 @@ SafetyPipeline::SafetyPipeline( Config config )
   } else if ( config_.joint_v_index.size() != n ) {
     throw std::invalid_argument( "SafetyPipeline: joint_v_index size mismatch" );
   }
+  // The checker reads a pair cap of 0 as "unlimited"; here it would silently drop every
+  // collision constraint.
+  if ( config_.qp.max_collision_constraints == 0 ) {
+    throw std::invalid_argument( "SafetyPipeline: qp.max_collision_constraints must be > 0" );
+  }
 
   // A continuous joint's lag is only known modulo a full turn, so the divergence bound
   // has to be reachable before the wrapped lag could alias into the wrong half turn.
