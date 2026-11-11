@@ -169,9 +169,6 @@ private:
   /// Publish ~/status via diagnostics with the current controller flags.
   void publish_status();
 
-  /// Build and publish the debug output the control thread captured (debug timer).
-  void publish_debug();
-
   /**
    * @brief Build the SafetyPipeline (QP limiter + per-joint limits) from parameters.
    * Called from on_activate.
@@ -257,7 +254,9 @@ private:
   // ---- Collision checking ----
   std::unique_ptr<CollisionChecker> collision_checker_;   ///< optional self-collision checker
   std::unique_ptr<CollisionObserver> collision_observer_; ///< per-cycle observation + edge state
-  std::unique_ptr<CollisionVisualizer> collision_visualizer_; ///< RViz markers; null when disabled
+  /// RViz markers; null when disabled. Shared with the debug timer, which may still be
+  /// publishing from it when an activation replaces it.
+  std::shared_ptr<CollisionVisualizer> collision_visualizer_;
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
   /// SRDF XML (semantic). The subscriber callback may replace it while on_configure
   /// reads it, so both hold srdf_mutex_.
@@ -310,8 +309,6 @@ private:
 
   // Periodic status timer
   rclcpp::TimerBase::SharedPtr status_timer_;
-  // Builds and publishes the debug output captured by the control thread
-  rclcpp::TimerBase::SharedPtr debug_timer_;
 
   static constexpr int throttle_logging_msg = 10000; ///< ms; throttle for WARN/ERROR logs
 };

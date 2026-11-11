@@ -946,8 +946,8 @@ TEST_F( SafetyPositionControllerTest, QpDebugIsPublishedOffTheControlThread )
   hector_ros_controllers_msgs::msg::SafetyQpDebug msg;
   EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) )
       .WillOnce( ::testing::SaveArg<0>( &msg ) );
-  controller_->publish_debug();
-  controller_->publish_debug();
+  controller_->diagnostics_->publishDebug();
+  controller_->diagnostics_->publishDebug();
   ::testing::Mock::VerifyAndClearExpectations( qp_debug_mock.get() );
 
   const auto &pipeline = *controller_->pipeline_;
@@ -992,8 +992,8 @@ TEST_F( SafetyPositionControllerTest, DebugJointStatesArePublishedOffTheControlT
   sensor_msgs::msg::JointState in_msg, out_msg;
   EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &in_msg ) );
   EXPECT_CALL( *out_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &out_msg ) );
-  controller_->publish_debug();
-  controller_->publish_debug();
+  controller_->diagnostics_->publishDebug();
+  controller_->diagnostics_->publishDebug();
 
   EXPECT_EQ( in_msg.name, controlled_joints_ );
   EXPECT_EQ( in_msg.position[0], 1.0 );
@@ -1043,7 +1043,62 @@ TEST_F( SafetyPositionControllerTest, ReactivationDoesNotRepublishThePreviousCap
   EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).Times( 0 );
   EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).Times( 0 );
   EXPECT_CALL( *marker_mock, publish( ::testing::_ ) ).Times( 0 );
-  controller_->publish_debug();
+  controller_->diagnostics_->publishDebug();
+}
+
+TEST_F( SafetyPositionControllerTest, DebugTimerRunsOnlyWhileDebugOutputIsEnabled )
+{
+  // The timer polls at the control rate on the executor; with every debug output off
+  // that is pure load.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  auto &diagnostics = *controller_->diagnostics_;
+  ASSERT_TRUE( diagnostics.debug_timer_ );
+  EXPECT_TRUE( diagnostics.debug_timer_->is_canceled() );
+
+  diagnostics.qp_debug_enabled_.store( true );
+  {
+    const std::lock_guard<std::mutex> lock( diagnostics.timer_mutex_ );
+    diagnostics.updateDebugTimer();
+  }
+  EXPECT_FALSE( diagnostics.debug_timer_->is_canceled() );
+
+  diagnostics.qp_debug_enabled_.store( false );
+  {
+    const std::lock_guard<std::mutex> lock( diagnostics.timer_mutex_ );
+    diagnostics.updateDebugTimer();
+  }
+  EXPECT_TRUE( diagnostics.debug_timer_->is_canceled() );
+
+  deactivateController();
+  EXPECT_FALSE( diagnostics.debug_timer_ );
+}
+
+TEST_F( SafetyPositionControllerTest, DebugPublishingKeepsItsVisualizerAlive )
+{
+  // An activation that turns the markers off drops the controller's visualizer while a
+  // debug tick may still be publishing from it on an executor thread.
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "debug_visualize_collisions", true ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const std::weak_ptr<safety_position_controller::CollisionVisualizer> visualizer =
+      controller_->collision_visualizer_;
+  ASSERT_FALSE( visualizer.expired() );
+
+  controller_->collision_visualizer_.reset();
+  EXPECT_FALSE( visualizer.expired() ) << "the debug publisher still holds it";
+  controller_->diagnostics_->publishDebug();
+
+  controller_->diagnostics_->stopDebugPublishing();
+  EXPECT_TRUE( visualizer.expired() );
 }
 
 // ============================================================================

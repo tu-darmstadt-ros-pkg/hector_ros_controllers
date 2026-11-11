@@ -220,8 +220,7 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
-  // The debug timer reads the visualizer, which is replaced below.
-  debug_timer_.reset();
+  diagnostics_->stopDebugPublishing();
   // a target from before the deactivation must never be resumed on activation
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
   // Nobody is supervising a controller that is only now starting, so it starts guarded
@@ -251,7 +250,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
       if ( !collision_visualizer_ ) {
         collision_visualizer_ =
-            std::make_unique<CollisionVisualizer>( get_node(), params_.collision_visualization_rate );
+            std::make_shared<CollisionVisualizer>( get_node(), params_.collision_visualization_rate );
       } else {
         // Kept across a deactivate/activate cycle so the topic stays advertised; the
         // rate still has to follow a parameter change.
@@ -366,8 +365,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   }
   // Debug messages are built off the control thread; polled at the control rate, so
   // every cycle's capture normally goes out.
-  debug_timer_ = get_node()->create_wall_timer(
-      std::chrono::duration<double>( pipeline_->config().qp.dt ), [this]() { publish_debug(); } );
+  diagnostics_->startDebugPublishing( pipeline_->config().qp.dt, collision_visualizer_ );
 
   publish_status();
 
@@ -378,7 +376,7 @@ controller_interface::CallbackReturn
 SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   status_timer_.reset();
-  debug_timer_.reset();
+  diagnostics_->stopDebugPublishing();
   estop_engaged_.store( false, std::memory_order_relaxed );
   // A bypass is granted for as long as someone is watching this controller run. It must
   // not outlive the controller and be inherited by whatever activates next.
@@ -863,14 +861,6 @@ bool SafetyPositionController::wait_for_srdf()
     }
   }
   return true;
-}
-
-void SafetyPositionController::publish_debug()
-{
-  diagnostics_->publishDebug();
-  if ( collision_visualizer_ ) {
-    collision_visualizer_->publishPending();
-  }
 }
 
 void SafetyPositionController::publish_status()

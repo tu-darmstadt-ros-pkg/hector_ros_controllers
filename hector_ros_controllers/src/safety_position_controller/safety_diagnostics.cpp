@@ -33,6 +33,8 @@ SafetyDiagnostics::SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr
       "publish_debug_joint_states",
       [this]( const rclcpp::Parameter &p ) {
         debug_js_enabled_.store( p.as_bool(), std::memory_order_relaxed );
+        const std::lock_guard<std::mutex> lock( timer_mutex_ );
+        updateDebugTimer();
         RCLCPP_INFO( node_->get_logger(), "Debug joint state publishing %s",
                      p.as_bool() ? "enabled" : "disabled" );
       },
@@ -46,6 +48,8 @@ SafetyDiagnostics::SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr
       "publish_qp_debug",
       [this]( const rclcpp::Parameter &p ) {
         qp_debug_enabled_.store( p.as_bool(), std::memory_order_relaxed );
+        const std::lock_guard<std::mutex> lock( timer_mutex_ );
+        updateDebugTimer();
         RCLCPP_INFO( node_->get_logger(), "QP debug publishing %s",
                      p.as_bool() ? "enabled" : "disabled" );
       },
@@ -218,12 +222,56 @@ void SafetyDiagnostics::captureJointState( JointStateChannel &channel,
   channel.box.try_set( snap );
 }
 
+void SafetyDiagnostics::startDebugPublishing( const double period,
+                                              std::shared_ptr<CollisionVisualizer> visualizer )
+{
+  const std::lock_guard<std::mutex> lock( timer_mutex_ );
+  debug_visualizer_ = std::move( visualizer );
+  debug_timer_ = node_->create_wall_timer( std::chrono::duration<double>( period ),
+                                           [this]() { publishDebug(); } );
+  updateDebugTimer();
+}
+
+void SafetyDiagnostics::stopDebugPublishing()
+{
+  const std::lock_guard<std::mutex> lock( timer_mutex_ );
+  debug_timer_.reset();
+  debug_visualizer_.reset();
+}
+
+void SafetyDiagnostics::updateDebugTimer()
+{
+  if ( !debug_timer_ ) {
+    return;
+  }
+  const bool enabled = debug_visualizer_ || qp_debug_enabled_.load( std::memory_order_relaxed ) ||
+                       debug_js_enabled_.load( std::memory_order_relaxed );
+  if ( !enabled ) {
+    debug_timer_->cancel();
+  } else if ( debug_timer_->is_canceled() ) {
+    debug_timer_->reset();
+  }
+}
+
 void SafetyDiagnostics::publishDebug()
 {
-  const std::lock_guard<std::mutex> lock( debug_mutex_ );
-  publishJointState( js_in_ );
-  publishJointState( js_out_ );
+  std::shared_ptr<CollisionVisualizer> visualizer;
+  {
+    const std::lock_guard<std::mutex> lock( timer_mutex_ );
+    visualizer = debug_visualizer_;
+  }
+  if ( visualizer ) {
+    visualizer->publishPending();
+  }
 
+  const std::lock_guard<std::mutex> lock( debug_mutex_ );
+  if ( debug_js_enabled_.load( std::memory_order_relaxed ) ) {
+    publishJointState( js_in_ );
+    publishJointState( js_out_ );
+  }
+  if ( !qp_debug_enabled_.load( std::memory_order_relaxed ) ) {
+    return;
+  }
   qp_box_.get( qp_pending_ );
   const QpDebugSnapshot &snap = qp_pending_;
   if ( snap.seq == qp_published_seq_ || !qp_debug_pub_ ) {

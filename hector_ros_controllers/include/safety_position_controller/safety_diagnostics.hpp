@@ -14,6 +14,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 
 #include <safety_position_controller/collision_checker.hpp>
+#include <safety_position_controller/collision_visualizer.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
 
 #include <hector_ros_controllers_msgs/msg/safety_position_controller_status.hpp>
@@ -36,7 +37,8 @@ namespace safety_position_controller
  * Debug output is split across threads: the control thread only copies each cycle into
  * a preallocated snapshot (capture*()), and publishDebug(), called from a non-realtime
  * timer, builds and publishes the messages. A snapshot the timer has not picked up yet
- * is overwritten by the next cycle.
+ * is overwritten by the next cycle. The timer only runs while some debug output is
+ * enabled.
  */
 class SafetyDiagnostics
 {
@@ -85,9 +87,15 @@ public:
   void captureJointStateIn( const std::vector<double> &positions );
   void captureJointStateOut( const std::vector<double> &positions );
 
-  /// Build and publish the debug messages captured since the last call. Non-realtime
-  /// thread only.
+  /// Build and publish the debug messages (and the visualizer's markers) captured since
+  /// the last call. Non-realtime thread only.
   void publishDebug();
+
+  /// Call publishDebug() from a wall timer every @p period [s] while some debug output
+  /// is enabled. @p visualizer (may be null) is kept alive until stopDebugPublishing(),
+  /// and past it for a tick still running on another thread.
+  void startDebugPublishing( double period, std::shared_ptr<CollisionVisualizer> visualizer );
+  void stopDebugPublishing();
 
   /// Human-readable per-joint blocked-direction analysis (used in the stall warning).
   std::string formatBlockedDirections( const SafetyPipeline &pipeline ) const;
@@ -135,6 +143,8 @@ private:
   };
 
   void captureJointState( JointStateChannel &channel, const std::vector<double> &positions );
+  /// Run the debug timer iff some output is enabled. Requires timer_mutex_.
+  void updateDebugTimer();
   void publishJointState( JointStateChannel &channel );
 
   /// Trivially-copyable view of the status fields written from the controller update
@@ -185,6 +195,12 @@ private:
   std::mutex debug_mutex_;
   std::vector<std::string> debug_joint_names_;
   std::vector<std::string> pair_names_; ///< "a<->b" per collision pair index
+
+  /// Debug timer and the visualizer it publishes; the parameter callbacks, activation
+  /// and the timer itself run on different threads.
+  std::mutex timer_mutex_;
+  rclcpp::TimerBase::SharedPtr debug_timer_;
+  std::shared_ptr<CollisionVisualizer> debug_visualizer_;
 
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_debug_pubs_;
