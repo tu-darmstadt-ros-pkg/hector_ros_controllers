@@ -1,5 +1,6 @@
 #include "safety_position_controller/safety_qp_limiter.hpp"
 
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -239,9 +240,7 @@ void QpCollisionConstraints::reserve( const Eigen::Index capacity, const Eigen::
 bool QpCollisionConstraints::push( const Eigen::Ref<const Eigen::VectorXd> &normal,
                                    const double distance )
 {
-  if ( normal.size() != normals_.cols() ) {
-    throw std::invalid_argument( "QpCollisionConstraints: normal size mismatch" );
-  }
+  assert( normal.size() == normals_.cols() );
   if ( size_ == distances_.size() ) {
     return false;
   }
@@ -373,9 +372,6 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   const auto t0 = std::chrono::steady_clock::now();
   const auto ni = static_cast<Eigen::Index>( n_ );
   const QpCollisionConstraints &collisions = input.collisions;
-  if ( !collisions.empty() && collisions.joints() != ni ) {
-    throw std::invalid_argument( "SafetyQpLimiter: collision normals must have size n" );
-  }
 
   // Reused across solves so the per-cycle vectors keep their capacity; the flags are
   // cleared by name (a new field must be reset here too).

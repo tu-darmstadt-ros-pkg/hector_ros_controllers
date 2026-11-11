@@ -51,12 +51,11 @@ public:
 
   /// Append a constraint.
   /// @return false (nothing stored) if the storage is full
-  /// @throws std::invalid_argument if @p normal does not have size n
+  /// @pre @p normal has size n (asserted in debug builds)
   bool push( const Eigen::Ref<const Eigen::VectorXd> &normal, double distance );
 
   Eigen::Index size() const { return size_; }
   bool empty() const { return size_ == 0; }
-  Eigen::Index joints() const { return normals_.cols(); }
   auto normal( const Eigen::Index k ) const { return normals_.row( k ); }
   double distance( const Eigen::Index k ) const { return distances_[k]; }
   /// The normals of the stored constraints, one per row.
@@ -136,8 +135,7 @@ public:
 
   /**
    * @brief Solve the per-cycle QP.
-   * @param input see SafetyQpInput; all vectors must have size n
-   * @throws std::invalid_argument if the collision normals do not have size n
+   * @param input see SafetyQpInput; all vectors, and the collision normals, must have size n
    * @return velocity command + diagnostics (never NaN; falls back to braking). Refers
    * to a member workspace: valid until the next solve(), like lastBoxLower()/Upper().
    */
