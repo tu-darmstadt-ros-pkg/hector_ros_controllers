@@ -15,7 +15,6 @@
 #include "pinocchio/collision/distance.hpp"
 #include <cmath>
 #include <coal/collision_data.h>
-#include <coal/distance.h>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/fcl.hpp>
 #include <pinocchio/multibody/model.hpp>
@@ -56,10 +55,8 @@ struct CollisionChecker::SafetyZoneDistanceCallback : coal::DistanceCallBackBase
     // collisionPairMapping is upper triangular: needs go1 < go2. The broadphase hands
     // objects in TREE TRAVERSAL order, which for ~half the pairs is reversed relative to
     // the stored collision pair (first, second).
-    bool swapped = false;
     if ( go1 > go2 ) {
       std::swap( go1, go2 );
-      swapped = true;
     }
 
     // Look up collision pair index (-1 if not a tracked pair)
@@ -73,20 +70,10 @@ struct CollisionChecker::SafetyZoneDistanceCallback : coal::DistanceCallBackBase
     if ( !geom_data_ptr->activeCollisionPairs[k] )
       return false;
 
-    // Run narrow-phase distance via coal
-    auto &dreq = geom_data_ptr->distanceRequests[k];
-    auto &dres = geom_data_ptr->distanceResults[k];
-    dreq.enable_nearest_points = true;
-    dres.clear();
-
-    coal::distance( o1, o2, dreq, dres );
-    if ( swapped ) {
-      // Restore pair-canonical order: nearest_points[0] must belong to cp.first,
-      // otherwise gradients computed from the witness points are exactly negated.
-      std::swap( dres.nearest_points[0], dres.nearest_points[1] );
-      dres.normal = -dres.normal;
-    }
-    const double d = dres.min_distance;
+    // Narrow phase through the pair's persistent solver, in pair order (first, second):
+    // nearest_points[0] belongs to cp.first, as the gradient requires.
+    geom_data_ptr->distanceRequests[k].enable_nearest_points = true;
+    const double d = pinocchio::computeDistance( *geom_model_ptr, *geom_data_ptr, k ).min_distance;
     visited_indices.push_back( k );
 
     // Update outputs
