@@ -4,6 +4,7 @@
 #include <chrono>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -252,10 +253,10 @@ private:
   std::unique_ptr<CollisionObserver> collision_observer_; ///< per-cycle observation + edge state
   std::unique_ptr<CollisionVisualizer> collision_visualizer_; ///< RViz markers; null when disabled
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
-  /// SRDF XML (semantic). Written by the subscriber callback before srdf_received_ is
-  /// set, and read by on_configure only after it observes that flag — the atomic is the
-  /// handshake that makes the cross-thread string write safe.
+  /// SRDF XML (semantic). The subscriber callback may replace it while on_configure
+  /// reads it, so both hold srdf_mutex_.
   std::string srdf_;
+  std::mutex srdf_mutex_;
   std::atomic<bool> srdf_received_{ false }; ///< latched SRDF received
   double last_manipulability_{ 0.0 };        ///< latest Yoshikawa manipulability index
   int manipulability_period_{ 1 };           ///< cycles between manipulability refreshes

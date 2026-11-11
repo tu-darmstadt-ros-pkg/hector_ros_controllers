@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <utility>
 
 #include <hardware_interface/loaned_command_interface.hpp>
@@ -57,6 +58,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     qos.transient_local();
     semantic_description_sub_ = get_node()->create_subscription<std_msgs::msg::String>(
         "robot_description_semantic", qos, [this]( const std_msgs::msg::String::SharedPtr msg ) {
+          const std::lock_guard<std::mutex> lock( srdf_mutex_ );
           srdf_ = msg->data;
           srdf_received_ = true;
         } );
@@ -158,7 +160,11 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 
   if ( collision_checker_ ) {
     collision_checker_->setBroadphase( params_.use_broadphase );
-    if ( !collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints,
+    const std::string srdf = [this]() {
+      const std::lock_guard<std::mutex> lock( srdf_mutex_ );
+      return srdf_;
+    }();
+    if ( !collision_checker_->initFromXml( this->get_robot_description(), srdf, params_.joints,
                                            false ) ) {
       RCLCPP_ERROR( node->get_logger(), "Failed to initialize collision checker from URDF/SRDF." );
       return controller_interface::CallbackReturn::ERROR;
