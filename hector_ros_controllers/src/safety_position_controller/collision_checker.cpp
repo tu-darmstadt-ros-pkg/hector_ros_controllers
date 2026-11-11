@@ -84,8 +84,9 @@ struct CollisionChecker::SafetyZoneDistanceCallback : coal::DistanceCallBackBase
     if ( !geom_data_ptr->activeCollisionPairs[k] )
       return false;
 
-    // Narrow phase through the pair's persistent solver, in pair order (first, second):
-    // nearest_points[0] belongs to cp.first, as the gradient requires.
+    // Narrow phase through the pair's persistent (warm-started, see the class comment)
+    // solver, in pair order (first, second): nearest_points[0] belongs to cp.first, as
+    // the gradient requires.
     geom_data_ptr->distanceRequests[k].enable_nearest_points = true;
     const double d =
         knownOrPenetrating( pinocchio::computeDistance( *geom_model_ptr, *geom_data_ptr, k ) );

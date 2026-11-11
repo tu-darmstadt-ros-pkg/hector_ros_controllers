@@ -39,6 +39,12 @@ struct CollisionResult {
 };
 
 /// Self-collision checker using Pinocchio + coal; optional RViz debug markers.
+///
+/// Each pair keeps a persistent narrow-phase solver that warm-starts its support search
+/// from the previous query. Distances agree with a fresh solver to within its tolerance,
+/// but where the closest points are not unique (parallel faces) the witness points, and
+/// so the gradient direction, depend on the query history. Checks that compare two
+/// checkers therefore compare distances, not witness points.
 class CollisionChecker
 {
 public:
