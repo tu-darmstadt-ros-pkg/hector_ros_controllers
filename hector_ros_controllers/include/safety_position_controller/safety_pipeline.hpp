@@ -14,6 +14,12 @@
 namespace safety_position_controller
 {
 
+/// Project a collision-model gradient dd/dv onto the controlled joints: entry i is
+/// gradient[joint_v_index[i]], or 0 where the joint is not in the model.
+/// @param projected output, size joint_v_index.size()
+void projectOntoJoints( const Eigen::VectorXd &gradient, const std::vector<int> &joint_v_index,
+                        Eigen::VectorXd &projected );
+
 /**
  * @brief ROS-free per-cycle safety pipeline between the processed reference and the
  * commanded positions.

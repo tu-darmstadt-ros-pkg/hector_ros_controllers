@@ -16,6 +16,16 @@ namespace
 constexpr double kDivergenceLeashFactor = 2.0;
 } // namespace
 
+void projectOntoJoints( const Eigen::VectorXd &gradient, const std::vector<int> &joint_v_index,
+                        Eigen::VectorXd &projected )
+{
+  for ( std::size_t i = 0; i < joint_v_index.size(); ++i ) {
+    const int v_idx = joint_v_index[i];
+    projected[static_cast<Eigen::Index>( i )] =
+        ( v_idx >= 0 && v_idx < gradient.size() ) ? gradient[v_idx] : 0.0;
+  }
+}
+
 SafetyPipeline::SafetyPipeline( Config config )
     : config_( std::move( config ) ), monitor_( config_.stall_park )
 {
@@ -190,8 +200,6 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
 
 SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
 {
-  const std::size_t n = config_.joints.size();
-
   // ---- Collision damper constraints ----
   input_.collisions.clear();
   constraint_pair_indices_.clear();
@@ -199,12 +207,10 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
     if ( obs.state_valid && obs.pairs ) {
       bool pairs_finite = true;
       for ( const auto &candidate : *obs.pairs ) {
-        for ( std::size_t i = 0; i < n; ++i ) {
-          const int v_idx = config_.joint_v_index[i];
-          normal_[static_cast<Eigen::Index>( i )] =
-              ( candidate.gradient && v_idx >= 0 && v_idx < candidate.gradient->size() )
-                  ? ( *candidate.gradient )[v_idx]
-                  : 0.0;
+        if ( candidate.gradient ) {
+          projectOntoJoints( *candidate.gradient, config_.joint_v_index, normal_ );
+        } else {
+          normal_.setZero();
         }
         // A non-finite row never binds, so the pair would silently stop constraining.
         if ( !std::isfinite( candidate.distance ) || !normal_.allFinite() ) {

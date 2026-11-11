@@ -13,6 +13,7 @@ CollisionObserver::CollisionObserver( CollisionChecker *checker,
       controlled_joints_( std::move( controlled_joints ) ),
       joint_v_index_( std::move( joint_v_index ) )
 {
+  projected_ = Eigen::VectorXd::Zero( static_cast<Eigen::Index>( joint_v_index_.size() ) );
   if ( !checker_ ) {
     return;
   }
@@ -124,13 +125,8 @@ const std::vector<double> &CollisionObserver::directionalInfo( const Eigen::Vect
     if ( pi.pair_index >= num_pairs ) {
       continue;
     }
-    double dot = 0.0;
-    for ( size_t i = 0; i < joint_v_index_.size(); ++i ) {
-      if ( joint_v_index_[i] >= 0 && joint_v_index_[i] < pi.gradient.size() ) {
-        dot += pi.gradient[joint_v_index_[i]] * velocity[static_cast<Eigen::Index>( i )];
-      }
-    }
-    directional_[pi.pair_index] = dot;
+    projectOntoJoints( pi.gradient, joint_v_index_, projected_ );
+    directional_[pi.pair_index] = projected_.dot( velocity );
   }
   return directional_;
 }
