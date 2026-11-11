@@ -400,6 +400,31 @@ TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
       << "compliant mode must not be inherited across an activation";
 }
 
+TEST_F( SafetyPositionControllerTest, StateInterfacesOutOfOrderRefuseActivation )
+{
+  // Joint positions are read by index: interfaces in another order would hand one
+  // joint's measurement to another, and the controller would steer a robot that is not
+  // there.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  ASSERT_GE( state_ifaces_.size(), 2u );
+
+  controller_->state_interfaces_.clear();
+  for ( auto it = state_ifaces_.rbegin(); it != state_ifaces_.rend(); ++it ) {
+    controller_->state_interfaces_.emplace_back( *it );
+  }
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR );
+
+  controller_->state_interfaces_.clear();
+  for ( auto &si : state_ifaces_ ) { controller_->state_interfaces_.emplace_back( si ); }
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::SUCCESS );
+}
+
 TEST_F( SafetyPositionControllerTest, BypassDoesNotSurviveALifecycleTransition )
 {
   // The bypass drops collision checking and widens the joint limits. It is a deliberate,
