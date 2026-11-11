@@ -33,7 +33,6 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     pluginlib
     coal
     pinocchio
-    proxsuite
     rclcpp
     rclcpp_action
     rclcpp_lifecycle
@@ -97,7 +96,6 @@ target_link_libraries(
   controllers
   PUBLIC coal::coal
          pinocchio::pinocchio
-         proxsuite::proxsuite
          sync_group_velocity_to_position_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
@@ -155,6 +153,7 @@ if(BUILD_TESTING)
   find_package(GTest CONFIG REQUIRED COMPONENTS GTest GMock)
   find_package(rtest REQUIRED)
   find_package(ament_index_cpp REQUIRED)
+  find_package(proxsuite REQUIRED)
 
   install(DIRECTORY test/config DESTINATION share/${PROJECT_NAME}/test)
 
@@ -178,7 +177,6 @@ if(BUILD_TESTING)
     coal::coal
     fcl
     pinocchio::pinocchio
-    proxsuite::proxsuite
     ad_kinematics::ad_kinematics
     sync_group_velocity_to_position_controller_parameters
     self_collision_avoidance_controller_parameters

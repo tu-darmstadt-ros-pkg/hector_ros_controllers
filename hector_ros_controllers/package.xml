@@ -23,7 +23,6 @@
   <depend>libfcl-dev</depend>
   <depend>pinocchio</depend>
   <depend>pluginlib</depend>
-  <depend>proxsuite</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>rclcpp_lifecycle</depend>
@@ -38,6 +37,7 @@
   <test_depend>ament_cmake_google_benchmark</test_depend>
   <test_depend>ament_index_cpp</test_depend>
   <test_depend>lifecycle_msgs</test_depend>
+  <test_depend>proxsuite</test_depend>
   <test_depend>rtest</test_depend>
 
   <export>
