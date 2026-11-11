@@ -583,7 +583,9 @@ void CollisionChecker::computePairGradient( const std::size_t pair_k, Eigen::Vec
   grad.setZero( model_.nv );
   // An undefined gradient is NaN, not zero: zero reads as "the controlled joints cannot
   // move this pair", which drops it, while NaN makes the pipeline brake.
-  const auto undefined = [&grad]() { grad.setConstant( std::numeric_limits<double>::quiet_NaN() ); };
+  const auto undefined = [&grad]() {
+    grad.setConstant( std::numeric_limits<double>::quiet_NaN() );
+  };
 
   const auto &dres = geom_data_.distanceResults[pair_k];
 
