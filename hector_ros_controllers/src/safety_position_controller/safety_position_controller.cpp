@@ -220,6 +220,8 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
+  // The debug timer reads the visualizer, which is replaced below.
+  debug_timer_.reset();
   // a target from before the deactivation must never be resumed on activation
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
   // Nobody is supervising a controller that is only now starting, so it starts guarded
@@ -255,6 +257,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
         // rate still has to follow a parameter change.
         collision_visualizer_->setPublishRate( params_.collision_visualization_rate );
       }
+      collision_visualizer_->setModel( *collision_checker_ );
     } else {
       collision_visualizer_.reset();
     }
@@ -790,7 +793,7 @@ bool SafetyPositionController::run_safety_pipeline()
   // be redrawn with fresh stamps while the arm moves on (bypass, unobservable state).
   if ( collision_visualizer_ && collision_checker_ && snapshot.observation.checks_active &&
        snapshot.observation.state_valid ) {
-    collision_visualizer_->publish( *collision_checker_,
+    collision_visualizer_->capture( *collision_checker_,
                                     params_.debug_visualize_collisions
                                         ? CollisionVisualizer::Level::FullGeometry
                                         : CollisionVisualizer::Level::LinesOnly,
@@ -865,6 +868,9 @@ bool SafetyPositionController::wait_for_srdf()
 void SafetyPositionController::publish_debug()
 {
   diagnostics_->publishDebug();
+  if ( collision_visualizer_ ) {
+    collision_visualizer_->publishPending();
+  }
 }
 
 void SafetyPositionController::publish_status()

@@ -4,6 +4,7 @@
 
 #include <unistd.h>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -12,6 +13,8 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 
 #include "safety_position_controller/collision_visualizer.hpp"
+
+#include <rtest/publisher_mock.hpp>
 
 #include <coal/BVH/BVH_model.h>
 #include <coal/shape/geometric_shapes.h>
@@ -50,6 +53,7 @@ protected:
     ASSERT_TRUE( checker_->initFromXml( loadUrdfFile( "test_robot_collision.urdf" ), "", {} ) );
     checker_->setSafetyZoneThreshold( 1.0 ); // wide: every pair lands in the zone
     visualizer_ = std::make_unique<spc::CollisionVisualizer>( node_ );
+    visualizer_->setModel( *checker_ );
   }
 
   void TearDown() override
@@ -71,8 +75,10 @@ TEST_F( CollisionVisualizerTest, PublishesWithoutDirectionalInfo )
   const auto &result = checker_->checkCollisionQ( checker_->neutralConfiguration() );
   ASSERT_FALSE( result.safety_zone_pairs.empty() ) << "need a zone pair to reach the color branch";
 
-  visualizer_->publish( *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
-  visualizer_->publish( *checker_, spc::CollisionVisualizer::Level::FullGeometry, {}, 1.0 );
+  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
+  visualizer_->publishPending();
+  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::FullGeometry, {}, 1.0 );
+  visualizer_->publishPending();
 }
 
 TEST_F( CollisionVisualizerTest, PublishesWithMismatchedAndMatchingDirectionalInfo )
@@ -82,17 +88,62 @@ TEST_F( CollisionVisualizerTest, PublishesWithMismatchedAndMatchingDirectionalIn
   ASSERT_GT( num_pairs, 0u );
 
   // A vector sized for a different pair set must be ignored, not indexed.
-  visualizer_->publish( *checker_, spc::CollisionVisualizer::Level::LinesOnly,
+  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::LinesOnly,
                         std::vector<double>( num_pairs - 1, 1.0 ), 1.0 );
+  visualizer_->publishPending();
   // The matching size colors the lines.
-  visualizer_->publish( *checker_, spc::CollisionVisualizer::Level::FullGeometry,
+  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::FullGeometry,
                         std::vector<double>( num_pairs, -1.0 ), 1.0 );
+  visualizer_->publishPending();
 }
 
 TEST_F( CollisionVisualizerTest, PublishesBeforeAnyCheckHasRun )
 {
   // No collision query yet: the latched result is empty and every distance stale.
-  visualizer_->publish( *checker_, spc::CollisionVisualizer::Level::FullGeometry, {}, 0.05 );
+  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::FullGeometry, {}, 0.05 );
+  visualizer_->publishPending();
+}
+
+TEST_F( CollisionVisualizerTest, PublishesTheCapturedCycleOnce )
+{
+  // The markers are built off the control thread, after the robot may have moved on.
+  // They must show the configuration checked in the cycle that captured them, and go
+  // out once rather than being redrawn with a fresh stamp.
+  const auto zone_points = [this]() {
+    std::vector<Eigen::Vector3d> points;
+    for ( const auto &pair : checker_->lastResult().safety_zone_pairs ) {
+      const auto &dres = checker_->geometryData().distanceResults[pair.pair_index];
+      points.push_back( dres.nearest_points[0] );
+      points.push_back( dres.nearest_points[1] );
+    }
+    return points;
+  };
+  checker_->checkCollisionQ( checker_->neutralConfiguration() );
+  const std::vector<Eigen::Vector3d> captured_points = zone_points();
+  ASSERT_FALSE( captured_points.empty() );
+  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
+
+  Eigen::VectorXd moved = checker_->neutralConfiguration();
+  CollisionChecker::writeJointPosition( moved, checker_->getJointQSlot( "joint2" ), 1.0 );
+  checker_->checkCollisionQ( moved );
+  ASSERT_NE( zone_points(), captured_points )
+      << "the second check must change what a rebuild from the checker would draw";
+
+  auto pub = rtest::findPublisher<visualization_msgs::msg::MarkerArray>(
+      node_, "/test_collision_visualizer/debug_collision_geometry" );
+  ASSERT_TRUE( pub );
+  visualization_msgs::msg::MarkerArray array;
+  EXPECT_CALL( *pub, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &array ) );
+  visualizer_->publishPending();
+  visualizer_->publishPending();
+
+  std::vector<Eigen::Vector3d> published_points;
+  for ( const auto &marker : array.markers ) {
+    if ( marker.ns == "distance_lines_safety_zone" || marker.ns == "distance_lines_collision" ) {
+      for ( const auto &p : marker.points ) { published_points.emplace_back( p.x, p.y, p.z ); }
+    }
+  }
+  EXPECT_EQ( published_points, captured_points );
 }
 
 // ---------------------------------------------------------------------------
