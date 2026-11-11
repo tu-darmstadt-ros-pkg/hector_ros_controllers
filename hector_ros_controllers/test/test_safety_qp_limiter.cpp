@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <random>
+#include <vector>
 
 #include <proxsuite/proxqp/dense/dense.hpp>
 
@@ -432,14 +433,128 @@ TEST( SafetyQpLimiter, InfeasibleFallsBackToBraking )
 // Optimality against an independent solver
 // ---------------------------------------------------------------------------
 
-TEST( SafetyQpLimiter, SolutionIsFeasibleAndAtLeastAsGoodAsProxqp )
+namespace
+{
+/// Damper row bound before any relaxation, as computed by the limiter.
+double unrelaxedCollisionRhs( const SafetyQpParams &params, const QpCollisionConstraint &c )
+{
+  const double damper =
+      -params.damper_xi * ( c.distance - params.d_pad ) / ( params.d_zone - params.d_pad );
+  const double dist = c.distance - params.d_pad;
+  double braking = 0.0;
+  if ( dist > 0.0 ) {
+    const double a = std::max( c.normal.cwiseAbs().dot( params.a_dec ), 1e-9 );
+    const double half_step = 0.5 * a * params.dt;
+    braking = -std::min( dist / params.dt,
+                         -half_step + std::sqrt( half_step * half_step + 2.0 * a * dist ) );
+  }
+  return std::min( std::max( damper, braking ), params.max_repulsion_speed );
+}
+
+/// Lawson-Hanson: residual of min ||A x - b|| subject to x >= 0.
+double nonNegativeLeastSquaresResidual( const Eigen::MatrixXd &A, const Eigen::VectorXd &b )
+{
+  const auto m = A.cols();
+  Eigen::VectorXd x = Eigen::VectorXd::Zero( m );
+  std::vector<bool> passive( static_cast<std::size_t>( m ), false );
+  for ( int outer = 0; outer < 3 * m + 10; ++outer ) {
+    const Eigen::VectorXd w = A.transpose() * ( b - A * x );
+    Eigen::Index enter = -1;
+    for ( Eigen::Index k = 0; k < m; ++k ) {
+      if ( !passive[k] && w[k] > 1e-14 && ( enter < 0 || w[k] > w[enter] ) ) {
+        enter = k;
+      }
+    }
+    if ( enter < 0 ) {
+      break;
+    }
+    passive[enter] = true;
+    while ( true ) {
+      std::vector<Eigen::Index> P;
+      for ( Eigen::Index k = 0; k < m; ++k ) {
+        if ( passive[k] ) {
+          P.push_back( k );
+        }
+      }
+      const Eigen::VectorXd z = A( Eigen::all, P ).completeOrthogonalDecomposition().solve( b );
+      double alpha = 1.0;
+      for ( std::size_t i = 0; i < P.size(); ++i ) {
+        if ( z[i] <= 0.0 ) {
+          alpha = std::min( alpha, x[P[i]] / ( x[P[i]] - z[i] ) );
+        }
+      }
+      for ( std::size_t i = 0; i < P.size(); ++i ) {
+        x[P[i]] += alpha * ( z[i] - x[P[i]] );
+        if ( alpha < 1.0 && x[P[i]] <= 1e-15 ) {
+          x[P[i]] = 0.0;
+          passive[P[i]] = false;
+        }
+      }
+      if ( alpha == 1.0 ) {
+        break;
+      }
+    }
+  }
+  return ( A * x - b ).norm();
+}
+
+/// KKT residual of v for min 0.5 * s * ||v||^2 - v_des^T v s.t. l <= C v <= u: how far
+/// s * v - v_des is from the cone of the normals of the rows that are tight at v.
+double kktResidual( const Eigen::VectorXd &v, const Eigen::VectorXd &v_des, const double s,
+                    const Eigen::MatrixXd &C, const Eigen::VectorXd &l, const Eigen::VectorXd &u )
+{
+  constexpr double kTight = 1e-9;
+  const Eigen::VectorXd cv = C * v;
+  Eigen::MatrixXd normals( v.size(), 2 * C.rows() );
+  Eigen::Index count = 0;
+  for ( Eigen::Index i = 0; i < C.rows(); ++i ) {
+    if ( cv[i] - l[i] <= kTight ) {
+      normals.col( count++ ) = C.row( i ).transpose();
+    }
+    if ( u[i] - cv[i] <= kTight ) {
+      normals.col( count++ ) = -C.row( i ).transpose();
+    }
+  }
+  return nonNegativeLeastSquaresResidual( normals.leftCols( count ), s * v - v_des );
+}
+
+/// Smallest achievable max violation of the damper rows (rows n..) of l <= C v <= u
+/// within the box rows (rows 0..n), from a proxqp solve that is feasible by construction:
+/// min 0.5 * ||t||^2 s.t. box, C_k v + t_k >= l_k, t >= 0. Positive iff the QP is
+/// infeasible; -1 if proxqp fails, which no infeasibility claim may rely on.
+double minimumDamperViolation( const Eigen::Index n, const Eigen::MatrixXd &C,
+                               const Eigen::VectorXd &l, const Eigen::VectorXd &u )
+{
+  const auto m = C.rows() - n;
+  Eigen::MatrixXd H = Eigen::MatrixXd::Zero( n + m, n + m );
+  H.bottomRightCorner( m, m ).setIdentity();
+  Eigen::MatrixXd A = Eigen::MatrixXd::Zero( n + 2 * m, n + m );
+  Eigen::VectorXd lower( n + 2 * m ), upper( n + 2 * m );
+  A.topLeftCorner( n + m, n ) = C;
+  A.block( n, n, m, m ).setIdentity();
+  A.bottomRightCorner( m, m ).setIdentity();
+  lower << l, Eigen::VectorXd::Zero( m );
+  upper << u, Eigen::VectorXd::Constant( m, kInf );
+  proxsuite::proxqp::dense::QP<double> qp( n + m, 0, n + 2 * m );
+  qp.settings.eps_abs = 1e-10;
+  qp.init( H, Eigen::VectorXd::Zero( n + m ), std::nullopt, std::nullopt, A, lower, upper );
+  qp.solve();
+  if ( qp.results.info.status != proxsuite::proxqp::QPSolverOutput::PROXQP_SOLVED ) {
+    return -1.0;
+  }
+  return m == 0 ? 0.0 : qp.results.x.tail( m ).maxCoeff();
+}
+} // namespace
+
+TEST( SafetyQpLimiter, SolutionIsOptimalAndRelaxesOnlyWhenInfeasible )
 {
   // The command must be the optimum of the safe-set projection in every cycle: a
   // too-conservative solution slows the limb down near obstacles, and a solver that
-  // wrongly reports infeasibility brakes it. Each cycle's final QP (box and relaxed
-  // damper rows as reported) is solved again from scratch with proxqp. The objective is
-  // strongly convex, so a feasible point that is no worse than proxqp's is the optimum
-  // up to proxqp's accuracy (proxqp may gain ~1e-7 by violating rows within eps_abs).
+  // wrongly reports infeasibility brakes it or gives up push-out. Each cycle's final QP
+  // (box and relaxed damper rows as reported) must hold at the command together with the
+  // KKT conditions, which make it the unique optimum. Infeasibility claims, including
+  // every relaxation stage the limiter skipped past, are cross-checked with proxqp by
+  // minimizing the damper violation.
   constexpr int n = 7;
   auto params = makeParams( n, 1.0, 5.0, 15.0 );
   params.dt = 0.02;
@@ -449,9 +564,9 @@ TEST( SafetyQpLimiter, SolutionIsFeasibleAndAtLeastAsGoodAsProxqp )
   SafetyQpLimiter limiter( n, params );
   std::mt19937 rng( 3 );
   std::uniform_real_distribution<double> unit( -1.0, 1.0 );
-  const Eigen::MatrixXd H = Eigen::MatrixXd::Identity( n, n ) * ( 1.0 + params.regularization );
+  const double hessian_scale = 1.0 + params.regularization;
 
-  int solved = 0;
+  int solved = 0, relaxed = 0;
   for ( int cycle = 0; cycle < 2000; ++cycle ) {
     auto in = makeInput( n );
     in.v_des = Eigen::VectorXd::NullaryExpr( n, [&]() { return 1.5 * unit( rng ); } );
@@ -475,28 +590,198 @@ TEST( SafetyQpLimiter, SolutionIsFeasibleAndAtLeastAsGoodAsProxqp )
       l[n + k] = res.collision_rhs[k];
       u[n + k] = kInf;
     }
-    proxsuite::proxqp::dense::QP<double> reference( n, 0, n + m );
-    reference.settings.eps_abs = 1e-9;
-    reference.init( H, -in.v_des, std::nullopt, std::nullopt, C, l, u );
-    reference.solve();
-    const bool reference_solved =
-        reference.results.info.status == proxsuite::proxqp::QPSolverOutput::PROXQP_SOLVED;
-    auto objective = [&]( const Eigen::VectorXd &v ) {
-      return 0.5 * v.dot( H * v ) - in.v_des.dot( v );
-    };
 
     if ( !res.solved ) {
-      EXPECT_FALSE( reference_solved ) << "cycle " << cycle << ": feasible QP reported infeasible";
+      EXPECT_GT( minimumDamperViolation( n, C, l, u ), 1e-9 )
+          << "cycle " << cycle << ": feasible QP reported infeasible";
       continue;
     }
     ++solved;
     const Eigen::VectorXd cv = C * res.v;
     EXPECT_LT( std::max( ( l - cv ).maxCoeff(), ( cv - u ).maxCoeff() ), 1e-9 ) << "cycle " << cycle;
-    if ( reference_solved ) {
-      EXPECT_LT( objective( res.v ), objective( reference.results.x ) + 1e-6 ) << "cycle " << cycle;
+    EXPECT_LT( kktResidual( res.v, in.v_des, hessian_scale, C, l, u ), 1e-9 ) << "cycle " << cycle;
+
+    if ( res.push_out_relaxed ) {
+      ++relaxed;
+      // Stage 1: the unrelaxed problem.
+      Eigen::VectorXd l_stage = l;
+      int deepest = -1;
+      for ( int k = 0; k < m; ++k ) {
+        l_stage[n + k] = unrelaxedCollisionRhs( params, in.collisions[k] );
+        if ( l_stage[n + k] > 0.0 &&
+             ( deepest < 0 || in.collisions[k].distance < in.collisions[deepest].distance ) ) {
+          deepest = k;
+        }
+      }
+      EXPECT_GT( minimumDamperViolation( n, C, l_stage, u ), 1e-9 )
+          << "cycle " << cycle << ": relaxed a feasible problem";
+      // Stage 2a: only the deepest pair keeps its push-out. Skipped past iff the final
+      // problem relaxed that pair too.
+      ASSERT_GE( deepest, 0 );
+      if ( res.collision_rhs[deepest] == 0.0 ) {
+        const double deepest_rhs = l_stage[n + deepest];
+        l_stage.tail( m ) = l_stage.tail( m ).cwiseMin( 0.0 );
+        l_stage[n + deepest] = deepest_rhs;
+        EXPECT_GT( minimumDamperViolation( n, C, l_stage, u ), 1e-9 )
+            << "cycle " << cycle << ": dropped the deepest push-out of a feasible problem";
+      }
     }
   }
   EXPECT_GT( solved, 1000 );
+  EXPECT_GT( relaxed, 10 );
+}
+
+// ---------------------------------------------------------------------------
+// Degenerate constraint sets with a known optimum
+// ---------------------------------------------------------------------------
+
+TEST( SafetyQpLimiter, DuplicateAndNearParallelRowsKeepTheTightest )
+{
+  // Contacts of neighbouring geometry pairs often share a normal. Redundant rows must
+  // neither be reported infeasible nor loosen the tightest of them.
+  SafetyQpLimiter limiter( 2, makeParams( 2 ) );
+  auto in = makeInput( 2 );
+  in.v_des << -0.8, 0.3;
+  in.v_prev = in.v_des;
+  for ( const double distance : { 0.03, 0.02, 0.03, 0.025 } ) {
+    in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, 0.0 ), distance ) );
+  }
+  in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, 1e-9 ), 0.02 ) );
+  in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, -1e-9 ), 0.021 ) );
+
+  const auto &res = limiter.solve( in );
+  ASSERT_TRUE( res.solved );
+  EXPECT_FALSE( res.push_out_relaxed );
+  const double tightest = res.collision_rhs.maxCoeff();
+  ASSERT_GT( tightest, in.v_des[0] );
+  EXPECT_NEAR( res.v[0], tightest, 1e-8 );
+  EXPECT_NEAR( res.v[1], 0.3, 1e-8 );
+  EXPECT_GE( ( res.collision_velocity - res.collision_rhs ).minCoeff(), -1e-9 );
+}
+
+TEST( SafetyQpLimiter, ZeroNormalPushOutIsRelaxed )
+{
+  // A penetrating pair whose distance does not depend on the controlled joints demands
+  // a push-out no velocity can deliver. That must relax to "no-worsen" (trivially met),
+  // not brake the whole arm.
+  SafetyQpLimiter limiter( 2, makeParams( 2 ) );
+  auto in = makeInput( 2 );
+  in.v_des << 0.4, -0.2;
+  in.v_prev = in.v_des;
+  in.collisions.push_back( makeCollision( Eigen::Vector2d::Zero(), -0.02 ) );
+
+  const auto &res = limiter.solve( in );
+  ASSERT_TRUE( res.solved );
+  EXPECT_TRUE( res.push_out_relaxed );
+  EXPECT_FALSE( res.braking );
+  EXPECT_EQ( res.collision_rhs[0], 0.0 );
+  EXPECT_NEAR( ( res.v - in.v_des ).norm(), 0.0, 1e-8 );
+}
+
+TEST( SafetyQpLimiter, KeepsExactlyMaxCollisionConstraintsRows )
+{
+  // With max_collision_constraints = 64, the 64th contact still constrains the motion
+  // and the 65th is dropped.
+  auto params = makeParams( 2 );
+  params.max_collision_constraints = 64;
+  SafetyQpLimiter limiter( 2, params );
+  auto in = makeInput( 2 );
+  in.v_des << -0.5, -0.5;
+  in.v_prev = in.v_des;
+  for ( int k = 0; k < 63; ++k ) {
+    const double angle = 0.1 * k;
+    in.collisions.push_back(
+        makeCollision( 0.3 * Eigen::Vector2d( std::cos( angle ), std::sin( angle ) ), 0.2 ) );
+  }
+  in.collisions.push_back( makeCollision( Eigen::Vector2d( 1.0, 0.0 ), 0.015 ) );
+  in.collisions.push_back( makeCollision( Eigen::Vector2d( 0.0, 1.0 ), 0.015 ) );
+
+  const auto &res = limiter.solve( in );
+  ASSERT_TRUE( res.solved );
+  ASSERT_EQ( res.num_collision_constraints, 64 );
+  ASSERT_GT( res.collision_rhs[63], in.v_des[0] );
+  EXPECT_NEAR( res.v[0], res.collision_rhs[63], 1e-8 ) << "the 64th row binds";
+  EXPECT_NEAR( res.v[1], -0.5, 1e-8 ) << "the 65th row is dropped";
+}
+
+TEST( SafetyQpLimiter, CollisionFlowsAroundPinnedJoints )
+{
+  // Held joints give equality boxes (lb == ub), at zero and mid-deceleration. A contact
+  // coupling them to a free joint must be resolved by the free joint alone.
+  auto params = makeParams( 3 );
+  params.a_dec[1] = 20.0;
+  SafetyQpLimiter limiter( 3, params );
+  auto in = makeInput( 3 );
+  in.v_des << -1.0, 0.0, 0.0;
+  in.v_prev << -0.8, 0.5, 0.0;
+  in.hold = { 0, 1, 1 };
+  in.collisions.push_back( makeCollision( Eigen::Vector3d( 1.0, 1.0, 1.0 ), 0.02 ) );
+
+  const auto &res = limiter.solve( in );
+  ASSERT_TRUE( res.solved );
+  const double pinned = 0.5 - params.a_dec[1] * params.dt;
+  EXPECT_EQ( limiter.lastBoxLower()[1], limiter.lastBoxUpper()[1] );
+  EXPECT_NEAR( limiter.lastBoxLower()[1], pinned, 1e-12 );
+  EXPECT_EQ( res.v[1], pinned );
+  EXPECT_EQ( res.v[2], 0.0 );
+  ASSERT_GT( res.collision_rhs[0] - pinned, in.v_des[0] );
+  EXPECT_NEAR( res.v[0], res.collision_rhs[0] - pinned, 1e-8 );
+}
+
+TEST( SafetyQpLimiter, DegenerateVertexWithMoreTightRowsThanJoints )
+{
+  // Four capped push-outs all meet at v = (0.05, 0.05): a vertex with more tight rows
+  // than dimensions, where an active-set method can cycle or misjudge dependence.
+  SafetyQpLimiter limiter( 2, makeParams( 2 ) );
+  auto in = makeInput( 2 );
+  in.v_des << -0.5, -0.5;
+  for ( const Eigen::Vector2d &normal :
+        { Eigen::Vector2d( 1.0, 0.0 ), Eigen::Vector2d( 0.0, 1.0 ), Eigen::Vector2d( 0.5, 0.5 ),
+          Eigen::Vector2d( 0.7, 0.3 ) } ) {
+    in.collisions.push_back( makeCollision( normal, -0.005 ) );
+  }
+
+  const auto &res = limiter.solve( in );
+  ASSERT_TRUE( res.solved );
+  EXPECT_FALSE( res.push_out_relaxed );
+  ASSERT_TRUE( ( res.collision_rhs.array() == 0.05 ).all() );
+  EXPECT_NEAR( res.v[0], 0.05, 1e-9 );
+  EXPECT_NEAR( res.v[1], 0.05, 1e-9 );
+}
+
+TEST( SafetyQpLimiter, FeasibleStandstillIsNeverReportedInfeasible )
+{
+  // Outside the padding every damper allows v = 0, and from a slow previous velocity so
+  // does the acceleration box: the QP is feasible and must be solved without relaxing
+  // or braking, also with duplicate, opposing and near-parallel contacts.
+  constexpr int n = 7;
+  auto params = makeParams( n, 1.0, 5.0, 15.0 );
+  params.max_collision_constraints = 64;
+  SafetyQpLimiter limiter( n, params );
+  std::mt19937 rng( 11 );
+  std::uniform_real_distribution<double> unit( -1.0, 1.0 );
+  for ( int cycle = 0; cycle < 500; ++cycle ) {
+    auto in = makeInput( n );
+    in.v_des = Eigen::VectorXd::NullaryExpr( n, [&]() { return 1.5 * unit( rng ); } );
+    in.v_prev = Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.04 * unit( rng ); } );
+    for ( int k = 0; k < 64; ++k ) {
+      Eigen::VectorXd normal = Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.3 * unit( rng ); } );
+      if ( k > 0 && cycle % 4 == 1 ) {
+        normal = in.collisions.back().normal;
+      } else if ( k > 0 && cycle % 4 == 2 ) {
+        normal = -in.collisions.back().normal;
+      } else if ( k > 0 && cycle % 4 == 3 ) {
+        normal = in.collisions.back().normal +
+                 1e-9 * Eigen::VectorXd::NullaryExpr( n, [&]() { return unit( rng ); } );
+      }
+      const double distance = params.d_pad + ( k % 3 == 0 ? 0.0 : 0.05 * std::abs( unit( rng ) ) );
+      in.collisions.push_back( makeCollision( normal, distance ) );
+    }
+    const auto &res = limiter.solve( in );
+    ASSERT_TRUE( res.solved ) << "cycle " << cycle;
+    EXPECT_FALSE( res.push_out_relaxed ) << "cycle " << cycle;
+    EXPECT_GE( ( res.collision_velocity - res.collision_rhs ).minCoeff(), -1e-9 ) << "cycle " << cycle;
+  }
 }
 
 // ---------------------------------------------------------------------------
