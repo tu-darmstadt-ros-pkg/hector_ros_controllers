@@ -1,5 +1,6 @@
 #include "test_helpers.hpp"
 
+#include <cerrno>
 #include <future>
 #include <shared_mutex>
 #include <thread>
@@ -2759,6 +2760,106 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeWorksWithoutCollisionChecke
 // ============================================================================
 // main
 // ============================================================================
+
+// ============================================================================
+// Allocation-free control loop
+// ============================================================================
+
+// Counts heap allocations of the current thread while enabled. Replacing malloc and
+// friends catches operator new, Eigen and the C libraries alike.
+namespace allocation_counter
+{
+thread_local bool counting = false;
+thread_local long count = 0;
+} // namespace allocation_counter
+
+extern "C" {
+void *__libc_malloc( size_t );
+void *__libc_calloc( size_t, size_t );
+void *__libc_realloc( void *, size_t );
+void *__libc_memalign( size_t, size_t );
+
+void *malloc( size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_malloc( size );
+}
+void *calloc( size_t n, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_calloc( n, size );
+}
+void *realloc( void *p, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_realloc( p, size );
+}
+int posix_memalign( void **out, size_t align, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  *out = __libc_memalign( align, size );
+  return *out ? 0 : ENOMEM;
+}
+void *aligned_alloc( size_t align, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_memalign( align, size );
+}
+}
+
+class SafetyPositionControllerAllocationTest
+    : public SafetyPositionControllerTest,
+      public ::testing::WithParamInterface<std::tuple<bool, bool>>
+{
+};
+
+TEST_P( SafetyPositionControllerAllocationTest, SteadyStateUpdateDoesNotAllocate )
+{
+  // The update runs on the realtime thread: an allocation can take a lock or a page
+  // fault and miss the cycle deadline. Collision checking, the QP and the debug capture
+  // must all reuse storage sized at activation. The first cycles may still size it.
+  const bool debug = std::get<0>( GetParam() );
+  const bool broadphase = std::get<1>( GetParam() );
+#ifndef NDEBUG
+  if ( broadphase ) {
+    GTEST_SKIP() << "pinocchio's BroadPhaseManager::update() asserts a validity check that "
+                    "copies its object list; only builds with NDEBUG are allocation-free";
+  }
+#endif
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", debug ),
+                    rclcpp::Parameter( "publish_debug_joint_states", debug ),
+                    rclcpp::Parameter( "debug_visualize_collisions", debug ),
+                    rclcpp::Parameter( "collision_visualization_rate", 0.0 ),
+                    rclcpp::Parameter( "use_broadphase", broadphase ),
+                    rclcpp::Parameter( "collision_safety_zone", 0.5 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  int allocating_cycles = 0;
+  for ( int i = 0; i < 600; ++i ) {
+    const double t = 0.02 * i;
+    controller_->reference_interfaces_ = { 0.8 * std::sin( t ), 0.8 * std::cos( 0.7 * t ),
+                                           0.5 * std::sin( 1.3 * t ) };
+    allocation_counter::count = 0;
+    allocation_counter::counting = i >= 50;
+    const auto result = callUpdate();
+    allocation_counter::counting = false;
+    ASSERT_EQ( result, controller_interface::return_type::OK );
+    allocating_cycles += allocation_counter::count > 0 ? 1 : 0;
+    followCommands();
+    if ( debug ) {
+      controller_->diagnostics_->publishDebug();
+    }
+  }
+  EXPECT_EQ( allocating_cycles, 0 );
+}
+
+INSTANTIATE_TEST_SUITE_P( DebugAndBroadphase, SafetyPositionControllerAllocationTest,
+                          ::testing::Combine( ::testing::Bool(), ::testing::Bool() ) );
 
 int main( int argc, char **argv )
 {
