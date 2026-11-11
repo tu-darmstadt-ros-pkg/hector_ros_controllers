@@ -50,6 +50,7 @@ public:
    */
   explicit CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                              double collision_padding = 0.0, double collision_cache_epsilon = 1e-6 );
+  ~CollisionChecker();
 
   /**
    * @brief Init from URDF/SRDF XML.
@@ -188,6 +189,8 @@ public:
   double computeManipulability();
 
 private:
+  struct SafetyZoneDistanceCallback;
+
   /// Forget the cached configuration: the next query recomputes instead of serving
   /// last_collision_result_. Required whenever the latch and q_last_ stop agreeing
   /// (error results) or the classification parameters change.
@@ -200,9 +203,12 @@ private:
    * @brief Compute the distance gradient for a single collision pair.
    * Requires FK + computeJointJacobians to have been called already.
    * @param pair_k index into geom_model_.collisionPairs
-   * @return gradient vector of size model_.nv
+   * @param grad output, resized to model_.nv
    */
-  Eigen::VectorXd computePairGradient( std::size_t pair_k );
+  void computePairGradient( std::size_t pair_k, Eigen::VectorXd &grad );
+
+  /// Resize the latched safety-zone pairs, recycling their gradient storage.
+  void resizeSafetyZonePairs( std::size_t count );
 
   /**
    * @brief Keep only pairs attached to controlled joints (and ancestors).
@@ -225,7 +231,9 @@ private:
   std::vector<std::size_t> primaries_;
   std::vector<std::size_t> duplicates_;
   std::vector<std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex>> seen_links_;
+  std::unique_ptr<SafetyZoneDistanceCallback> distance_callback_;
   CollisionResult last_collision_result_;
+  std::vector<Eigen::VectorXd> gradient_pool_; ///< spare gradients of dropped zone pairs
 
   double collision_padding_{ 0.0 };
   double collision_cache_epsilon_{ 1e-6 };
@@ -244,6 +252,8 @@ private:
   // Pre-allocated Jacobian workspace (sized in initFromXml)
   Eigen::MatrixXd J1_workspace_; ///< 6 × nv
   Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+  Eigen::MatrixXd Jp1_workspace_; ///< 3 × nv
+  Eigen::MatrixXd Jp2_workspace_; ///< 3 × nv
 
   static constexpr pinocchio::FrameIndex kNoFrame = std::numeric_limits<pinocchio::FrameIndex>::max();
   pinocchio::FrameIndex manipulability_frame_{ kNoFrame };

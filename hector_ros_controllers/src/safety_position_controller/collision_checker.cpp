@@ -20,12 +20,10 @@
 #include <pinocchio/multibody/fcl.hpp>
 #include <pinocchio/multibody/model.hpp>
 
-namespace
-{
 /// Custom coal broadphase distance callback that collects all safety-zone pairs
 /// and tracks the global minimum distance. Follows the same pattern as
 /// pinocchio::CollisionCallBackDefault (broadphase-callbacks.hpp:90-96).
-struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
+struct CollisionChecker::SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
   // Inputs (set before each broadphase scan)
   const pinocchio::GeometryModel *geom_model_ptr{ nullptr };
   pinocchio::GeometryData *geom_data_ptr{ nullptr };
@@ -110,14 +108,15 @@ struct SafetyZoneDistanceCallback : coal::DistanceCallBackBase {
     return false; // never stop early — we need ALL safety zone pairs
   }
 };
-} // namespace
 
 CollisionChecker::CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                                     double collision_padding, double collision_cache_epsilon )
-    : node_( node ), collision_padding_( collision_padding ),
-      collision_cache_epsilon_( collision_cache_epsilon )
+    : node_( node ), distance_callback_( std::make_unique<SafetyZoneDistanceCallback>() ),
+      collision_padding_( collision_padding ), collision_cache_epsilon_( collision_cache_epsilon )
 {
 }
+
+CollisionChecker::~CollisionChecker() = default;
 
 bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::string &srdf_xml,
                                     const std::vector<std::string> &controlled_joints,
@@ -171,9 +170,23 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     invalidateCache();
     last_collision_result_ = CollisionResult{};
 
+    // Every per-cycle buffer holds at most one entry per pair: sized here, the check
+    // does not allocate.
+    const std::size_t num_pairs = geom_model_.collisionPairs.size();
+    for ( auto *indices : { &safety_zone_indices_, &primaries_, &duplicates_,
+                            &distance_callback_->safety_zone_indices,
+                            &distance_callback_->visited_indices } ) {
+      indices->reserve( num_pairs );
+    }
+    seen_links_.reserve( num_pairs );
+    last_collision_result_.safety_zone_pairs.reserve( num_pairs );
+    gradient_pool_.assign( num_pairs, Eigen::VectorXd::Zero( model_.nv ) );
+
     // Pre-allocate Jacobian workspace matrices
     J1_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
     J2_workspace_ = Eigen::MatrixXd::Zero( 6, model_.nv );
+    Jp1_workspace_ = Eigen::MatrixXd::Zero( 3, model_.nv );
+    Jp2_workspace_ = Eigen::MatrixXd::Zero( 3, model_.nv );
 
     // Always create broadphase manager (cheap); use_broadphase_ controls which path is taken
     broadphase_manager_ = std::make_unique<BroadPhaseManager>( &model_, &geom_model_, &geom_data_ );
@@ -365,7 +378,7 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
     // --- Broadphase path: AABB-tree pruned distance scan ---
     broadphase_manager_->update( false ); // sync transforms from oMg, rebuild AABB tree
 
-    SafetyZoneDistanceCallback callback;
+    SafetyZoneDistanceCallback &callback = *distance_callback_;
     callback.geom_model_ptr = &geom_model_;
     callback.geom_data_ptr = &geom_data_;
     callback.safety_zone_threshold = safety_zone_threshold;
@@ -375,7 +388,8 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
 
     global_min_distance = callback.global_min_distance;
     min_distance_pair = callback.min_distance_pair;
-    safety_zone_indices.swap( callback.safety_zone_indices );
+    safety_zone_indices.assign( callback.safety_zone_indices.begin(),
+                                callback.safety_zone_indices.end() );
     has_safety_zone_pairs = !safety_zone_indices.empty();
 
     // Pruned pairs keep last cycle's nearest points; only the visited ones are fresh.
@@ -404,12 +418,13 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
     std::fill( nearest_points_fresh_.begin(), nearest_points_fresh_.end(), true );
   }
 
-  CollisionResult result;
+  // Written in place: the latched result keeps its storage across checks.
+  CollisionResult &result = last_collision_result_;
   result.in_collision = ( global_min_distance <= collision_padding_ );
   result.min_distance = global_min_distance;
-  if ( global_min_distance != std::numeric_limits<double>::max() ) {
-    result.min_distance_pair_index = min_distance_pair;
-  }
+  result.min_distance_pair_index = ( global_min_distance != std::numeric_limits<double>::max() )
+                                       ? min_distance_pair
+                                       : std::numeric_limits<std::size_t>::max();
 
   // Compute per-pair distance gradients (lazy: only if pairs actually exist in safety zone)
   if ( has_safety_zone_pairs ) {
@@ -487,18 +502,35 @@ const CollisionResult &CollisionChecker::checkCollisionQ( const Eigen::VectorXd 
     }
 
     pinocchio::computeJointJacobians( model_, data_ );
-
-    for ( const std::size_t k : safety_zone_indices ) {
-      CollisionResult::PairInfo info;
-      info.pair_index = k;
-      info.distance = geom_data_.distanceResults[k].min_distance;
-      info.gradient = computePairGradient( k );
-      result.safety_zone_pairs.push_back( std::move( info ) );
-    }
   }
 
-  last_collision_result_ = std::move( result );
-  return last_collision_result_;
+  resizeSafetyZonePairs( safety_zone_indices.size() );
+  for ( std::size_t i = 0; i < safety_zone_indices.size(); ++i ) {
+    const std::size_t k = safety_zone_indices[i];
+    CollisionResult::PairInfo &info = result.safety_zone_pairs[i];
+    info.pair_index = k;
+    info.distance = geom_data_.distanceResults[k].min_distance;
+    computePairGradient( k, info.gradient );
+  }
+  return result;
+}
+
+void CollisionChecker::resizeSafetyZonePairs( const std::size_t count )
+{
+  // Gradient storage moves between the result and the pool instead of being freed and
+  // reallocated whenever the number of pairs in the zone changes.
+  auto &pairs = last_collision_result_.safety_zone_pairs;
+  while ( pairs.size() > count ) {
+    gradient_pool_.push_back( std::move( pairs.back().gradient ) );
+    pairs.pop_back();
+  }
+  while ( pairs.size() < count ) {
+    pairs.emplace_back();
+    if ( !gradient_pool_.empty() ) {
+      pairs.back().gradient = std::move( gradient_pool_.back() );
+      gradient_pool_.pop_back();
+    }
+  }
 }
 
 void CollisionChecker::updateCollisionPadding( const double collision_padding )
@@ -542,16 +574,16 @@ void CollisionChecker::setBroadphase( bool enable )
 
 bool CollisionChecker::isBroadphaseEnabled() const { return use_broadphase_; }
 
-Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
+void CollisionChecker::computePairGradient( const std::size_t pair_k, Eigen::VectorXd &grad )
 {
-  Eigen::VectorXd grad = Eigen::VectorXd::Zero( model_.nv );
+  grad.setZero( model_.nv );
 
   const auto &dres = geom_data_.distanceResults[pair_k];
 
   // Validate nearest points
   if ( dres.nearest_points[0].hasNaN() || dres.nearest_points[1].hasNaN() ||
        !dres.nearest_points[0].allFinite() || !dres.nearest_points[1].allFinite() ) {
-    return grad; // zero gradient = no directional preference (safe fallback)
+    return; // zero gradient = no directional preference (safe fallback)
   }
 
   const auto &cp = geom_model_.collisionPairs[pair_k];
@@ -586,18 +618,17 @@ Eigen::VectorXd CollisionChecker::computePairGradient( std::size_t pair_k )
     // first object to the second, i.e. toward increasing distance) is still defined.
     n = dres.normal.normalized();
   } else {
-    return grad;
+    return;
   }
 
   // Point Jacobians and gradient: dd/dv = n^T * (Jp2 - Jp1)
   // where Jp = J_linear - skew(r) * J_angular
-  const Eigen::MatrixXd Jp1 =
-      J1_workspace_.topRows( 3 ) - pinocchio::skew( r1 ) * J1_workspace_.bottomRows( 3 );
-  const Eigen::MatrixXd Jp2 =
-      J2_workspace_.topRows( 3 ) - pinocchio::skew( r2 ) * J2_workspace_.bottomRows( 3 );
-
-  grad = ( n.transpose() * ( Jp2 - Jp1 ) ).transpose();
-  return grad;
+  Jp1_workspace_ = J1_workspace_.topRows( 3 );
+  Jp1_workspace_.noalias() -= pinocchio::skew( r1 ) * J1_workspace_.bottomRows( 3 );
+  Jp2_workspace_ = J2_workspace_.topRows( 3 );
+  Jp2_workspace_.noalias() -= pinocchio::skew( r2 ) * J2_workspace_.bottomRows( 3 );
+  Jp2_workspace_ -= Jp1_workspace_;
+  grad.noalias() = Jp2_workspace_.transpose() * n;
 }
 
 int CollisionChecker::getJointVelocityIndex( const std::string &joint_name ) const

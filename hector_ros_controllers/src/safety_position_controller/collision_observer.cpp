@@ -18,6 +18,7 @@ CollisionObserver::CollisionObserver( CollisionChecker *checker,
     return;
   }
   q_ = checker_->neutralConfiguration();
+  pair_candidates_.reserve( checker_->getNumCollisionPairs() );
   // Resolving the slots once also tells us, once, which joints the collision model does
   // not represent: their positions are silently held at the neutral value.
   const auto resolve = [this]( const std::vector<std::string> &names,
@@ -106,7 +107,6 @@ CollisionObserver::observe( const bool checks_active, const std::vector<double> 
     was_in_collision_ = false;
   }
 
-  pair_candidates_.reserve( cc_result.safety_zone_pairs.size() );
   for ( const auto &pair_info : cc_result.safety_zone_pairs ) {
     pair_candidates_.push_back( { pair_info.distance, &pair_info.gradient, pair_info.pair_index } );
   }
