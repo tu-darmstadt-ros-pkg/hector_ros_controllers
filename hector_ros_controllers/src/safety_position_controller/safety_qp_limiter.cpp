@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 
@@ -100,7 +101,7 @@ public:
         Eigen::Index drop = -1;
         for ( Eigen::Index k = 0; k < q_; ++k ) {
           if ( r_[k] > 0.0 && u_[k] / r_[k] < t_partial ) {
-            t_partial = u_[k] / r_[k];
+            t_partial = std::max( 0.0, u_[k] / r_[k] );
             drop = k;
           }
         }
