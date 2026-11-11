@@ -61,6 +61,8 @@ public:
   double distance( const Eigen::Index k ) const { return distances_[k]; }
   /// The normals of the stored constraints, one per row.
   auto normals() const { return normals_.topRows( size_ ); }
+  /// The distances of the stored constraints.
+  auto distances() const { return distances_.head( size_ ); }
 
 private:
   Eigen::MatrixXd normals_;

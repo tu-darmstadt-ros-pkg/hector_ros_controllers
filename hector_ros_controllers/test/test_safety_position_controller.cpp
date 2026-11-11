@@ -915,6 +915,94 @@ TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
 }
 
 // ============================================================================
+// Debug output
+// ============================================================================
+
+TEST_F( SafetyPositionControllerTest, QpDebugIsPublishedOffTheControlThread )
+{
+  // Building and publishing the introspection message allocates and can block, so the
+  // control cycle only captures it. What goes out later must be that cycle, whole, and
+  // only once.
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", true ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  auto qp_debug_mock = rtest::findPublisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>(
+      controller_->get_node(), node_name + "/qp_debug" );
+  ASSERT_TRUE( qp_debug_mock );
+
+  controller_->reference_interfaces_ = { 1.0, 0.0, 0.0 };
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).Times( 0 );
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ::testing::Mock::VerifyAndClearExpectations( qp_debug_mock.get() );
+
+  hector_ros_controllers_msgs::msg::SafetyQpDebug msg;
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) )
+      .WillOnce( ::testing::SaveArg<0>( &msg ) );
+  controller_->publish_debug();
+  controller_->publish_debug();
+  ::testing::Mock::VerifyAndClearExpectations( qp_debug_mock.get() );
+
+  const auto &pipeline = *controller_->pipeline_;
+  ASSERT_EQ( msg.joint_names, controlled_joints_ );
+  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+    const auto idx = static_cast<Eigen::Index>( i );
+    EXPECT_EQ( msg.v_cmd[i], pipeline.velocity()[idx] ) << "the last cycle, not an earlier one";
+    EXPECT_EQ( msg.q_cmd[i], pipeline.commandedPositions()[idx] );
+    EXPECT_EQ( msg.v_des[i], pipeline.qpInput().v_des[idx] );
+    EXPECT_EQ( msg.q_ref[i], controller_->reference_interfaces_[i] );
+  }
+  EXPECT_GT( msg.v_cmd[0], 0.0 ) << "joint1 was moving toward its reference";
+  EXPECT_EQ( msg.solved, pipeline.lastResult().solved );
+}
+
+TEST_F( SafetyPositionControllerTest, DebugJointStatesArePublishedOffTheControlThread )
+{
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "publish_debug_joint_states", true ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  auto in_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      controller_->get_node(), node_name + "/debug_in_joint_states" );
+  auto out_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      controller_->get_node(), node_name + "/debug_out_joint_states" );
+  ASSERT_TRUE( in_mock && out_mock );
+
+  controller_->reference_interfaces_[0] = 1.0;
+  EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).Times( 0 );
+  EXPECT_CALL( *out_mock, publish( ::testing::_ ) ).Times( 0 );
+  for ( int i = 0; i < 3; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ::testing::Mock::VerifyAndClearExpectations( in_mock.get() );
+  ::testing::Mock::VerifyAndClearExpectations( out_mock.get() );
+
+  sensor_msgs::msg::JointState in_msg, out_msg;
+  EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &in_msg ) );
+  EXPECT_CALL( *out_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &out_msg ) );
+  controller_->publish_debug();
+  controller_->publish_debug();
+
+  EXPECT_EQ( in_msg.name, controlled_joints_ );
+  EXPECT_EQ( in_msg.position[0], 1.0 );
+  EXPECT_EQ( out_msg.name, controlled_joints_ );
+  EXPECT_EQ( out_msg.position, std::vector<double>( hw_cmd_values_.begin(), hw_cmd_values_.end() ) )
+      << "the commands written in the last cycle";
+}
+
+// ============================================================================
 // Status Publishing
 // ============================================================================
 

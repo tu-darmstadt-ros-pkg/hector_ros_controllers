@@ -169,6 +169,9 @@ private:
   /// Publish ~/status via diagnostics with the current controller flags.
   void publish_status();
 
+  /// Build and publish the debug output the control thread captured (debug timer).
+  void publish_debug();
+
   /**
    * @brief Build the SafetyPipeline (QP limiter + per-joint limits) from parameters.
    * Called from on_activate.
@@ -307,6 +310,8 @@ private:
 
   // Periodic status timer
   rclcpp::TimerBase::SharedPtr status_timer_;
+  // Builds and publishes the debug output captured by the control thread
+  rclcpp::TimerBase::SharedPtr debug_timer_;
 
   static constexpr int throttle_logging_msg = 10000; ///< ms; throttle for WARN/ERROR logs
 };

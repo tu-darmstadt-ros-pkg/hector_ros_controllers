@@ -296,7 +296,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   // Hand the resolved values over BEFORE the status timer can fire: publishStatus()
   // reads them from executor threads, so they must not be written while it can run.
-  diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_ );
+  diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_,
+                           static_cast<std::size_t>( params_.qp_max_pair_constraints ) );
 
   RCLCPP_INFO( get_node()->get_logger(),
                "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
@@ -360,6 +361,10 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
     status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
   }
+  // Debug messages are built off the control thread; polled at the control rate, so
+  // every cycle's capture normally goes out.
+  debug_timer_ = get_node()->create_wall_timer(
+      std::chrono::duration<double>( pipeline_->config().qp.dt ), [this]() { publish_debug(); } );
 
   publish_status();
 
@@ -370,6 +375,7 @@ controller_interface::CallbackReturn
 SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   status_timer_.reset();
+  debug_timer_.reset();
   estop_engaged_.store( false, std::memory_order_relaxed );
   // A bypass is granted for as long as someone is watching this controller run. It must
   // not outlive the controller and be inherited by whatever activates next.
@@ -454,7 +460,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
                                                      const rclcpp::Duration & )
 {
   // Debug: incoming joint states
-  diagnostics_->publishJointStateIn( reference_interfaces_ );
+  diagnostics_->captureJointStateIn( reference_interfaces_ );
 
   // The bypass lapses on its own so an unattended one cannot last: enforced here rather
   // than by a timer, which would mean an unsynchronised handle shared with the control
@@ -619,7 +625,7 @@ void SafetyPositionController::write_position_commands( const std::vector<double
                             params_.joints[i].c_str() );
     }
   }
-  diagnostics_->publishJointStateOut( commands );
+  diagnostics_->captureJointStateOut( commands );
 }
 
 bool SafetyPositionController::setup_pipeline_on_activate()
@@ -792,7 +798,7 @@ bool SafetyPositionController::run_safety_pipeline()
                                     params_.collision_safety_zone );
   }
 
-  diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );
+  diagnostics_->captureQpDebug( *pipeline_, reference_interfaces_ );
   return status_event;
 }
 
@@ -854,6 +860,11 @@ bool SafetyPositionController::wait_for_srdf()
     }
   }
   return true;
+}
+
+void SafetyPositionController::publish_debug()
+{
+  diagnostics_->publishDebug();
 }
 
 void SafetyPositionController::publish_status()
