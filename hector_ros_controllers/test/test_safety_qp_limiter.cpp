@@ -6,6 +6,9 @@
 
 #include <cmath>
 #include <limits>
+#include <random>
+
+#include <proxsuite/proxqp/dense/dense.hpp>
 
 #include "safety_position_controller/safety_qp_limiter.hpp"
 
@@ -423,6 +426,77 @@ TEST( SafetyQpLimiter, InfeasibleFallsBackToBraking )
     v = limiter.solve( in ).v[0];
   }
   EXPECT_NEAR( v, 0.0, 1e-9 );
+}
+
+// ---------------------------------------------------------------------------
+// Optimality against an independent solver
+// ---------------------------------------------------------------------------
+
+TEST( SafetyQpLimiter, SolutionIsFeasibleAndAtLeastAsGoodAsProxqp )
+{
+  // The command must be the optimum of the safe-set projection in every cycle: a
+  // too-conservative solution slows the limb down near obstacles, and a solver that
+  // wrongly reports infeasibility brakes it. Each cycle's final QP (box and relaxed
+  // damper rows as reported) is solved again from scratch with proxqp. The objective is
+  // strongly convex, so a feasible point that is no worse than proxqp's is the optimum
+  // up to proxqp's accuracy (proxqp may gain ~1e-7 by violating rows within eps_abs).
+  constexpr int n = 7;
+  auto params = makeParams( n, 1.0, 5.0, 15.0 );
+  params.dt = 0.02;
+  params.d_pad = 0.03;
+  params.d_zone = 0.12;
+  params.max_collision_constraints = 64;
+  SafetyQpLimiter limiter( n, params );
+  std::mt19937 rng( 3 );
+  std::uniform_real_distribution<double> unit( -1.0, 1.0 );
+  const Eigen::MatrixXd H = Eigen::MatrixXd::Identity( n, n ) * ( 1.0 + params.regularization );
+
+  int solved = 0;
+  for ( int cycle = 0; cycle < 2000; ++cycle ) {
+    auto in = makeInput( n );
+    in.v_des = Eigen::VectorXd::NullaryExpr( n, [&]() { return 1.5 * unit( rng ); } );
+    in.v_prev = Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.3 * unit( rng ); } );
+    const int num_collisions = static_cast<int>( 40 * std::abs( unit( rng ) ) );
+    for ( int k = 0; k < num_collisions; ++k ) {
+      const Eigen::VectorXd normal =
+          Eigen::VectorXd::NullaryExpr( n, [&]() { return 0.3 * unit( rng ); } );
+      in.collisions.push_back( makeCollision( normal, 0.12 * std::abs( unit( rng ) ) ) );
+    }
+    const auto &res = limiter.solve( in );
+    const int m = res.num_collision_constraints;
+
+    Eigen::MatrixXd C( n + m, n );
+    Eigen::VectorXd l( n + m ), u( n + m );
+    C.topRows( n ).setIdentity();
+    l.head( n ) = limiter.lastBoxLower();
+    u.head( n ) = limiter.lastBoxUpper();
+    for ( int k = 0; k < m; ++k ) {
+      C.row( n + k ) = in.collisions[k].normal.transpose();
+      l[n + k] = res.collision_rhs[k];
+      u[n + k] = kInf;
+    }
+    proxsuite::proxqp::dense::QP<double> reference( n, 0, n + m );
+    reference.settings.eps_abs = 1e-9;
+    reference.init( H, -in.v_des, std::nullopt, std::nullopt, C, l, u );
+    reference.solve();
+    const bool reference_solved =
+        reference.results.info.status == proxsuite::proxqp::QPSolverOutput::PROXQP_SOLVED;
+    auto objective = [&]( const Eigen::VectorXd &v ) {
+      return 0.5 * v.dot( H * v ) - in.v_des.dot( v );
+    };
+
+    if ( !res.solved ) {
+      EXPECT_FALSE( reference_solved ) << "cycle " << cycle << ": feasible QP reported infeasible";
+      continue;
+    }
+    ++solved;
+    const Eigen::VectorXd cv = C * res.v;
+    EXPECT_LT( std::max( ( l - cv ).maxCoeff(), ( cv - u ).maxCoeff() ), 1e-9 ) << "cycle " << cycle;
+    if ( reference_solved ) {
+      EXPECT_LT( objective( res.v ), objective( reference.results.x ) + 1e-6 ) << "cycle " << cycle;
+    }
+  }
+  EXPECT_GT( solved, 1000 );
 }
 
 // ---------------------------------------------------------------------------

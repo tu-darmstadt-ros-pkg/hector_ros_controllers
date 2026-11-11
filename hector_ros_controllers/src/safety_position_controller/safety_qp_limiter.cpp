@@ -5,8 +5,6 @@
 #include <limits>
 #include <stdexcept>
 
-#include <proxsuite/proxqp/dense/dense.hpp>
-
 namespace safety_position_controller
 {
 
@@ -29,6 +27,206 @@ double positionLimitBound( const double dist, const double a_dec, const double d
   return std::min( dist / dt, v_brake );
 }
 } // namespace
+
+/**
+ * Goldfarb-Idnani dual active-set method for min 0.5 * s * ||x||^2 - c^T x subject to
+ * l <= C x <= u. Starts from the unconstrained minimum and adds the most violated
+ * constraint until all hold; the scaled identity Hessian makes the initial factor
+ * trivial. Exact up to rounding, so the solution is independent of the previous cycle.
+ * Each finite side of a row is a separate inequality: side j < m is C_j x >= l_j,
+ * side j >= m is -C_{j-m} x >= -u_{j-m}.
+ */
+class DualActiveSetQp
+{
+public:
+  DualActiveSetQp( const Eigen::Index n, const Eigen::Index max_rows )
+      : n_( n ), max_iterations_( 10 * ( n + max_rows ) ), x_( n ), J_( n, n ), R_( n, n ),
+        cx_( max_rows ), d_( n ), z_( n ), r_( n ), np_( n ), u_( n ), active_set_( n ),
+        is_active_( 2 * max_rows )
+  {
+  }
+
+  /// @return true if the problem with the first m rows of C/l/u was solved; false if it is
+  /// infeasible or numerically degenerate.
+  bool solve( const double s, const Eigen::VectorXd &c, const Eigen::MatrixXd &C,
+              const Eigen::VectorXd &l, const Eigen::VectorXd &u, const Eigen::Index m )
+  {
+    constexpr double kFeasibilityTolerance = 1e-9;
+    x_ = c / s;
+    J_.setIdentity();
+    J_ *= 1.0 / std::sqrt( s );
+    q_ = 0;
+    r_norm_ = 1.0;
+    iterations_ = 0;
+    is_active_.head( 2 * m ).setZero();
+
+    while ( true ) {
+      cx_.head( m ).noalias() = C.topRows( m ) * x_;
+      Eigen::Index p = -1;
+      double most_violated = -kFeasibilityTolerance;
+      for ( Eigen::Index j = 0; j < m; ++j ) {
+        if ( !is_active_[j] && cx_[j] - l[j] < most_violated ) {
+          most_violated = cx_[j] - l[j];
+          p = j;
+        }
+        if ( !is_active_[m + j] && u[j] - cx_[j] < most_violated ) {
+          most_violated = u[j] - cx_[j];
+          p = m + j;
+        }
+      }
+      if ( p < 0 ) {
+        return x_.allFinite();
+      }
+      const bool upper = p >= m;
+      const Eigen::Index row = upper ? p - m : p;
+      if ( upper ) {
+        np_ = -C.row( row ).transpose();
+      } else {
+        np_ = C.row( row ).transpose();
+      }
+      const double b = upper ? -u[row] : l[row];
+
+      double u_plus = 0.0;
+      while ( true ) {
+        if ( ++iterations_ > max_iterations_ ) {
+          return false;
+        }
+        d_.noalias() = J_.transpose() * np_;
+        z_.noalias() = J_.rightCols( n_ - q_ ) * d_.tail( n_ - q_ );
+        r_.head( q_ ) = d_.head( q_ );
+        R_.topLeftCorner( q_, q_ ).triangularView<Eigen::Upper>().solveInPlace( r_.head( q_ ) );
+
+        double t_partial = kInf;
+        Eigen::Index drop = -1;
+        for ( Eigen::Index k = 0; k < q_; ++k ) {
+          if ( r_[k] > 0.0 && u_[k] / r_[k] < t_partial ) {
+            t_partial = u_[k] / r_[k];
+            drop = k;
+          }
+        }
+        double t_full = kInf;
+        if ( z_.squaredNorm() > std::numeric_limits<double>::epsilon() ) {
+          t_full = -( np_.dot( x_ ) - b ) / z_.dot( np_ );
+        }
+        const double t = std::min( t_partial, t_full );
+        if ( !std::isfinite( t ) ) {
+          return false;
+        }
+        if ( std::isfinite( t_full ) ) {
+          x_ += t * z_;
+        }
+        u_.head( q_ ) -= t * r_.head( q_ );
+        u_plus += t;
+        if ( t == t_full ) {
+          if ( !addConstraint() ) {
+            return false;
+          }
+          active_set_[q_ - 1] = p;
+          u_[q_ - 1] = u_plus;
+          is_active_[p] = 1;
+          break;
+        }
+        is_active_[active_set_[drop]] = 0;
+        dropConstraint( drop );
+      }
+    }
+  }
+
+  const Eigen::VectorXd &x() const { return x_; }
+  long iterations() const { return iterations_; }
+
+private:
+  /// Appends the constraint with d = J^T n: rotates d onto its first q+1 entries.
+  bool addConstraint()
+  {
+    for ( Eigen::Index j = n_ - 1; j > q_; --j ) {
+      double cc = d_[j - 1];
+      double ss = d_[j];
+      const double h = std::hypot( cc, ss );
+      if ( h == 0.0 ) {
+        continue;
+      }
+      d_[j] = 0.0;
+      cc /= h;
+      ss /= h;
+      if ( cc < 0.0 ) {
+        cc = -cc;
+        ss = -ss;
+        d_[j - 1] = -h;
+      } else {
+        d_[j - 1] = h;
+      }
+      const double xny = ss / ( 1.0 + cc );
+      for ( Eigen::Index k = 0; k < n_; ++k ) {
+        const double t1 = J_( k, j - 1 );
+        const double t2 = J_( k, j );
+        J_( k, j - 1 ) = t1 * cc + t2 * ss;
+        J_( k, j ) = xny * ( t1 + J_( k, j - 1 ) ) - t2;
+      }
+    }
+    R_.col( q_ ).head( q_ + 1 ) = d_.head( q_ + 1 );
+    ++q_;
+    if ( std::abs( d_[q_ - 1] ) <= std::numeric_limits<double>::epsilon() * r_norm_ ) {
+      return false; // linearly dependent on the active set
+    }
+    r_norm_ = std::max( r_norm_, std::abs( d_[q_ - 1] ) );
+    return true;
+  }
+
+  /// Removes active constraint k and restores the triangular R with Givens rotations.
+  void dropConstraint( const Eigen::Index k )
+  {
+    for ( Eigen::Index i = k; i < q_ - 1; ++i ) {
+      active_set_[i] = active_set_[i + 1];
+      u_[i] = u_[i + 1];
+      R_.col( i ) = R_.col( i + 1 );
+    }
+    R_.col( q_ - 1 ).head( q_ ).setZero();
+    --q_;
+    for ( Eigen::Index j = k; j < q_; ++j ) {
+      double cc = R_( j, j );
+      double ss = R_( j + 1, j );
+      const double h = std::hypot( cc, ss );
+      if ( h == 0.0 ) {
+        continue;
+      }
+      cc /= h;
+      ss /= h;
+      R_( j + 1, j ) = 0.0;
+      if ( cc < 0.0 ) {
+        R_( j, j ) = -h;
+        cc = -cc;
+        ss = -ss;
+      } else {
+        R_( j, j ) = h;
+      }
+      const double xny = ss / ( 1.0 + cc );
+      for ( Eigen::Index i = j + 1; i < q_; ++i ) {
+        const double t1 = R_( j, i );
+        const double t2 = R_( j + 1, i );
+        R_( j, i ) = t1 * cc + t2 * ss;
+        R_( j + 1, i ) = xny * ( t1 + R_( j, i ) ) - t2;
+      }
+      for ( Eigen::Index i = 0; i < n_; ++i ) {
+        const double t1 = J_( i, j );
+        const double t2 = J_( i, j + 1 );
+        J_( i, j ) = t1 * cc + t2 * ss;
+        J_( i, j + 1 ) = xny * ( J_( i, j ) + t1 ) - t2;
+      }
+    }
+  }
+
+  Eigen::Index n_;
+  long max_iterations_;
+  Eigen::VectorXd x_;
+  Eigen::MatrixXd J_, R_; ///< J = L^-T Q and R of the active normals' QR (L = sqrt(s) I)
+  Eigen::VectorXd cx_, d_, z_, r_, np_, u_;
+  Eigen::Index q_{ 0 }; ///< number of active constraints
+  double r_norm_{ 1.0 };
+  long iterations_{ 0 };
+  Eigen::Matrix<Eigen::Index, Eigen::Dynamic, 1> active_set_;
+  Eigen::Matrix<uint8_t, Eigen::Dynamic, 1> is_active_;
+};
 
 SafetyQpLimiter::SafetyQpLimiter( const std::size_t n, SafetyQpParams params )
     : n_( n ), params_( std::move( params ) )
@@ -54,8 +252,6 @@ SafetyQpLimiter::SafetyQpLimiter( const std::size_t n, SafetyQpParams params )
   // box + collision dampers
   const auto m = ni + static_cast<Eigen::Index>( params_.max_collision_constraints );
 
-  H_ = Eigen::MatrixXd::Identity( ni, ni ) * ( 1.0 + params_.regularization );
-  g_ = Eigen::VectorXd::Zero( ni );
   C_ = Eigen::MatrixXd::Zero( m, ni );
   l_ = Eigen::VectorXd::Constant( m, -kInf );
   u_ = Eigen::VectorXd::Constant( m, kInf );
@@ -65,17 +261,7 @@ SafetyQpLimiter::SafetyQpLimiter( const std::size_t n, SafetyQpParams params )
   // Box rows are the identity block; they only change through l_/u_.
   C_.topRows( ni ) = Eigen::MatrixXd::Identity( ni, ni );
 
-  // PrimalDualLDLT: proxsuite 0.6.5's default PrimalLDLT has an out-of-bounds access
-  // in rank_r_update during mu updates (visible with Eigen assertions enabled).
-  qp_ = std::make_unique<proxsuite::proxqp::dense::QP<double>>(
-      ni, 0, m, /*box_constraints=*/false, proxsuite::proxqp::DenseBackend::PrimalDualLDLT,
-      proxsuite::proxqp::HessianType::Dense );
-  qp_->settings.eps_abs = 1e-7;
-  qp_->settings.eps_rel = 0.0;
-  // Healthy solves need < 50 iterations at these sizes; larger caps only get spent
-  // expensively proving infeasibility.
-  qp_->settings.max_iter = 200;
-  qp_->settings.verbose = false;
+  qp_ = std::make_unique<DualActiveSetQp>( ni, m );
 }
 
 SafetyQpLimiter::~SafetyQpLimiter() = default;
@@ -182,9 +368,6 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   result.iterations = 0;
   result.v.setZero( ni );
 
-  // ---- Objective: 0.5 ||v - v_des||^2 (H is constant) ----
-  g_ = -input.v_des;
-
   // ---- Rows [0, n): per-joint velocity box ----
   // Contact crawl: engage when any pair is inside the padding.
   bool crawl = false;
@@ -226,35 +409,12 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
     ++cc;
   }
   result.num_collision_constraints = static_cast<int>( cc );
-  // Deactivate unused collision rows
-  for ( std::size_t k = cc; k < max_cc; ++k ) {
-    const Eigen::Index row = ni + static_cast<Eigen::Index>( k );
-    C_.row( row ).setZero();
-    l_[row] = -kInf;
-    u_[row] = kInf;
-  }
 
-  // ---- Solve ----
-  // NOTE: deliberately NOT using WARM_START_WITH_PREVIOUS_RESULT. With it, a stale
-  // primal/dual pair from the previous cycle can pass proxqp's KKT residual check after
-  // the bounds moved (complementarity is not re-checked), returning the OLD solution with
-  // iter=0. The problems are tiny; a fresh solve is microseconds.
-  using proxsuite::proxqp::InitialGuessStatus;
-  qp_->settings.initial_guess = InitialGuessStatus::EQUALITY_CONSTRAINED_INITIAL_GUESS;
-  if ( first_solve_ ) {
-    qp_->init( H_, g_, std::nullopt, std::nullopt, C_, l_, u_ );
-    first_solve_ = false;
-  } else {
-    qp_->update( std::nullopt, g_, std::nullopt, std::nullopt, C_, l_, u_ );
-  }
-  qp_->solve();
-
-  auto solve_succeeded = [this]() {
-    return qp_->results.info.status == proxsuite::proxqp::QPSolverOutput::PROXQP_SOLVED &&
-           qp_->results.x.allFinite();
-  };
-  bool solved = solve_succeeded();
-  result.iterations = static_cast<long>( qp_->results.info.iter );
+  // ---- Solve: min 0.5 * (1 + regularization) * ||v||^2 - v_des^T v over the used rows ----
+  const double hessian_scale = 1.0 + params_.regularization;
+  const Eigen::Index rows = ni + static_cast<Eigen::Index>( cc );
+  bool solved = qp_->solve( hessian_scale, input.v_des, C_, l_, u_, rows );
+  result.iterations = qp_->iterations();
 
   if ( !solved ) {
     // ---- Stage 2: "no-worsen" relaxation, deepest pair first ----
@@ -286,28 +446,24 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
     }
 
     if ( relaxed_any ) {
-      qp_->update( std::nullopt, std::nullopt, std::nullopt, std::nullopt, C_, l_, u_ );
-      qp_->solve();
-      solved = solve_succeeded();
-      result.iterations += static_cast<long>( qp_->results.info.iter );
+      solved = qp_->solve( hessian_scale, input.v_des, C_, l_, u_, rows );
+      result.iterations += qp_->iterations();
     }
     if ( !solved && k_deep < cc ) {
       // Stage 2b: even the deepest push-out is incompatible (true vise) — full no-worsen
       const Eigen::Index row = ni + static_cast<Eigen::Index>( k_deep );
       l_[row] = 0.0;
-      qp_->update( std::nullopt, std::nullopt, std::nullopt, std::nullopt, C_, l_, u_ );
-      qp_->solve();
-      solved = solve_succeeded();
-      result.iterations += static_cast<long>( qp_->results.info.iter );
+      solved = qp_->solve( hessian_scale, input.v_des, C_, l_, u_, rows );
+      result.iterations += qp_->iterations();
       relaxed_any = true;
     }
     result.push_out_relaxed = relaxed_any && solved;
   }
 
   if ( solved ) {
-    // Clamp to the box exactly: the solver satisfies constraints only up to eps_abs, and
-    // the box is the hard actuator-safety part.
-    result.v = qp_->results.x.cwiseMax( box_lb_ ).cwiseMin( box_ub_ );
+    // Clamp to the box exactly: the solver satisfies constraints only up to its
+    // feasibility tolerance, and the box is the hard actuator-safety part.
+    result.v = qp_->x().cwiseMax( box_lb_ ).cwiseMin( box_ub_ );
     result.solved = true;
   } else {
     // Still infeasible (e.g. braking transient) or solver failure -> predictable

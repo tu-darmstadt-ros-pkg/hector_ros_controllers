@@ -6,14 +6,10 @@
 #include <memory>
 #include <vector>
 
-namespace proxsuite::proxqp::dense
-{
-template<typename T>
-struct QP;
-} // namespace proxsuite::proxqp::dense
-
 namespace safety_position_controller
 {
+
+class DualActiveSetQp;
 
 /**
  * @brief Parameters for the velocity-damper safety QP.
@@ -92,7 +88,8 @@ struct SafetyQpResult {
  *
  * Instead of stopping at obstacles, the solution slides tangentially along the active
  * constraints ("flow around"). If the QP is infeasible or the solver fails, the result
- * falls back to braking to zero at the deceleration limit.
+ * falls back to braking to zero at the deceleration limit. The QP is solved exactly by a
+ * dual active-set method (Goldfarb-Idnani).
  *
  * Not thread-safe; call solve() from a single (control) thread. The QP matrices are
  * allocated in the constructor; solve() still allocates its result vectors.
@@ -160,12 +157,11 @@ private:
   std::size_t n_;
   SafetyQpParams params_;
 
-  std::unique_ptr<proxsuite::proxqp::dense::QP<double>> qp_;
-  bool first_solve_{ true };
+  std::unique_ptr<DualActiveSetQp> qp_;
 
   // Preallocated QP matrices: rows = n (box) + max_collision_constraints + 1 (deviation)
-  Eigen::MatrixXd H_, C_;
-  Eigen::VectorXd g_, l_, u_;
+  Eigen::MatrixXd C_;
+  Eigen::VectorXd l_, u_;
   Eigen::VectorXd box_lb_, box_ub_; // per-joint bounds (also used to clamp the solution)
   SafetyQpResult result_;           // reused across solves; returned by reference
 };
