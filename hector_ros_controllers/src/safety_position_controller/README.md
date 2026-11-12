@@ -102,7 +102,7 @@ Measured in a **Release** build (`-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON`
 | `BM_AthenaArm/64` (QP, 64 of 64 collision rows) | 2.1 µs |
 | `BM_AthenaFlipper/16` (QP, 16 of 64 collision rows) | 0.4 µs |
 
-The QP rows are bounded by `qp_max_pair_constraints` (64 in both Athena configs); only the
+The QP rows are bounded by `qp_max_pair_constraints` (default 64, as in both Athena configs); only the
 rows of the current collision pairs enter the solve.
 
 The narrow phase runs in a single pass: coal returns the witness points from the same

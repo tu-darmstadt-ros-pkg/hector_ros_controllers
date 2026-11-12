@@ -65,7 +65,7 @@ A **safety layer for joint position commands**, usable both
 | `deceleration_scale`               | `double`   | `3.0`   | Braking limit = this × the acceleration limit, so stops stay snappy while re-acceleration is smooth. Bounds: [1.0, 100.0]. |
 | `default_velocity_limit`           | `double`   | `1.5`   | Fallback velocity limit [rad/s] for joints whose URDF gives none. Bounds: [0.001, 100.0].                            |
 | `qp_damper_xi`                     | `double`   | `2.0`   | Collision damper gain [1/s]. Bounds: [0.01, 100.0].                                                                  |
-| `qp_max_pair_constraints`          | `int`      | `10`    | Maximum collision pairs used as constraints per cycle (closest kept). Bounds: [1, 64].                               |
+| `qp_max_pair_constraints`          | `int`      | `64`    | Maximum collision pairs used as constraints per cycle (closest kept). Bounds: [1, 64].                               |
 | `qp_max_repulsion_speed`           | `double`   | `0.05`  | Cap [m/s] on the push-out speed demanded when a pair is inside the padding. Bounds: [0.0, 10.0].                     |
 | `qp_contact_crawl_speed`           | `double`   | `0.15`  | Velocity clamp [rad/s] while any pair is inside the padding. `0` disables. Bounds: [0.0, 100.0].                     |
 | `joint_deviation_limits.*.limit`   | `double`   | `0.25`  | Max deviation [rad] of the command from the leashed reference. One-sided: never demands catch-up. `0` disables for that joint. Bounds: [0.0, 100.0]. |

@@ -74,7 +74,7 @@ safety_position_controller:
 
   qp_max_pair_constraints:
     type: int
-    default_value: 10
+    default_value: 64
     description: >
       Maximum number of collision pairs used as QP constraints per cycle (the closest
       pairs are kept). Bounds the QP size for real-time safety.
