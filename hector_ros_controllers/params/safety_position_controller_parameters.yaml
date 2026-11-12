@@ -282,7 +282,7 @@ safety_position_controller:
   set_current_limits:
     type: bool
     default_value: false
-    description: If true, the controller additionally sets current limits see compliant and stiff limits
+    description: If true, the controller additionally claims <joint>/max_current and writes the compliant or stiff limit to it
     read_only: true
 
   current_limits:
@@ -303,12 +303,9 @@ safety_position_controller:
         default_value: 5.0
         description: >
           Current limit in Ampere written to the joint while compliant mode is off. Set
-          it from the actuator's rating and never above it: a Dynamixel takes this in a
-          two-byte signed register of 0.001 A, so anything from 32.768 A up does not fit,
-          and the driver then keeps the last value that did - which before the first
-          write is zero, i.e. no torque at all. The upper bound here is the register's,
-          not any actuator's; the motor also rejects, silently over a sync write, a goal
-          above its own current limit.
+          it from the actuator's rating and never above it. dynamixel_ros_control clamps
+          a value above the motor's EEPROM current limit to that limit. The upper bound
+          here is the register's, not any actuator's.
         validation:
           gt<>: [0.0]
           lt<>: [30.0]

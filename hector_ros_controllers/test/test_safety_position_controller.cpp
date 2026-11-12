@@ -1,4 +1,5 @@
 #include "test_helpers.hpp"
+#include <algorithm>
 
 #include <std_msgs/msg/bool.hpp>
 
@@ -275,7 +276,7 @@ TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
     cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
   }
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "current" ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "max_current" ) );
   }
   for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
     state_ifaces_.push_back(
@@ -1462,6 +1463,19 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointCollisionDetected 
 // Current Limits Tests
 // ============================================================================
 
+// A cap beside position, so the claim never asks the hardware for a torque goal
+TEST_F( SafetyPositionControllerTest, CurrentLimitsClaimMaxCurrent )
+{
+  initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true );
+  configureController();
+  const auto names = controller_->command_interface_configuration().names;
+  for ( const auto &joint : controlled_joints_ ) {
+    EXPECT_NE( std::find( names.begin(), names.end(), joint + "/max_current" ), names.end() )
+        << joint;
+    EXPECT_EQ( std::find( names.begin(), names.end(), joint + "/current" ), names.end() ) << joint;
+  }
+}
+
 TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteStiffByDefault )
 {
   initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true );
@@ -1479,7 +1493,7 @@ TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteStiffByDefault )
     cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
   }
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "current" ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "max_current" ) );
   }
   for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
     state_ifaces_.push_back(
@@ -1527,7 +1541,7 @@ TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteCompliantWhenEnabled )
     cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
   }
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "current" ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "max_current" ) );
   }
   for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
     state_ifaces_.push_back(

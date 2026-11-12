@@ -317,7 +317,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
       return controller_interface::CallbackReturn::ERROR;
     }
     if ( params_.set_current_limits && command_interfaces_[i + params_.joints.size()].get_name() !=
-                                           params_.joints[i] + "/current" ) {
+                                           params_.joints[i] + "/max_current" ) {
       RCLCPP_ERROR( get_node()->get_logger(),
                     "Current limit command interfaces are not in the expected order." );
       return controller_interface::CallbackReturn::ERROR;
@@ -361,7 +361,7 @@ SafetyPositionController::command_interface_configuration() const
   conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
   for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/position" ); }
   if ( params_.set_current_limits ) {
-    for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/current" ); }
+    for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/max_current" ); }
   }
   return conf;
 }
