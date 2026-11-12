@@ -363,8 +363,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
     status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
   }
-  // Debug messages are built off the control thread; polled at the control rate, so
-  // every cycle's capture normally goes out.
+  // Debug messages are built off the control thread, polled at the control rate in wall
+  // time: with a clock faster than real time, later cycles overwrite unpublished ones.
   diagnostics_->startDebugPublishing( pipeline_->config().qp.dt, collision_visualizer_ );
 
   publish_status();
