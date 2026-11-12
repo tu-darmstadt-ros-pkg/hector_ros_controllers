@@ -34,7 +34,7 @@ namespace safety_position_controller
 class CollisionVisualizer
 {
 public:
-  /// Where a pair sits relative to the padding / safety zone, for coloring.
+  /// Marker detail: distance lines only, or lines plus every collision shape.
   enum class Level { LinesOnly, FullGeometry };
 
   /**
