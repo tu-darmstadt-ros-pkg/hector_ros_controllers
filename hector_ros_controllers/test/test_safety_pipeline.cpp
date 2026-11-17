@@ -51,9 +51,8 @@ Pipeline::Config makeConfig( const size_t n = 2 )
 
 /// One cycle; the hardware follows the command perfectly.
 Pipeline::Events cycle( Pipeline &pipeline, const std::vector<double> &reference,
-                        std::vector<double> &measured,
-                        const Pipeline::CollisionObservation &obs = {}, const bool bypass = false,
-                        const double period = kDt )
+                        std::vector<double> &measured, const Pipeline::CollisionObservation &obs = {},
+                        const bool bypass = false, const double period = kDt )
 {
   pipeline.prepare( reference, measured, bypass, period );
   const auto events = pipeline.step( obs );

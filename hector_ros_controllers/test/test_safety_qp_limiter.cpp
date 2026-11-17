@@ -786,8 +786,7 @@ TEST( SafetyQpLimiter, FeasibleStandstillIsNeverReportedInfeasible )
       } else if ( k > 0 && cycle % 4 == 2 ) {
         normal = -previous();
       } else if ( k > 0 && cycle % 4 == 3 ) {
-        normal = previous() +
-                 1e-9 * Eigen::VectorXd::NullaryExpr( n, [&]() { return unit( rng ); } );
+        normal = previous() + 1e-9 * Eigen::VectorXd::NullaryExpr( n, [&]() { return unit( rng ); } );
       }
       const double distance = params.d_pad + ( k % 3 == 0 ? 0.0 : 0.05 * std::abs( unit( rng ) ) );
       in.collisions.push( normal, distance );

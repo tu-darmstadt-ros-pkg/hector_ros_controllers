@@ -182,7 +182,7 @@ private:
   Eigen::VectorXd ref_leashed_; ///< leashed reference targets (deviation is measured
                                 ///< against these, so lag cannot blow the budget)
   SafetyQpInput input_;
-  Eigen::VectorXd normal_; ///< projected gradient of the candidate being assembled
+  Eigen::VectorXd normal_;               ///< projected gradient of the candidate being assembled
   std::vector<double> reference_;        ///< this cycle's reference (park latch source)
   std::vector<double> parked_reference_; ///< reference snapshot latched at park time
   std::vector<std::size_t> constraint_pair_indices_;

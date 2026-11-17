@@ -175,9 +175,9 @@ bool CollisionChecker::initFromXml( const std::string &urdf_xml, const std::stri
     // Every per-cycle buffer holds at most one entry per pair: sized here, the check
     // does not allocate.
     const std::size_t num_pairs = geom_model_.collisionPairs.size();
-    for ( auto *indices : { &safety_zone_indices_, &primaries_, &duplicates_,
-                            &distance_callback_->safety_zone_indices,
-                            &distance_callback_->visited_indices } ) {
+    for ( auto *indices :
+          { &safety_zone_indices_, &primaries_, &duplicates_,
+            &distance_callback_->safety_zone_indices, &distance_callback_->visited_indices } ) {
       indices->reserve( num_pairs );
     }
     seen_links_.reserve( num_pairs );
@@ -582,9 +582,7 @@ void CollisionChecker::computePairGradient( const std::size_t pair_k, Eigen::Vec
   grad.setZero( model_.nv );
   // An undefined gradient is NaN, not zero: zero reads as "the controlled joints cannot
   // move this pair", which drops it, while NaN makes the pipeline brake.
-  const auto undefined = [&grad]() {
-    grad.setConstant( std::numeric_limits<double>::quiet_NaN() );
-  };
+  const auto undefined = [&grad]() { grad.setConstant( std::numeric_limits<double>::quiet_NaN() ); };
 
   const auto &dres = geom_data_.distanceResults[pair_k];
 

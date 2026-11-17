@@ -325,9 +325,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   // another, both to the pipeline and to the collision check.
   for ( size_t i = 0; i < all_joint_names_.size(); ++i ) {
     if ( state_interfaces_[i].get_name() != all_joint_names_[i] + "/position" ) {
-      RCLCPP_ERROR( get_node()->get_logger(),
-                    "State interface %zu is '%s', expected '%s/position'.", i,
-                    state_interfaces_[i].get_name().c_str(), all_joint_names_[i].c_str() );
+      RCLCPP_ERROR( get_node()->get_logger(), "State interface %zu is '%s', expected '%s/position'.",
+                    i, state_interfaces_[i].get_name().c_str(), all_joint_names_[i].c_str() );
       return controller_interface::CallbackReturn::ERROR;
     }
   }

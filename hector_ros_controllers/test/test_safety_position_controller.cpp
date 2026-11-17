@@ -49,8 +49,8 @@ public:
 
   void findControllerSpecificMocks( const std::string &node_name )
   {
-    bypass_service_mock_ =
-        rtest::findService<std_srvs::srv::SetBool>( controller_->get_node(), "~/bypass_safety_checks" );
+    bypass_service_mock_ = rtest::findService<std_srvs::srv::SetBool>( controller_->get_node(),
+                                                                       "~/bypass_safety_checks" );
   }
 
   void SetUp() override { controller_ = std::make_shared<ControllerType>(); }
@@ -635,14 +635,11 @@ TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
   initController( {}, false, false, "test_robot.urdf",
                   { rclcpp::Parameter( "e_stop_topic", topic ) } );
 
-  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node(),
-                   topic ) != nullptr )
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(), topic ) != nullptr )
       << "the configured topic must be the one subscribed";
 
   EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node(),
-                   "test_safety_position/safety_estop" ) == nullptr )
+                   controller_->get_node(), "test_safety_position/safety_estop" ) == nullptr )
       << "the default topic must not also be subscribed";
 }
 
@@ -654,8 +651,7 @@ TEST_F( SafetyPositionControllerTest, EstopSubscriptionKeepsTheLatchedState )
   // durability here is load bearing, not a default.
   initController();
   const auto sub = rtest::findSubscription<std_msgs::msg::Bool>(
-      controller_->get_node(),
-      "test_safety_position/safety_estop" );
+      controller_->get_node(), "test_safety_position/safety_estop" );
   ASSERT_TRUE( sub != nullptr );
 
   const auto qos = sub->get_actual_qos();
@@ -946,8 +942,7 @@ TEST_F( SafetyPositionControllerTest, QpDebugIsPublishedOffTheControlThread )
   ::testing::Mock::VerifyAndClearExpectations( qp_debug_mock.get() );
 
   hector_ros_controllers_msgs::msg::SafetyQpDebug msg;
-  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) )
-      .WillOnce( ::testing::SaveArg<0>( &msg ) );
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &msg ) );
   controller_->diagnostics_->publishDebug();
   controller_->diagnostics_->publishDebug();
   ::testing::Mock::VerifyAndClearExpectations( qp_debug_mock.get() );
@@ -1026,8 +1021,8 @@ TEST_F( SafetyPositionControllerTest, ReactivationDoesNotRepublishThePreviousCap
   const auto node_name = std::string( node->get_fully_qualified_name() );
   auto qp_debug_mock = rtest::findPublisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>(
       node, node_name + "/qp_debug" );
-  auto in_mock =
-      rtest::findPublisher<sensor_msgs::msg::JointState>( node, node_name + "/debug_in_joint_states" );
+  auto in_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      node, node_name + "/debug_in_joint_states" );
   auto marker_mock = rtest::findPublisher<visualization_msgs::msg::MarkerArray>(
       node, node_name + "/debug_collision_geometry" );
   ASSERT_TRUE( qp_debug_mock && in_mock && marker_mock );
@@ -1071,13 +1066,15 @@ TEST_F( SafetyPositionControllerTest, DebugIsPublishedWithoutHoldingTheModelLock
   ASSERT_TRUE( qp_debug_mock && marker_mock );
 
   const auto lockable_elsewhere = []( std::mutex &mutex ) {
-    return std::async( std::launch::async, [&mutex]() {
-             if ( !mutex.try_lock() ) {
-               return false;
-             }
-             mutex.unlock();
-             return true;
-           } ).get();
+    return std::async( std::launch::async,
+                       [&mutex]() {
+                         if ( !mutex.try_lock() ) {
+                           return false;
+                         }
+                         mutex.unlock();
+                         return true;
+                       } )
+        .get();
   };
   bool qp_lock_free = false, marker_lock_free = false;
   EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).WillOnce( [&]( const auto & ) {
@@ -1780,8 +1777,8 @@ TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
   const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
   EXPECT_TRUE( rtest::findSubscription<safety_position_controller::CmdType>(
       controller_->get_node(), node_name + "/commands" ) );
-  EXPECT_TRUE(
-      rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(), node_name + "/safety_estop" ) );
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                             node_name + "/safety_estop" ) );
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
   sendCommand( { 0.5, 0.0, 0.0 } );

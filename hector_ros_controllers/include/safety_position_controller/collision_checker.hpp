@@ -256,8 +256,8 @@ private:
   std::string root_frame_{ "base_link" };
 
   // Pre-allocated Jacobian workspace (sized in initFromXml)
-  Eigen::MatrixXd J1_workspace_; ///< 6 × nv
-  Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+  Eigen::MatrixXd J1_workspace_;  ///< 6 × nv
+  Eigen::MatrixXd J2_workspace_;  ///< 6 × nv
   Eigen::MatrixXd Jp1_workspace_; ///< 3 × nv
   Eigen::MatrixXd Jp2_workspace_; ///< 3 × nv
 

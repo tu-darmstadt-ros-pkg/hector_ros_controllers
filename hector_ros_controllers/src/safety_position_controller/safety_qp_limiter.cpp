@@ -403,8 +403,8 @@ const SafetyQpResult &SafetyQpLimiter::solve( const SafetyQpInput &input )
   u_.head( ni ) = box_ub_;
 
   // ---- Rows [n, n+M): collision velocity dampers ----
-  const Eigen::Index cc = std::min(
-      collisions.size(), static_cast<Eigen::Index>( params_.max_collision_constraints ) );
+  const Eigen::Index cc =
+      std::min( collisions.size(), static_cast<Eigen::Index>( params_.max_collision_constraints ) );
   const double zone_width = params_.d_zone - params_.d_pad;
   for ( Eigen::Index k = 0; k < cc; ++k ) {
     const Eigen::Index row = ni + k;

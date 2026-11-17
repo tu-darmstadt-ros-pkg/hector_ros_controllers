@@ -139,9 +139,9 @@ std_msgs::msg::ColorRGBA CollisionVisualizer::collisionColor( const double dista
                          : makeColor( 1.0f, 0.55f, 0.0f, 1.0f ); // inside padding: orange
 }
 
-visualization_msgs::msg::Marker
-CollisionVisualizer::makeLineMarker( const std::string &ns, const double thickness,
-                                     const rclcpp::Time &stamp ) const
+visualization_msgs::msg::Marker CollisionVisualizer::makeLineMarker( const std::string &ns,
+                                                                     const double thickness,
+                                                                     const rclcpp::Time &stamp ) const
 {
   visualization_msgs::msg::Marker m;
   m.header.frame_id = root_frame_;
@@ -398,8 +398,7 @@ void CollisionVisualizer::appendDistanceLines( const Snapshot &snap,
 }
 
 void CollisionVisualizer::capture( const rclcpp::Time &stamp, const CollisionChecker &checker,
-                                   const Level level,
-                                   const std::vector<double> &directional,
+                                   const Level level, const std::vector<double> &directional,
                                    const double safety_zone_threshold )
 {
   if ( checker.geometryModel().geometryObjects.size() != num_geometries_ ||

@@ -116,14 +116,10 @@ void solveSequence( benchmark::State &state, const int n, const SafetyQpParams &
 }
 
 void BM_AthenaArm( benchmark::State &state )
-{
-  solveSequence( state, 7, makeAthenaParams( 7, 5.28, 0.12 ) );
-}
+{ solveSequence( state, 7, makeAthenaParams( 7, 5.28, 0.12 ) ); }
 
 void BM_AthenaFlipper( benchmark::State &state )
-{
-  solveSequence( state, 4, makeAthenaParams( 4, 8.0, 0.1 ) );
-}
+{ solveSequence( state, 4, makeAthenaParams( 4, 8.0, 0.1 ) ); }
 
 } // namespace
 

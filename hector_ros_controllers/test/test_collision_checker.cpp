@@ -1222,8 +1222,7 @@ TEST_F( CollisionCheckerTest, EveryPairGradientMatchesFiniteDifferences )
       plus[joint_name] = value + h;
       minus[joint_name] = value - h;
       const double d_plus = find_pair_distance( checker->checkCollisionQ( toQ( *checker, plus ) ) );
-      const double d_minus =
-          find_pair_distance( checker->checkCollisionQ( toQ( *checker, minus ) ) );
+      const double d_minus = find_pair_distance( checker->checkCollisionQ( toQ( *checker, minus ) ) );
       ASSERT_FALSE( std::isnan( d_plus ) || std::isnan( d_minus ) );
 
       const double fd = ( d_plus - d_minus ) / ( 2.0 * h );
@@ -1341,8 +1340,8 @@ TEST_F( CollisionCheckerTest, UndeterminedDistanceCountsAsPenetration )
     ASSERT_TRUE( checker.initFromXml( urdf, "", { "slide_joint" } ) );
     checker.setSafetyZoneThreshold( 0.05 );
     // The geometry is shared, so a degenerate shape can be injected after init.
-    std::static_pointer_cast<coal::Sphere>( checker.geometryModel().geometryObjects[1].geometry )
-        ->radius = std::numeric_limits<double>::quiet_NaN();
+    std::static_pointer_cast<coal::Sphere>( checker.geometryModel().geometryObjects[1].geometry )->radius =
+        std::numeric_limits<double>::quiet_NaN();
 
     const auto &result = checker.checkCollisionQ( checker.neutralConfiguration() );
     EXPECT_TRUE( result.in_collision ) << "broadphase " << broadphase;

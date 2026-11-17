@@ -70,8 +70,7 @@ SafetyPipeline::SafetyPipeline( Config config )
   input_.q = Eigen::VectorXd::Zero( ni );
   input_.q_lo = Eigen::VectorXd::Constant( ni, -std::numeric_limits<double>::infinity() );
   input_.q_hi = Eigen::VectorXd::Constant( ni, std::numeric_limits<double>::infinity() );
-  input_.collisions.reserve( static_cast<Eigen::Index>( config_.qp.max_collision_constraints ),
-                             ni );
+  input_.collisions.reserve( static_cast<Eigen::Index>( config_.qp.max_collision_constraints ), ni );
   normal_ = Eigen::VectorXd::Zero( ni );
   constraint_pair_indices_.reserve( config_.qp.max_collision_constraints );
   input_.hold.assign( n, 0 );
@@ -136,8 +135,8 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
       }
     }
     ref_leashed_[idx] = cmd_[idx] + diff;
-    input_.v_des[idx] = SafetyQpLimiter::desiredVelocity( diff, config_.qp.v_max[idx],
-                                                          config_.qp.a_dec[idx], step );
+    input_.v_des[idx] =
+        SafetyQpLimiter::desiredVelocity( diff, config_.qp.v_max[idx], config_.qp.a_dec[idx], step );
     wants_motion_ |= std::abs( input_.v_des[idx] ) > config_.stall_velocity_threshold;
 
     // Per-joint deviation box around the leashed reference: bounds how far every link

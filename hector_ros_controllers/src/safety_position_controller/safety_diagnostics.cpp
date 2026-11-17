@@ -11,8 +11,8 @@ SafetyDiagnostics::SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr
                                       const Params &params, const CollisionChecker *checker )
     : node_( std::move( node ) ), params_( params ), checker_( checker )
 {
-  config_box_.set( StatusConfig{ {}, {}, {}, params_.set_current_limits,
-                                 params_.check_self_collisions } );
+  config_box_.set(
+      StatusConfig{ {}, {}, {}, params_.set_current_limits, params_.check_self_collisions } );
 
   // Status publisher (latched)
   auto qos_latched = rclcpp::QoS( 1 ).transient_local().reliable();
@@ -24,8 +24,7 @@ SafetyDiagnostics::SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr
   // the publishers are created once and only the gate is toggled: destroying them from
   // the parameter callback would free them under the control thread's publish call.
   param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>( node_ );
-  js_in_.pub =
-      node_->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
+  js_in_.pub = node_->create_publisher<sensor_msgs::msg::JointState>( "~/debug_in_joint_states", 10 );
   js_out_.pub =
       node_->create_publisher<sensor_msgs::msg::JointState>( "~/debug_out_joint_states", 10 );
   debug_js_enabled_.store( params_.publish_debug_joint_states, std::memory_order_relaxed );
@@ -100,9 +99,8 @@ void SafetyDiagnostics::configure( std::vector<std::string> joint_names,
       }
     } );
     for ( auto *channel : { &js_in_, &js_out_ } ) {
-      channel->handoff.reset( [&]( JointStateSnapshot &js ) {
-        js.position.assign( joint_names.size(), 0.0 );
-      } );
+      channel->handoff.reset(
+          [&]( JointStateSnapshot &js ) { js.position.assign( joint_names.size(), 0.0 ); } );
     }
 
     debug_joint_names_ = joint_names;
@@ -182,8 +180,7 @@ void SafetyDiagnostics::captureQpDebug( const rclcpp::Time &stamp, const SafetyP
                                pair_indices.size(), snap.pair_indices.size() } );
   const auto num_pairs = static_cast<Eigen::Index>( snap.num_pairs );
   std::copy_n( pair_indices.begin(), snap.num_pairs, snap.pair_indices.begin() );
-  snap.pair_distances.head( num_pairs ) =
-      pipeline.qpInput().collisions.distances().head( num_pairs );
+  snap.pair_distances.head( num_pairs ) = pipeline.qpInput().collisions.distances().head( num_pairs );
   snap.pair_rhs.head( num_pairs ) = qp_result.collision_rhs.head( num_pairs );
   snap.pair_velocities.head( num_pairs ) = qp_result.collision_velocity.head( num_pairs );
 
@@ -308,11 +305,9 @@ std::optional<hector_ros_controllers_msgs::msg::SafetyQpDebug> SafetyDiagnostics
     const std::size_t pair_index = snap.pair_indices[k];
     msg.pair_names.push_back( pair_index < pair_names_.size() ? pair_names_[pair_index] : "<->" );
   }
-  msg.pair_distances.assign( snap.pair_distances.begin(),
-                             snap.pair_distances.begin() + num_pairs );
+  msg.pair_distances.assign( snap.pair_distances.begin(), snap.pair_distances.begin() + num_pairs );
   msg.pair_rhs.assign( snap.pair_rhs.begin(), snap.pair_rhs.begin() + num_pairs );
-  msg.pair_velocities.assign( snap.pair_velocities.begin(),
-                              snap.pair_velocities.begin() + num_pairs );
+  msg.pair_velocities.assign( snap.pair_velocities.begin(), snap.pair_velocities.begin() + num_pairs );
 
   msg.solved = snap.solved;
   msg.braking = snap.braking;

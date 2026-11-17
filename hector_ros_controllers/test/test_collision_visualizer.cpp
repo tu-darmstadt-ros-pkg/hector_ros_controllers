@@ -75,11 +75,10 @@ TEST_F( CollisionVisualizerTest, PublishesWithoutDirectionalInfo )
   const auto &result = checker_->checkCollisionQ( checker_->neutralConfiguration() );
   ASSERT_FALSE( result.safety_zone_pairs.empty() ) << "need a zone pair to reach the color branch";
 
-  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::LinesOnly,
-                        {}, 1.0 );
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
   visualizer_->publishPending();
-  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::FullGeometry,
-                        {}, 1.0 );
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::FullGeometry, {},
+                        1.0 );
   visualizer_->publishPending();
 }
 
@@ -102,8 +101,8 @@ TEST_F( CollisionVisualizerTest, PublishesWithMismatchedAndMatchingDirectionalIn
 TEST_F( CollisionVisualizerTest, PublishesBeforeAnyCheckHasRun )
 {
   // No collision query yet: the latched result is empty and every distance stale.
-  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::FullGeometry,
-                        {}, 0.05 );
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::FullGeometry, {},
+                        0.05 );
   visualizer_->publishPending();
 }
 
@@ -125,8 +124,7 @@ TEST_F( CollisionVisualizerTest, PublishesTheCapturedCycleOnce )
   const std::vector<Eigen::Vector3d> captured_points = zone_points();
   ASSERT_FALSE( captured_points.empty() );
   const rclcpp::Time cycle_time( 42, 0, RCL_ROS_TIME );
-  visualizer_->capture( cycle_time, *checker_, spc::CollisionVisualizer::Level::LinesOnly,
-                        {}, 1.0 );
+  visualizer_->capture( cycle_time, *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
 
   Eigen::VectorXd moved = checker_->neutralConfiguration();
   CollisionChecker::writeJointPosition( moved, checker_->getJointQSlot( "joint2" ), 1.0 );
