@@ -27,4 +27,4 @@ bool braking
 bool push_out_relaxed
 bool bounds_conflict
 float64 solve_time_us
-int64 iterations
+int64 iterations             # active-set additions and drops, summed over all solve stages

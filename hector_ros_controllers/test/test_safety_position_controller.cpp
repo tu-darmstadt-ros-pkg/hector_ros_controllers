@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <cerrno>
+#include <future>
 #include <shared_mutex>
 #include <thread>
 
@@ -47,8 +49,8 @@ public:
 
   void findControllerSpecificMocks( const std::string &node_name )
   {
-    bypass_service_mock_ =
-        rtest::findService<std_srvs::srv::SetBool>( controller_->get_node(), "~/bypass_safety_checks" );
+    bypass_service_mock_ = rtest::findService<std_srvs::srv::SetBool>( controller_->get_node(),
+                                                                       "~/bypass_safety_checks" );
   }
 
   void SetUp() override { controller_ = std::make_shared<ControllerType>(); }
@@ -400,6 +402,31 @@ TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
       << "compliant mode must not be inherited across an activation";
 }
 
+TEST_F( SafetyPositionControllerTest, StateInterfacesOutOfOrderRefuseActivation )
+{
+  // Joint positions are read by index: interfaces in another order would hand one
+  // joint's measurement to another, and the controller would steer a robot that is not
+  // there.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  ASSERT_GE( state_ifaces_.size(), 2u );
+
+  controller_->state_interfaces_.clear();
+  for ( auto it = state_ifaces_.rbegin(); it != state_ifaces_.rend(); ++it ) {
+    controller_->state_interfaces_.emplace_back( *it );
+  }
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR );
+
+  controller_->state_interfaces_.clear();
+  for ( auto &si : state_ifaces_ ) { controller_->state_interfaces_.emplace_back( si ); }
+  EXPECT_EQ( controller_->on_activate( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::SUCCESS );
+}
+
 TEST_F( SafetyPositionControllerTest, BypassDoesNotSurviveALifecycleTransition )
 {
   // The bypass drops collision checking and widens the joint limits. It is a deliberate,
@@ -608,14 +635,11 @@ TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
   initController( {}, false, false, "test_robot.urdf",
                   { rclcpp::Parameter( "e_stop_topic", topic ) } );
 
-  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node(),
-                   topic ) != nullptr )
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(), topic ) != nullptr )
       << "the configured topic must be the one subscribed";
 
   EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node(),
-                   "test_safety_position/safety_estop" ) == nullptr )
+                   controller_->get_node(), "test_safety_position/safety_estop" ) == nullptr )
       << "the default topic must not also be subscribed";
 }
 
@@ -627,8 +651,7 @@ TEST_F( SafetyPositionControllerTest, EstopSubscriptionKeepsTheLatchedState )
   // durability here is load bearing, not a default.
   initController();
   const auto sub = rtest::findSubscription<std_msgs::msg::Bool>(
-      controller_->get_node(),
-      "test_safety_position/safety_estop" );
+      controller_->get_node(), "test_safety_position/safety_estop" );
   ASSERT_TRUE( sub != nullptr );
 
   const auto qos = sub->get_actual_qos();
@@ -887,6 +910,238 @@ TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
            "(cycle "
         << i << ")";
   }
+}
+
+// ============================================================================
+// Debug output
+// ============================================================================
+
+TEST_F( SafetyPositionControllerTest, QpDebugIsPublishedOffTheControlThread )
+{
+  // Building and publishing the introspection message allocates and can block, so the
+  // control cycle only captures it. What goes out later must be that cycle, whole, and
+  // only once.
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", true ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  auto qp_debug_mock = rtest::findPublisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>(
+      controller_->get_node(), node_name + "/qp_debug" );
+  ASSERT_TRUE( qp_debug_mock );
+
+  controller_->reference_interfaces_ = { 1.0, 0.0, 0.0 };
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).Times( 0 );
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ::testing::Mock::VerifyAndClearExpectations( qp_debug_mock.get() );
+
+  hector_ros_controllers_msgs::msg::SafetyQpDebug msg;
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &msg ) );
+  controller_->diagnostics_->publishDebug();
+  controller_->diagnostics_->publishDebug();
+  ::testing::Mock::VerifyAndClearExpectations( qp_debug_mock.get() );
+
+  const auto &pipeline = *controller_->pipeline_;
+  ASSERT_EQ( msg.joint_names, controlled_joints_ );
+  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
+    const auto idx = static_cast<Eigen::Index>( i );
+    EXPECT_EQ( msg.v_cmd[i], pipeline.velocity()[idx] ) << "the last cycle, not an earlier one";
+    EXPECT_EQ( msg.q_cmd[i], pipeline.commandedPositions()[idx] );
+    EXPECT_EQ( msg.v_des[i], pipeline.qpInput().v_des[idx] );
+    EXPECT_EQ( msg.q_ref[i], controller_->reference_interfaces_[i] );
+  }
+  EXPECT_GT( msg.v_cmd[0], 0.0 ) << "joint1 was moving toward its reference";
+  EXPECT_EQ( msg.solved, pipeline.lastResult().solved );
+}
+
+TEST_F( SafetyPositionControllerTest, DebugJointStatesArePublishedOffTheControlThread )
+{
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "publish_debug_joint_states", true ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  auto in_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      controller_->get_node(), node_name + "/debug_in_joint_states" );
+  auto out_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      controller_->get_node(), node_name + "/debug_out_joint_states" );
+  ASSERT_TRUE( in_mock && out_mock );
+
+  controller_->reference_interfaces_[0] = 1.0;
+  EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).Times( 0 );
+  EXPECT_CALL( *out_mock, publish( ::testing::_ ) ).Times( 0 );
+  for ( int i = 0; i < 3; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ::testing::Mock::VerifyAndClearExpectations( in_mock.get() );
+  ::testing::Mock::VerifyAndClearExpectations( out_mock.get() );
+
+  sensor_msgs::msg::JointState in_msg, out_msg;
+  EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &in_msg ) );
+  EXPECT_CALL( *out_mock, publish( ::testing::_ ) ).WillOnce( ::testing::SaveArg<0>( &out_msg ) );
+  controller_->diagnostics_->publishDebug();
+  controller_->diagnostics_->publishDebug();
+
+  EXPECT_EQ( in_msg.name, controlled_joints_ );
+  ASSERT_EQ( in_msg.position.size(), controlled_joints_.size() );
+  EXPECT_EQ( in_msg.position[0], 1.0 );
+  EXPECT_EQ( out_msg.name, controlled_joints_ );
+  EXPECT_EQ( out_msg.position, std::vector<double>( hw_cmd_values_.begin(), hw_cmd_values_.end() ) )
+      << "the commands written in the last cycle";
+}
+
+TEST_F( SafetyPositionControllerTest, ReactivationDoesNotRepublishThePreviousCapture )
+{
+  // The debug snapshots outlive a deactivation. What the last activation captured is
+  // stale, and with a lower constraint limit its pair count no longer fits the arrays
+  // the new activation sized.
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", true ),
+                    rclcpp::Parameter( "publish_debug_joint_states", true ),
+                    rclcpp::Parameter( "debug_visualize_collisions", true ),
+                    rclcpp::Parameter( "collision_visualization_rate", 0.0 ),
+                    rclcpp::Parameter( "qp_max_pair_constraints", 10 ),
+                    rclcpp::Parameter( "collision_safety_zone", 0.5 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node = controller_->get_node();
+  const auto node_name = std::string( node->get_fully_qualified_name() );
+  auto qp_debug_mock = rtest::findPublisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>(
+      node, node_name + "/qp_debug" );
+  auto in_mock = rtest::findPublisher<sensor_msgs::msg::JointState>(
+      node, node_name + "/debug_in_joint_states" );
+  auto marker_mock = rtest::findPublisher<visualization_msgs::msg::MarkerArray>(
+      node, node_name + "/debug_collision_geometry" );
+  ASSERT_TRUE( qp_debug_mock && in_mock && marker_mock );
+
+  controller_->reference_interfaces_ = { 0.3, 0.2, 0.1 };
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+  ASSERT_GT( controller_->pipeline_->lastResult().num_collision_constraints, 2 );
+
+  deactivateController();
+  node->set_parameter( rclcpp::Parameter( "qp_max_pair_constraints", 2 ) );
+  activateController();
+
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).Times( 0 );
+  EXPECT_CALL( *in_mock, publish( ::testing::_ ) ).Times( 0 );
+  EXPECT_CALL( *marker_mock, publish( ::testing::_ ) ).Times( 0 );
+  controller_->diagnostics_->publishDebug();
+}
+
+TEST_F( SafetyPositionControllerTest, DebugIsPublishedWithoutHoldingTheModelLocks )
+{
+  // A reliable publisher can block on a slow subscriber. Activation waits for these
+  // locks to resize the snapshots, so they must not be held while publishing.
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", true ),
+                    rclcpp::Parameter( "debug_visualize_collisions", true ),
+                    rclcpp::Parameter( "collision_visualization_rate", 0.0 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const auto node = controller_->get_node();
+  const auto node_name = std::string( node->get_fully_qualified_name() );
+  auto qp_debug_mock = rtest::findPublisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>(
+      node, node_name + "/qp_debug" );
+  auto marker_mock = rtest::findPublisher<visualization_msgs::msg::MarkerArray>(
+      node, node_name + "/debug_collision_geometry" );
+  ASSERT_TRUE( qp_debug_mock && marker_mock );
+
+  const auto lockable_elsewhere = []( std::mutex &mutex ) {
+    return std::async( std::launch::async,
+                       [&mutex]() {
+                         if ( !mutex.try_lock() ) {
+                           return false;
+                         }
+                         mutex.unlock();
+                         return true;
+                       } )
+        .get();
+  };
+  bool qp_lock_free = false, marker_lock_free = false;
+  EXPECT_CALL( *qp_debug_mock, publish( ::testing::_ ) ).WillOnce( [&]( const auto & ) {
+    qp_lock_free = lockable_elsewhere( controller_->diagnostics_->debug_mutex_ );
+  } );
+  EXPECT_CALL( *marker_mock, publish( ::testing::_ ) ).WillOnce( [&]( const auto & ) {
+    marker_lock_free = lockable_elsewhere( controller_->collision_visualizer_->model_mutex_ );
+  } );
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  controller_->diagnostics_->publishDebug();
+  EXPECT_TRUE( qp_lock_free );
+  EXPECT_TRUE( marker_lock_free );
+}
+
+TEST_F( SafetyPositionControllerTest, DebugTimerRunsOnlyWhileDebugOutputIsEnabled )
+{
+  // The timer polls at the control rate on the executor; with every debug output off
+  // that is pure load.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  auto &diagnostics = *controller_->diagnostics_;
+  ASSERT_TRUE( diagnostics.debug_timer_ );
+  EXPECT_TRUE( diagnostics.debug_timer_->is_canceled() );
+
+  diagnostics.qp_debug_enabled_.store( true );
+  {
+    const std::lock_guard<std::mutex> lock( diagnostics.timer_mutex_ );
+    diagnostics.updateDebugTimer();
+  }
+  EXPECT_FALSE( diagnostics.debug_timer_->is_canceled() );
+
+  diagnostics.qp_debug_enabled_.store( false );
+  {
+    const std::lock_guard<std::mutex> lock( diagnostics.timer_mutex_ );
+    diagnostics.updateDebugTimer();
+  }
+  EXPECT_TRUE( diagnostics.debug_timer_->is_canceled() );
+
+  deactivateController();
+  EXPECT_FALSE( diagnostics.debug_timer_ );
+}
+
+TEST_F( SafetyPositionControllerTest, DebugPublishingKeepsItsVisualizerAlive )
+{
+  // An activation that turns the markers off drops the controller's visualizer while a
+  // debug tick may still be publishing from it on an executor thread.
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "debug_visualize_collisions", true ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  const std::weak_ptr<safety_position_controller::CollisionVisualizer> visualizer =
+      controller_->collision_visualizer_;
+  ASSERT_FALSE( visualizer.expired() );
+
+  controller_->collision_visualizer_.reset();
+  EXPECT_FALSE( visualizer.expired() ) << "the debug publisher still holds it";
+  controller_->diagnostics_->publishDebug();
+
+  controller_->diagnostics_->stopDebugPublishing();
+  EXPECT_TRUE( visualizer.expired() );
 }
 
 // ============================================================================
@@ -1290,6 +1545,41 @@ TEST_F( SafetyPositionControllerTest, ProlongedBusyStateHandleParksOnRecovery )
   EXPECT_GT( hw_cmd_values_[0], resume_start ) << "tracking must resume toward the new reference";
 }
 
+TEST_F( SafetyPositionControllerTest, StateReadWatchdogCountsMeasuredTime )
+{
+  // The watchdog limits how long the safety state may stay unobservable. Cycles in which
+  // no time passed (a paused clock) must not count, and a late cycle counts in full.
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  controller_->reference_interfaces_ = { 1.0, 0.0, 0.0 };
+  for ( int i = 0; i < 5; ++i ) {
+    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+    followCommands();
+  }
+
+  const auto update = [this]( const std::chrono::milliseconds period ) {
+    return controller_->update_and_write_commands( rclcpp::Time( 0, 0, RCL_ROS_TIME ),
+                                                   rclcpp::Duration( period ) );
+  };
+  const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
+  std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
+  for ( int i = 0; i < 50; ++i ) {
+    ASSERT_EQ( update( std::chrono::milliseconds( 0 ) ), controller_interface::return_type::OK );
+  }
+  EXPECT_EQ( controller_->state_read_failure_time_, 0.0 );
+  EXPECT_FALSE( controller_->park_on_recovery_pending_ );
+
+  // default state_read_timeout is 0.1 s
+  ASSERT_EQ( update( std::chrono::milliseconds( 60 ) ), controller_interface::return_type::OK );
+  EXPECT_FALSE( controller_->park_on_recovery_pending_ );
+  ASSERT_EQ( update( std::chrono::milliseconds( 60 ) ), controller_interface::return_type::OK );
+  EXPECT_TRUE( controller_->park_on_recovery_pending_ );
+}
+
 TEST_F( SafetyPositionControllerTest, ProlongedNonFiniteJointStateParksOnRecovery )
 {
   // The dead-encoder variant of the prolonged failure: non-finite reads accumulate into
@@ -1487,8 +1777,8 @@ TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
   const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
   EXPECT_TRUE( rtest::findSubscription<safety_position_controller::CmdType>(
       controller_->get_node(), node_name + "/commands" ) );
-  EXPECT_TRUE(
-      rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(), node_name + "/safety_estop" ) );
+  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                             node_name + "/safety_estop" ) );
 
   for ( auto &v : hw_state_values_ ) v = 0.0;
   sendCommand( { 0.5, 0.0, 0.0 } );
@@ -2502,6 +2792,106 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeWorksWithoutCollisionChecke
 // ============================================================================
 // main
 // ============================================================================
+
+// ============================================================================
+// Allocation-free control loop
+// ============================================================================
+
+// Counts heap allocations of the current thread while enabled. Replacing malloc and
+// friends catches operator new, Eigen and the C libraries alike.
+namespace allocation_counter
+{
+thread_local bool counting = false;
+thread_local long count = 0;
+} // namespace allocation_counter
+
+extern "C" {
+void *__libc_malloc( size_t );
+void *__libc_calloc( size_t, size_t );
+void *__libc_realloc( void *, size_t );
+void *__libc_memalign( size_t, size_t );
+
+void *malloc( size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_malloc( size );
+}
+void *calloc( size_t n, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_calloc( n, size );
+}
+void *realloc( void *p, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_realloc( p, size );
+}
+int posix_memalign( void **out, size_t align, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  *out = __libc_memalign( align, size );
+  return *out ? 0 : ENOMEM;
+}
+void *aligned_alloc( size_t align, size_t size )
+{
+  allocation_counter::count += allocation_counter::counting ? 1 : 0;
+  return __libc_memalign( align, size );
+}
+}
+
+class SafetyPositionControllerAllocationTest
+    : public SafetyPositionControllerTest,
+      public ::testing::WithParamInterface<std::tuple<bool, bool>>
+{
+};
+
+TEST_P( SafetyPositionControllerAllocationTest, SteadyStateUpdateDoesNotAllocate )
+{
+  // The update runs on the realtime thread: an allocation can take a lock or a page
+  // fault and miss the cycle deadline. Collision checking, the QP and the debug capture
+  // must all reuse storage sized at activation. The first cycles may still size it.
+  const bool debug = std::get<0>( GetParam() );
+  const bool broadphase = std::get<1>( GetParam() );
+#ifndef NDEBUG
+  if ( broadphase ) {
+    GTEST_SKIP() << "pinocchio's BroadPhaseManager::update() asserts a validity check that "
+                    "copies its object list; only builds with NDEBUG are allocation-free";
+  }
+#endif
+  initController( {}, true, false, "test_robot_collision.urdf",
+                  { rclcpp::Parameter( "publish_qp_debug", debug ),
+                    rclcpp::Parameter( "publish_debug_joint_states", debug ),
+                    rclcpp::Parameter( "debug_visualize_collisions", debug ),
+                    rclcpp::Parameter( "collision_visualization_rate", 0.0 ),
+                    rclcpp::Parameter( "use_broadphase", broadphase ),
+                    rclcpp::Parameter( "collision_safety_zone", 0.5 ) } );
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  int allocating_cycles = 0;
+  for ( int i = 0; i < 600; ++i ) {
+    const double t = 0.02 * i;
+    controller_->reference_interfaces_ = { 0.8 * std::sin( t ), 0.8 * std::cos( 0.7 * t ),
+                                           0.5 * std::sin( 1.3 * t ) };
+    allocation_counter::count = 0;
+    allocation_counter::counting = i >= 50;
+    const auto result = callUpdate();
+    allocation_counter::counting = false;
+    ASSERT_EQ( result, controller_interface::return_type::OK );
+    allocating_cycles += allocation_counter::count > 0 ? 1 : 0;
+    followCommands();
+    if ( debug ) {
+      controller_->diagnostics_->publishDebug();
+    }
+  }
+  EXPECT_EQ( allocating_cycles, 0 );
+}
+
+INSTANTIATE_TEST_SUITE_P( DebugAndBroadphase, SafetyPositionControllerAllocationTest,
+                          ::testing::Combine( ::testing::Bool(), ::testing::Bool() ) );
 
 int main( int argc, char **argv )
 {

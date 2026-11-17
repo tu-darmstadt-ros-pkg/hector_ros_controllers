@@ -74,7 +74,7 @@ safety_position_controller:
 
   qp_max_pair_constraints:
     type: int
-    default_value: 10
+    default_value: 64
     description: >
       Maximum number of collision pairs used as QP constraints per cycle (the closest
       pairs are kept). Bounds the QP size for real-time safety.
@@ -263,8 +263,8 @@ safety_position_controller:
       If true, publishes lightweight visualization markers showing only the distance
       lines for collision pairs within the safety zone. Much cheaper than
       'debug_visualize_collisions' as it skips geometry markers and safe-pair lines.
-      Uses a realtime publisher for non-blocking operation. Ignored if
-      'debug_visualize_collisions' is true.
+      Like all debug output, the markers are built and published off the control
+      thread. Ignored if 'debug_visualize_collisions' is true.
 
   publish_qp_debug:
     type: bool

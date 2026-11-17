@@ -16,6 +16,16 @@ namespace
 constexpr double kDivergenceLeashFactor = 2.0;
 } // namespace
 
+void projectOntoJoints( const Eigen::VectorXd &gradient, const std::vector<int> &joint_v_index,
+                        Eigen::VectorXd &projected )
+{
+  for ( std::size_t i = 0; i < joint_v_index.size(); ++i ) {
+    const int v_idx = joint_v_index[i];
+    projected[static_cast<Eigen::Index>( i )] =
+        ( v_idx >= 0 && v_idx < gradient.size() ) ? gradient[v_idx] : 0.0;
+  }
+}
+
 SafetyPipeline::SafetyPipeline( Config config )
     : config_( std::move( config ) ), monitor_( config_.stall_park )
 {
@@ -31,6 +41,11 @@ SafetyPipeline::SafetyPipeline( Config config )
     config_.joint_v_index.assign( n, -1 );
   } else if ( config_.joint_v_index.size() != n ) {
     throw std::invalid_argument( "SafetyPipeline: joint_v_index size mismatch" );
+  }
+  // The checker reads a pair cap of 0 as "unlimited"; here it would silently drop every
+  // collision constraint.
+  if ( config_.qp.max_collision_constraints == 0 ) {
+    throw std::invalid_argument( "SafetyPipeline: qp.max_collision_constraints must be > 0" );
   }
 
   // A continuous joint's lag is only known modulo a full turn, so the divergence bound
@@ -55,7 +70,8 @@ SafetyPipeline::SafetyPipeline( Config config )
   input_.q = Eigen::VectorXd::Zero( ni );
   input_.q_lo = Eigen::VectorXd::Constant( ni, -std::numeric_limits<double>::infinity() );
   input_.q_hi = Eigen::VectorXd::Constant( ni, std::numeric_limits<double>::infinity() );
-  input_.collisions.reserve( config_.qp.max_collision_constraints );
+  input_.collisions.reserve( static_cast<Eigen::Index>( config_.qp.max_collision_constraints ), ni );
+  normal_ = Eigen::VectorXd::Zero( ni );
   constraint_pair_indices_.reserve( config_.qp.max_collision_constraints );
   input_.hold.assign( n, 0 );
   reference_.assign( n, std::numeric_limits<double>::quiet_NaN() );
@@ -63,8 +79,14 @@ SafetyPipeline::SafetyPipeline( Config config )
 }
 
 bool SafetyPipeline::prepare( const std::vector<double> &reference,
-                              const std::vector<double> &measured, const bool bypass_active )
+                              const std::vector<double> &measured, const bool bypass_active,
+                              const double period )
 {
+  period_ = std::isfinite( period ) && period > 0.0 ? period : 0.0;
+  // The step the desired velocity aims to cover; without time passing nothing moves
+  // anyway, so the nominal step keeps it well-defined.
+  const double step = period_ > 0.0 ? period_ : config_.qp.dt;
+  input_.dt = step;
   const std::size_t n = config_.joints.size();
   reference_.assign( reference.begin(), reference.end() );
 
@@ -113,8 +135,8 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
       }
     }
     ref_leashed_[idx] = cmd_[idx] + diff;
-    input_.v_des[idx] = SafetyQpLimiter::desiredVelocity( diff, config_.qp.v_max[idx],
-                                                          config_.qp.a_dec[idx], config_.dt );
+    input_.v_des[idx] =
+        SafetyQpLimiter::desiredVelocity( diff, config_.qp.v_max[idx], config_.qp.a_dec[idx], step );
     wants_motion_ |= std::abs( input_.v_des[idx] ) > config_.stall_velocity_threshold;
 
     // Per-joint deviation box around the leashed reference: bounds how far every link
@@ -188,34 +210,34 @@ bool SafetyPipeline::prepare( const std::vector<double> &reference,
 
 SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
 {
-  const std::size_t n = config_.joints.size();
-
   // ---- Collision damper constraints ----
   input_.collisions.clear();
   constraint_pair_indices_.clear();
   if ( obs.checks_active ) {
     if ( obs.state_valid && obs.pairs ) {
+      bool pairs_finite = true;
       for ( const auto &candidate : *obs.pairs ) {
-        QpCollisionConstraint c;
-        c.distance = candidate.distance;
-        c.normal.resize( static_cast<Eigen::Index>( n ) );
-        for ( std::size_t i = 0; i < n; ++i ) {
-          const int v_idx = config_.joint_v_index[i];
-          c.normal[static_cast<Eigen::Index>( i )] =
-              ( candidate.gradient && v_idx >= 0 && v_idx < candidate.gradient->size() )
-                  ? ( *candidate.gradient )[v_idx]
-                  : 0.0;
+        if ( candidate.gradient ) {
+          projectOntoJoints( *candidate.gradient, config_.joint_v_index, normal_ );
+        } else {
+          normal_.setZero();
+        }
+        // A non-finite row never binds, so the pair would silently stop constraining.
+        if ( !std::isfinite( candidate.distance ) || !normal_.allFinite() ) {
+          pairs_finite = false;
+          continue;
         }
         // A pair the controlled joints cannot influence must not constrain (or even
-        // infeasible-block) the QP.
-        if ( c.normal.norm() > 1e-12 ) {
-          input_.collisions.push_back( std::move( c ) );
+        // infeasible-block) the QP. Candidates are sorted closest-first, so a full
+        // storage keeps the closest ones.
+        if ( normal_.norm() > 1e-12 && input_.collisions.push( normal_, candidate.distance ) ) {
           constraint_pair_indices_.push_back( candidate.pair_index );
         }
       }
-      if ( obs.in_collision && input_.collisions.empty() ) {
-        // In collision but no usable constraints (e.g. NaN/Inf positions → blanket
-        // collision without pairs): state untrusted → stop demanding motion, QP brakes.
+      if ( !pairs_finite || ( obs.in_collision && input_.collisions.empty() ) ) {
+        // A pair without a usable distance, or in collision without usable constraints
+        // (e.g. NaN/Inf positions → blanket collision without pairs): state untrusted →
+        // stop demanding motion, QP brakes.
         input_.v_des.setZero();
         wants_motion_ = false;
         holdAll();
@@ -228,15 +250,19 @@ SafetyPipeline::Events SafetyPipeline::step( const CollisionObservation &obs )
     }
   }
 
+  Events events;
+  if ( period_ <= 0.0 ) {
+    return events; // no time passed: nothing moves, no timer runs
+  }
+
   // ---- Solve, integrate, clamp ----
   const SafetyQpResult &result = limiter_->solve( input_ );
   vel_ = result.v;
-  cmd_ += vel_ * config_.dt;
+  cmd_ += vel_ * period_;
 
   // ---- Stall detection: reference demands motion but the QP output is ~zero ----
-  Events events;
   const bool moving = vel_.cwiseAbs().maxCoeff() > config_.stall_velocity_threshold;
-  events.stall = monitor_.update( wants_motion_, moving, config_.dt );
+  events.stall = monitor_.update( wants_motion_, moving, period_ );
   if ( events.stall.parked ) {
     parked_reference_ = reference_;
   }

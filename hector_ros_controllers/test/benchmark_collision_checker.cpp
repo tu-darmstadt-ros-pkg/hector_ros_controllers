@@ -41,6 +41,17 @@ std::string loadFile( const std::string &filename )
   return std::string( std::istreambuf_iterator<char>( ifs ), std::istreambuf_iterator<char>() );
 }
 
+/// Configuration of @p checker's model with the named joints set, the rest neutral.
+Eigen::VectorXd toQ( const CollisionChecker &checker,
+                     const std::unordered_map<std::string, double> &positions )
+{
+  Eigen::VectorXd q = checker.neutralConfiguration();
+  for ( const auto &[name, position] : positions ) {
+    CollisionChecker::writeJointPosition( q, checker.getJointQSlot( name ), position );
+  }
+  return q;
+}
+
 // Athena arm joints
 const std::vector<std::string> ARM_JOINTS = { "arm_joint_1", "arm_joint_2", "arm_joint_3",
                                               "arm_joint_4", "arm_joint_5", "arm_joint_6",
@@ -147,7 +158,7 @@ void BM_CollisionChecker( benchmark::State &state )
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config );
+    auto result = checker->checkCollisionQ( toQ( *checker, config ) );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -181,7 +192,7 @@ void BM_CollisionChecker_Folded( benchmark::State &state )
 
   std::size_t i = 0;
   for ( auto _ : state ) {
-    auto result = checker->checkCollision( configs[i % configs.size()] );
+    auto result = checker->checkCollisionQ( toQ( *checker, configs[i % configs.size()] ) );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -199,7 +210,7 @@ void BM_CollisionChecker_DistanceOnly( benchmark::State &state )
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config );
+    auto result = checker->checkCollisionQ( toQ( *checker, config ) );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -222,7 +233,7 @@ void BM_Broadphase( benchmark::State &state )
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config );
+    auto result = checker->checkCollisionQ( toQ( *checker, config ) );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -243,7 +254,7 @@ void BM_Broadphase_Folded( benchmark::State &state )
 
   std::size_t i = 0;
   for ( auto _ : state ) {
-    auto result = checker->checkCollision( configs[i % configs.size()] );
+    auto result = checker->checkCollisionQ( toQ( *checker, configs[i % configs.size()] ) );
     benchmark::DoNotOptimize( result );
     ++i;
   }
@@ -261,7 +272,7 @@ void BM_Broadphase_DistanceOnly( benchmark::State &state )
   std::size_t i = 0;
   for ( auto _ : state ) {
     const auto &config = bs.random_configs[i % bs.random_configs.size()];
-    auto result = checker->checkCollision( config );
+    auto result = checker->checkCollisionQ( toQ( *checker, config ) );
     benchmark::DoNotOptimize( result );
     ++i;
   }

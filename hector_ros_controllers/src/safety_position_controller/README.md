@@ -2,7 +2,7 @@
 
 Chained position controller that projects the incoming reference onto a safe motion:
 bounded velocity/acceleration, position-limit braking, self-collision velocity dampers
-with flow-around (ProxQP), per-joint deviation boxes, and a stall/park state machine.
+with flow-around (dual active-set QP), per-joint deviation boxes, and a stall/park state machine.
 
 ## Components
 
@@ -96,12 +96,14 @@ Measured in a **Release** build (`-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON`
 | `BM_Broadphase_Folded` (gradients) | 43 µs |
 | `BM_Broadphase` (gradients) | 84 µs |
 | `BM_CollisionChecker` (brute force) | 437 µs |
-| `BM_SolveWarmStarted/7/0` (QP, no collision rows) | 11.3 µs |
-| `BM_SolveWarmStarted/7/10` (QP, 10 collision rows) | 11.8 µs |
+| `BM_SolveWarmStarted/7/0` (QP, no collision rows) | 0.6 µs |
+| `BM_SolveWarmStarted/7/10` (QP, 10 collision rows) | 0.8 µs |
+| `BM_AthenaArm/16` (QP, 16 of 64 collision rows) | 1.1 µs |
+| `BM_AthenaArm/64` (QP, 64 of 64 collision rows) | 2.1 µs |
+| `BM_AthenaFlipper/16` (QP, 16 of 64 collision rows) | 0.4 µs |
 
-The QP row count is bounded by `qp_max_pair_constraints`, which both Athena configs now set
-to 64. The table above stops at 10, the old default, so it no longer covers the deployed
-operating point — extend the benchmark before quoting a solve time for the robot.
+The QP rows are bounded by `qp_max_pair_constraints` (default 64, as in both Athena configs); only the
+rows of the current collision pairs enter the solve.
 
 The narrow phase runs in a single pass: coal returns the witness points from the same
 query as the distance, so asking for them up front is cheaper than re-running the query
@@ -117,9 +119,7 @@ MAKEFLAGS=-j2 colcon build --packages-select hector_ros_controllers \
 ./build/hector_ros_controllers/benchmark_safety_qp_limiter
 ```
 
-The default (Debug) build is roughly 40x slower for the QP and must not be used for
-timing claims. On the robot the arm cycle measured 57 µs mean / 194 µs max QP solve time
-at 2.3 solver iterations.
+The default (Debug) build is much slower and must not be used for timing claims.
 
 ## Coverage
 

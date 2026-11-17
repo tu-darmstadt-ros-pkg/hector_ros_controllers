@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,6 +15,8 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 
 #include <safety_position_controller/collision_checker.hpp>
+#include <safety_position_controller/collision_visualizer.hpp>
+#include <safety_position_controller/debug_handoff.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
 
 #include <hector_ros_controllers_msgs/msg/safety_position_controller_status.hpp>
@@ -31,6 +35,9 @@ namespace safety_position_controller
  * introspection publisher, the debug joint-state publishers and their dynamically
  * reconfigurable parameter callbacks, plus the human-readable formatters used in
  * warnings. Pure consumer of pipeline/checker state — never mutates control state.
+ *
+ * Debug output is captured on the control thread (capture*()) and built and published
+ * by publishDebug() on a timer that runs only while some debug output is enabled.
  */
 class SafetyDiagnostics
 {
@@ -50,12 +57,11 @@ public:
   SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr node, const Params &params,
                      const CollisionChecker *checker );
 
-  /// Store the activation-resolved joint names and current limits: publishStatus() runs
-  /// on executor threads (status timer, service callbacks) and must not read the
-  /// controller's mutable Params fields, which on_activate rewrites in place. Held in a
-  /// box because on_activate can run while a service callback publishes.
+  /// Copy what publishStatus() needs out of the Params, which on_activate rewrites while
+  /// executor threads may publish, and size the debug snapshots. Call from the thread
+  /// that writes the Params, not concurrently with capture*().
   void configure( std::vector<std::string> joint_names, std::vector<double> stiff_current_limits,
-                  std::vector<double> compliant_current_limits );
+                  std::vector<double> compliant_current_limits, std::size_t max_constraints );
 
   /// Refresh the status snapshot from the control thread. The write always lands, so a
   /// publishStatus() later in the same cycle reports this cycle; blocking is bounded by
@@ -66,13 +72,22 @@ public:
   /// Publish ~/status (latched) from the latest snapshot; callable from any thread.
   void publishStatus( const StatusFlags &flags );
 
-  /// Publish per-cycle QP introspection on ~/qp_debug if enabled (dynamic parameter).
-  void maybePublishQpDebug( const SafetyPipeline &pipeline,
-                            const std::vector<double> &processed_reference );
+  /// Capture this cycle's ~/qp_debug content if enabled. Control thread; does not allocate.
+  void captureQpDebug( const rclcpp::Time &stamp, const SafetyPipeline &pipeline,
+                       const std::vector<double> &processed_reference );
 
-  /// Debug joint-state echo of the incoming references / outgoing commands (if enabled).
-  void publishJointStateIn( const std::vector<double> &positions );
-  void publishJointStateOut( const std::vector<double> &positions );
+  /// Capture the incoming references / outgoing commands if enabled. Control thread.
+  void captureJointStateIn( const rclcpp::Time &stamp, const std::vector<double> &positions );
+  void captureJointStateOut( const rclcpp::Time &stamp, const std::vector<double> &positions );
+
+  /// Publish what was captured since the last call, markers included. Non-realtime.
+  void publishDebug();
+
+  /// Call publishDebug() from a wall timer every @p period [s] while some debug output
+  /// is enabled. @p visualizer (may be null) is kept alive until stopDebugPublishing(),
+  /// and past it for a tick still running on another thread.
+  void startDebugPublishing( double period, std::shared_ptr<CollisionVisualizer> visualizer );
+  void stopDebugPublishing();
 
   /// Human-readable per-joint blocked-direction analysis (used in the stall warning).
   std::string formatBlockedDirections( const SafetyPipeline &pipeline ) const;
@@ -86,6 +101,40 @@ public:
                                     double max_distance, std::size_t fallback_pair_index ) const;
 
 private:
+  /// One cycle of ~/qp_debug content, sized by configure().
+  struct QpDebugSnapshot {
+    rclcpp::Time stamp{ int64_t{ 0 }, RCL_ROS_TIME };
+    Eigen::VectorXd v_des, v_cmd, box_lb, box_ub, q_cmd;
+    std::vector<double> q_ref;
+    std::size_t num_pairs{ 0 };
+    std::vector<std::size_t> pair_indices;
+    Eigen::VectorXd pair_distances, pair_rhs, pair_velocities;
+    bool solved{ false };
+    bool braking{ false };
+    bool push_out_relaxed{ false };
+    bool bounds_conflict{ false };
+    double solve_time_us{ 0.0 };
+    long iterations{ 0 };
+  };
+
+  struct JointStateSnapshot {
+    rclcpp::Time stamp{ int64_t{ 0 }, RCL_ROS_TIME };
+    std::vector<double> position;
+  };
+
+  struct JointStateChannel {
+    DebugHandoff<JointStateSnapshot> handoff;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr pub;
+  };
+
+  void captureJointState( JointStateChannel &channel, const rclcpp::Time &stamp,
+                          const std::vector<double> &positions );
+  /// Run the debug timer iff some output is enabled. Requires timer_mutex_.
+  void updateDebugTimer();
+  /// The message of a not yet published capture, or nothing. Require debug_mutex_.
+  std::optional<sensor_msgs::msg::JointState> buildJointState( JointStateChannel &channel );
+  std::optional<hector_ros_controllers_msgs::msg::SafetyQpDebug> buildQpDebug();
+
   /// Trivially-copyable view of the status fields written from the controller update
   /// thread; see updateSnapshot() for the synchronization contract.
   struct StatusSnapshot {
@@ -110,6 +159,8 @@ private:
     std::vector<std::string> joint_names;
     std::vector<double> stiff_current_limits;
     std::vector<double> compliant_current_limits;
+    bool current_limits_enabled{ false };
+    bool collision_check_enabled{ false };
   };
   realtime_tools::RealtimeThreadSafeBox<StatusConfig> config_box_;
 
@@ -118,10 +169,21 @@ private:
 
   std::atomic<bool> qp_debug_enabled_{ false };
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>::SharedPtr qp_debug_pub_;
+  DebugHandoff<QpDebugSnapshot> qp_handoff_;
 
   std::atomic<bool> debug_js_enabled_{ false };
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_in_js_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr debug_out_js_pub_;
+  JointStateChannel js_in_;
+  JointStateChannel js_out_;
+
+  /// Written by configure(), read by publishDebug() while it builds.
+  std::mutex debug_mutex_;
+  std::vector<std::string> debug_joint_names_;
+  std::vector<std::string> pair_names_; ///< "a<->b" per collision pair index
+
+  /// Parameter callbacks, activation and the timer itself run on different threads.
+  std::mutex timer_mutex_;
+  rclcpp::TimerBase::SharedPtr debug_timer_;
+  std::shared_ptr<CollisionVisualizer> debug_visualizer_;
 
   std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
   std::shared_ptr<rclcpp::ParameterCallbackHandle> cb_handle_debug_pubs_;

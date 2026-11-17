@@ -4,16 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
-
-namespace proxsuite::proxqp::dense
-{
-template<typename T>
-struct QP;
-} // namespace proxsuite::proxqp::dense
 
 namespace safety_position_controller
 {
+
+class DualActiveSetQp;
 
 /**
  * @brief Parameters for the velocity-damper safety QP.
@@ -42,11 +39,31 @@ struct SafetyQpParams {
   std::size_t max_collision_constraints{ 10 }; ///< preallocated collision rows (closest kept)
 };
 
-/// One linearized collision constraint: normal^T v >= damper(distance).
-/// normal is dd/dv projected onto the controlled joints (size n).
-struct QpCollisionConstraint {
-  Eigen::VectorXd normal;
-  double distance{ 0.0 };
+/// Linearized collision constraints normal(k)^T v >= damper(distance(k)), with dd/dv
+/// projected onto the controlled joints as normal. Allocates only in reserve().
+class QpCollisionConstraints
+{
+public:
+  /// Room for @p capacity constraints over @p n joints; drops the stored ones.
+  void reserve( Eigen::Index capacity, Eigen::Index n );
+
+  void clear() { size_ = 0; }
+
+  /// @return false (nothing stored) if the storage is full
+  /// @pre @p normal has size n
+  bool push( const Eigen::Ref<const Eigen::VectorXd> &normal, double distance );
+
+  Eigen::Index size() const { return size_; }
+  bool empty() const { return size_ == 0; }
+  auto normal( const Eigen::Index k ) const { return normals_.row( k ); }
+  double distance( const Eigen::Index k ) const { return distances_[k]; }
+  auto normals() const { return normals_.topRows( size_ ); } ///< one per row
+  auto distances() const { return distances_.head( size_ ); }
+
+private:
+  Eigen::MatrixXd normals_;
+  Eigen::VectorXd distances_;
+  Eigen::Index size_{ 0 };
 };
 
 /// Per-cycle input. All vectors size n.
@@ -60,7 +77,10 @@ struct SafetyQpInput {
   /// clamped toward zero velocity at its deceleration limit and then pinned there, so
   /// the QP cannot recruit it to flow around or push out of a collision.
   std::vector<uint8_t> hold;
-  std::vector<QpCollisionConstraint> collisions; ///< sorted closest-first; extra rows dropped
+  QpCollisionConstraints collisions; ///< sorted closest-first; extra rows dropped
+  /// Time step this solve covers [s], > 0: the acceleration box and the braking bounds
+  /// are per step. Unset: params.dt.
+  std::optional<double> dt;
 };
 
 /// Per-cycle output.
@@ -75,8 +95,8 @@ struct SafetyQpResult {
   bool push_out_relaxed{ false };
   int num_collision_constraints{ 0 };
   double solve_time_us{ 0.0 };
-  long iterations{ 0 };
-  // Per collision constraint (size num_collision_constraints), for debugging:
+  long iterations{ 0 }; ///< active-set additions and drops, summed over all solve stages
+  // Per collision constraint; the first num_collision_constraints entries are valid.
   Eigen::VectorXd collision_rhs;      ///< final required minimum of g^T v (after relaxation)
   Eigen::VectorXd collision_velocity; ///< achieved g^T v at the returned v
 };
@@ -92,10 +112,11 @@ struct SafetyQpResult {
  *
  * Instead of stopping at obstacles, the solution slides tangentially along the active
  * constraints ("flow around"). If the QP is infeasible or the solver fails, the result
- * falls back to braking to zero at the deceleration limit.
+ * falls back to braking to zero at the deceleration limit. The QP is solved exactly by a
+ * dual active-set method (Goldfarb-Idnani).
  *
- * Not thread-safe; call solve() from a single (control) thread. The QP matrices are
- * allocated in the constructor; solve() still allocates its result vectors.
+ * Not thread-safe; call solve() from a single (control) thread. All storage is allocated
+ * in the constructor; solve() does not allocate.
  */
 class SafetyQpLimiter
 {
@@ -113,7 +134,7 @@ public:
 
   /**
    * @brief Solve the per-cycle QP.
-   * @param input see SafetyQpInput; all vectors must have size n
+   * @param input see SafetyQpInput; all vectors, and the collision normals, must have size n
    * @return velocity command + diagnostics (never NaN; falls back to braking). Refers
    * to a member workspace: valid until the next solve(), like lastBoxLower()/Upper().
    */
@@ -142,9 +163,6 @@ public:
   const Eigen::VectorXd &lastBoxLower() const { return box_lb_; }
   const Eigen::VectorXd &lastBoxUpper() const { return box_ub_; }
 
-  /// Update damper distances (e.g. after a parameter change). Gains/limits stay fixed.
-  void setCollisionDistances( double d_pad, double d_zone );
-
 private:
   /// Per-joint velocity box from velocity/acceleration/position limits.
   /// On a per-joint conflict (cannot satisfy both), the box collapses to the braking
@@ -152,20 +170,19 @@ private:
   /// @param crawl if true, additionally clamp toward +-contact_crawl_speed (decaying
   /// from the previous velocity at the deceleration limit). Joints flagged in
   /// input.hold get the same clamp toward zero, which overrides the crawl speed.
-  void computeVelocityBounds( const SafetyQpInput &input, bool crawl, bool &conflict );
+  void computeVelocityBounds( const SafetyQpInput &input, double dt, bool crawl, bool &conflict );
 
-  /// Velocity that brakes toward zero at the deceleration limit, written into @p v.
-  void brakingVelocity( const Eigen::VectorXd &v_prev, Eigen::VectorXd &v ) const;
+  /// Velocity that brakes toward zero at the deceleration limit over @p dt, written into @p v.
+  void brakingVelocity( const Eigen::VectorXd &v_prev, double dt, Eigen::VectorXd &v ) const;
 
   std::size_t n_;
   SafetyQpParams params_;
 
-  std::unique_ptr<proxsuite::proxqp::dense::QP<double>> qp_;
-  bool first_solve_{ true };
+  std::unique_ptr<DualActiveSetQp> qp_;
 
-  // Preallocated QP matrices: rows = n (box) + max_collision_constraints + 1 (deviation)
-  Eigen::MatrixXd H_, C_;
-  Eigen::VectorXd g_, l_, u_;
+  // Preallocated QP matrices: rows = n (box) + max_collision_constraints
+  Eigen::MatrixXd C_;
+  Eigen::VectorXd l_, u_;
   Eigen::VectorXd box_lb_, box_ub_; // per-joint bounds (also used to clamp the solution)
   SafetyQpResult result_;           // reused across solves; returned by reference
 };

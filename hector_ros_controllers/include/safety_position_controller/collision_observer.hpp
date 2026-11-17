@@ -91,6 +91,7 @@ private:
   Eigen::VectorXd q_;                                         ///< check configuration
   std::vector<SafetyPipeline::PairCandidate> pair_candidates_;
   std::vector<double> directional_; ///< workspace for directionalInfo()
+  Eigen::VectorXd projected_;       ///< workspace for directionalInfo()
   std::vector<std::string> unmodeled_joints_;
   const std::vector<CollisionResult::PairInfo> *last_safety_zone_pairs_{ nullptr };
   double last_min_distance_{ std::numeric_limits<double>::max() };

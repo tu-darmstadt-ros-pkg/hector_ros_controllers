@@ -4,6 +4,7 @@
 #include <chrono>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -145,9 +146,10 @@ private:
    * @brief Write per-joint position commands (non-finite entries are skipped).
    * A handle locked by another thread is logged and left unwritten: the hardware then
    * keeps the previous command.
+   * @param time time of this control cycle, for the debug echo
    * @param commands commanded positions (size == params_.joints.size())
    */
-  void write_position_commands( const std::vector<double> &commands );
+  void write_position_commands( const rclcpp::Time &time, const std::vector<double> &commands );
 
   /// Write current-limit commands (stiff/compliant) if the interfaces were claimed.
   void write_current_limits();
@@ -181,7 +183,7 @@ private:
    * write. Translates pipeline/observer events into logs.
    * @return true if an event occurred that the caller should publish a status for
    */
-  bool run_safety_pipeline( const rclcpp::Duration &period );
+  bool run_safety_pipeline( const rclcpp::Time &time, const rclcpp::Duration &period );
 
   /// True while safety checks are bypassed.
   bool bypass_active() const
@@ -237,6 +239,9 @@ private:
   /// A wall timer would be worse still, being a shared_ptr across the same threads and
   /// destroyed inside the control loop.
   std::atomic<std::chrono::steady_clock::rep> safety_bypass_deadline_{ 0 };
+  /// params_.safety_bypass_timeout for the bypass service, which runs on an executor
+  /// thread while on_activate may rewrite params_.
+  std::atomic<double> safety_bypass_timeout_{ 0.0 };
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr
       bypass_safety_checks_service_; ///< service to toggle bypass
 
@@ -250,12 +255,14 @@ private:
   // ---- Collision checking ----
   std::unique_ptr<CollisionChecker> collision_checker_;   ///< optional self-collision checker
   std::unique_ptr<CollisionObserver> collision_observer_; ///< per-cycle observation + edge state
-  std::unique_ptr<CollisionVisualizer> collision_visualizer_; ///< RViz markers; null when disabled
+  /// RViz markers; null when disabled. Shared with the debug timer, which may still be
+  /// publishing from it when an activation replaces it.
+  std::shared_ptr<CollisionVisualizer> collision_visualizer_;
   std::vector<int> joint_v_index_; ///< maps controlled joint index → pinocchio velocity-space index
-  /// SRDF XML (semantic). Written by the subscriber callback before srdf_received_ is
-  /// set, and read by on_configure only after it observes that flag — the atomic is the
-  /// handshake that makes the cross-thread string write safe.
+  /// SRDF XML (semantic). The subscriber callback may replace it while on_configure
+  /// reads it, so both hold srdf_mutex_.
   std::string srdf_;
+  std::mutex srdf_mutex_;
   std::atomic<bool> srdf_received_{ false }; ///< latched SRDF received
   double last_manipulability_{ 0.0 };        ///< latest Yoshikawa manipulability index
   int manipulability_period_{ 1 };           ///< cycles between manipulability refreshes

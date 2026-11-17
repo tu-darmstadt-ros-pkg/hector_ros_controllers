@@ -13,10 +13,12 @@ CollisionObserver::CollisionObserver( CollisionChecker *checker,
       controlled_joints_( std::move( controlled_joints ) ),
       joint_v_index_( std::move( joint_v_index ) )
 {
+  projected_ = Eigen::VectorXd::Zero( static_cast<Eigen::Index>( joint_v_index_.size() ) );
   if ( !checker_ ) {
     return;
   }
   q_ = checker_->neutralConfiguration();
+  pair_candidates_.reserve( checker_->getNumCollisionPairs() );
   // Resolving the slots once also tells us, once, which joints the collision model does
   // not represent: their positions are silently held at the neutral value.
   const auto resolve = [this]( const std::vector<std::string> &names,
@@ -105,7 +107,6 @@ CollisionObserver::observe( const bool checks_active, const std::vector<double> 
     was_in_collision_ = false;
   }
 
-  pair_candidates_.reserve( cc_result.safety_zone_pairs.size() );
   for ( const auto &pair_info : cc_result.safety_zone_pairs ) {
     pair_candidates_.push_back( { pair_info.distance, &pair_info.gradient, pair_info.pair_index } );
   }
@@ -124,13 +125,8 @@ const std::vector<double> &CollisionObserver::directionalInfo( const Eigen::Vect
     if ( pi.pair_index >= num_pairs ) {
       continue;
     }
-    double dot = 0.0;
-    for ( size_t i = 0; i < joint_v_index_.size(); ++i ) {
-      if ( joint_v_index_[i] >= 0 && joint_v_index_[i] < pi.gradient.size() ) {
-        dot += pi.gradient[joint_v_index_[i]] * velocity[static_cast<Eigen::Index>( i )];
-      }
-    }
-    directional_[pi.pair_index] = dot;
+    projectOntoJoints( pi.gradient, joint_v_index_, projected_ );
+    directional_[pi.pair_index] = projected_.dot( velocity );
   }
   return directional_;
 }

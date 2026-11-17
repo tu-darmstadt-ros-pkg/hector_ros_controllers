@@ -22,6 +22,8 @@
 
 #include "safety_position_controller/collision_checker.hpp"
 
+#include <coal/shape/geometric_shapes.h>
+
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
@@ -52,6 +54,17 @@ std::string loadUrdfFile( const std::string &filename )
     throw std::runtime_error( "Cannot open test URDF file: " + path );
   }
   return std::string( std::istreambuf_iterator<char>( ifs ), std::istreambuf_iterator<char>() );
+}
+
+/// Configuration of @p checker's model with the named joints set, the rest neutral.
+Eigen::VectorXd toQ( const CollisionChecker &checker,
+                     const std::unordered_map<std::string, double> &positions )
+{
+  Eigen::VectorXd q = checker.neutralConfiguration();
+  for ( const auto &[name, position] : positions ) {
+    CollisionChecker::writeJointPosition( q, checker.getJointQSlot( name ), position );
+  }
+  return q;
 }
 
 /// Brute-force reference: compute minimum distance using pinocchio::computeDistances()
@@ -178,7 +191,7 @@ TEST_F( CollisionCheckerTest, ZeroConfig )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
   Eigen::VectorXd q = buildQ( ref_model_, positions );
   double bf_min = bruteForceMinDistance( ref_model_, ref_data_, ref_geom_model_, ref_geom_data_, q );
@@ -196,7 +209,7 @@ TEST_F( CollisionCheckerTest, CollisionConfig )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", M_PI }, { "joint3", -M_PI / 2.0 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
   Eigen::VectorXd q = buildQ( ref_model_, positions );
   double bf_min = bruteForceMinDistance( ref_model_, ref_data_, ref_geom_model_, ref_geom_data_, q );
@@ -220,7 +233,7 @@ TEST_F( CollisionCheckerTest, SweepJoint2 )
     std::unordered_map<std::string, double> positions = {
         { "joint1", 0.0 }, { "joint2", angle }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-    auto result = checker->checkCollision( positions );
+    auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
     Eigen::VectorXd q = buildQ( ref_model_, positions );
     double bf_min =
@@ -246,7 +259,7 @@ TEST_F( CollisionCheckerTest, RandomConfigurations )
                                                           { "joint3", dist( rng ) },
                                                           { "joint4", dist( rng ) } };
 
-    auto result = checker->checkCollision( positions );
+    auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
     Eigen::VectorXd q = buildQ( ref_model_, positions );
     double bf_min =
@@ -265,8 +278,8 @@ TEST_F( CollisionCheckerTest, CacheStillWorks )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.5 }, { "joint2", 0.3 }, { "joint3", -0.2 }, { "joint4", 0.0 } };
 
-  auto result1 = checker->checkCollision( positions );
-  auto result2 = checker->checkCollision( positions );
+  auto result1 = checker->checkCollisionQ( toQ( *checker, positions ) );
+  auto result2 = checker->checkCollisionQ( toQ( *checker, positions ) );
 
   // Identical call should return cached result
   EXPECT_DOUBLE_EQ( result1.min_distance, result2.min_distance );
@@ -274,7 +287,7 @@ TEST_F( CollisionCheckerTest, CacheStillWorks )
 
   // Move beyond epsilon — should recompute
   positions["joint1"] += cache_epsilon * 10.0;
-  auto result3 = checker->checkCollision( positions );
+  auto result3 = checker->checkCollisionQ( toQ( *checker, positions ) );
 
   // Should still be valid (not necessarily equal since position changed)
   Eigen::VectorXd q = buildQ( ref_model_, positions );
@@ -296,7 +309,7 @@ TEST_F( CollisionCheckerTest, ContinuousJointEncoding )
     std::unordered_map<std::string, double> positions = {
         { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", angle } };
 
-    auto result = checker->checkCollision( positions );
+    auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
     Eigen::VectorXd q = buildQ( ref_model_, positions );
     double bf_min =
@@ -318,7 +331,7 @@ TEST_F( CollisionCheckerTest, NaNInputReturnsSafeResult )
       { "joint3", 0.0 },
       { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   EXPECT_TRUE( result.in_collision ) << "NaN input should report collision (safe default)";
 }
 
@@ -339,7 +352,7 @@ TEST_F( CollisionCheckerTest, PairFilteringPreserved )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.5 }, { "joint2", 0.3 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   EXPECT_GT( result.min_distance, 0.0 );
   EXPECT_FALSE( result.in_collision );
 }
@@ -359,13 +372,13 @@ TEST_F( CollisionCheckerTest, ReinitializationRebuildsTheModel )
   const std::size_t pairs_first = checker->getNumCollisionPairs();
   const std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
-  const double distance_first = checker->checkCollision( positions ).min_distance;
+  const double distance_first = checker->checkCollisionQ( toQ( *checker, positions ) ).min_distance;
 
   ASSERT_TRUE( checker->initFromXml( urdf_xml_, "", all_joints ) );
 
   EXPECT_EQ( checker->getNv(), nv_first );
   EXPECT_EQ( checker->getNumCollisionPairs(), pairs_first );
-  const auto result = checker->checkCollision( positions );
+  const auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   EXPECT_FALSE( result.in_collision );
   EXPECT_NEAR( result.min_distance, distance_first, 1e-10 );
 }
@@ -378,13 +391,13 @@ TEST_F( CollisionCheckerTest, CollisionPaddingWorks )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-  auto result_no_pad = checker_no_pad->checkCollision( positions );
+  auto result_no_pad = checker_no_pad->checkCollisionQ( toQ( *checker_no_pad, positions ) );
   ASSERT_FALSE( result_no_pad.in_collision );
   const double actual_dist = result_no_pad.min_distance;
 
   // With padding larger than actual distance, should be in collision
   auto checker_with_pad = makeChecker( actual_dist + 0.01 );
-  auto result_with_pad = checker_with_pad->checkCollision( positions );
+  auto result_with_pad = checker_with_pad->checkCollisionQ( toQ( *checker_with_pad, positions ) );
   EXPECT_TRUE( result_with_pad.in_collision );
   EXPECT_NEAR( result_with_pad.min_distance, actual_dist, 1e-10 );
 }
@@ -412,17 +425,17 @@ TEST_F( CollisionCheckerTest, TransientNonFiniteInputDoesNotPoisonTheCache )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.5 }, { "joint2", 0.3 }, { "joint3", -0.2 }, { "joint4", 0.0 } };
 
-  auto good = checker->checkCollision( positions );
+  auto good = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_FALSE( good.in_collision );
 
   auto glitched = positions;
   glitched["joint2"] = std::numeric_limits<double>::quiet_NaN();
-  auto unsafe = checker->checkCollision( glitched );
+  auto unsafe = checker->checkCollisionQ( toQ( *checker, glitched ) );
   EXPECT_TRUE( unsafe.in_collision );
 
   // The robot did not move, so the cache key still matches the pre-glitch check: the
   // recovered input must be recomputed, not answered with the latched unsafe result.
-  auto recovered = checker->checkCollision( positions );
+  auto recovered = checker->checkCollisionQ( toQ( *checker, positions ) );
   EXPECT_FALSE( recovered.in_collision );
   EXPECT_DOUBLE_EQ( recovered.min_distance, good.min_distance );
 }
@@ -435,14 +448,14 @@ TEST_F( CollisionCheckerTest, PaddingUpdateInvalidatesTheCache )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-  auto before = checker->checkCollision( positions );
+  auto before = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_FALSE( before.in_collision );
   ASSERT_GT( before.min_distance, 0.0 );
 
   // Raising the padding above the current clearance must re-classify the unchanged
   // configuration instead of serving the result cached under the old padding.
   checker->updateCollisionPadding( before.min_distance + 0.01 );
-  auto after = checker->checkCollision( positions );
+  auto after = checker->checkCollisionQ( toQ( *checker, positions ) );
   EXPECT_TRUE( after.in_collision );
   EXPECT_NEAR( after.min_distance, before.min_distance, 1e-10 );
 }
@@ -462,7 +475,7 @@ TEST_F( CollisionCheckerTest, MultiJointSweep )
       std::unordered_map<std::string, double> positions = {
           { "joint1", 0.0 }, { "joint2", a2 }, { "joint3", a3 }, { "joint4", 0.0 } };
 
-      auto result = checker->checkCollision( positions );
+      auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
       Eigen::VectorXd q = buildQ( ref_model_, positions );
       double bf_min =
@@ -489,7 +502,7 @@ TEST_F( CollisionCheckerTest, NonPenetratingExactMatch )
     std::unordered_map<std::string, double> positions = {
         { "joint1", 0.0 }, { "joint2", a2 }, { "joint3", a3 }, { "joint4", 0.0 } };
 
-    auto result = checker->checkCollision( positions );
+    auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
     Eigen::VectorXd q = buildQ( ref_model_, positions );
     double bf_min =
@@ -525,7 +538,7 @@ TEST_F( CollisionCheckerTest, GradientMatchesFiniteDifference )
     const auto &positions = configs[ci];
 
     // Get result with gradient
-    auto result = checker->checkCollision( positions );
+    auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
     // Skip if no pairs in safety zone (e.g. all pairs have distance > safety_zone)
     if ( result.safety_zone_pairs.empty() )
       continue;
@@ -543,7 +556,7 @@ TEST_F( CollisionCheckerTest, GradientMatchesFiniteDifference )
 
       // Need to invalidate cache — use a different checker or large perturbation
       // Actually, the cache epsilon is 0 for this checker, so different q always recomputes
-      auto result_plus = checker->checkCollision( perturbed );
+      auto result_plus = checker->checkCollisionQ( toQ( *checker, perturbed ) );
 
       double fd_gradient = ( result_plus.min_distance - result.min_distance ) / eps;
 
@@ -569,7 +582,7 @@ TEST_F( CollisionCheckerTest, GradientSignApproaching )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 1.5 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_FALSE( result.safety_zone_pairs.empty() );
 
   const auto &gradient = result.safety_zone_pairs[0].gradient;
@@ -582,7 +595,7 @@ TEST_F( CollisionCheckerTest, GradientSignApproaching )
   double delta = 0.1;
   auto positions_plus = positions;
   positions_plus["joint2"] += delta;
-  auto result_plus = checker->checkCollision( positions_plus );
+  auto result_plus = checker->checkCollisionQ( toQ( *checker, positions_plus ) );
 
   // If distance decreased, the motion is approaching
   if ( result_plus.min_distance < result.min_distance ) {
@@ -604,7 +617,7 @@ TEST_F( CollisionCheckerTest, GradientSignRetreating )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 2.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_FALSE( result.safety_zone_pairs.empty() );
   ASSERT_GT( result.min_distance, 0.0 )
       << "Config must be non-penetrating for gradient to be valid";
@@ -617,7 +630,7 @@ TEST_F( CollisionCheckerTest, GradientSignRetreating )
   double delta = -0.1;
   auto positions_minus = positions;
   positions_minus["joint2"] += delta;
-  auto result_minus = checker->checkCollision( positions_minus );
+  auto result_minus = checker->checkCollisionQ( toQ( *checker, positions_minus ) );
 
   if ( result_minus.min_distance > result.min_distance ) {
     // The directional derivative should be positive (moving away)
@@ -638,7 +651,7 @@ TEST_F( CollisionCheckerTest, GradientComputedForAllSafetyZonePairs )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 0.8 }, { "joint3", -0.3 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
   // With a large safety zone, multiple pairs should have gradients
   EXPECT_GE( result.safety_zone_pairs.size(), 1u )
@@ -667,7 +680,7 @@ TEST_F( CollisionCheckerTest, NoGradientWhenThresholdZero )
       { "joint1", 0.0 }, { "joint2", 1.5 }, { "joint3", -0.5 }, { "joint4", 0.0 } };
 
   // Default threshold = 0 → no gradient computation
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   EXPECT_TRUE( result.safety_zone_pairs.empty() )
       << "No safety zone pairs should be computed with threshold=0";
 }
@@ -713,13 +726,13 @@ TEST_F( CollisionCheckerTest, PerformanceBenchmark )
   }
 
   // Warm up
-  for ( int i = 0; i < 10; ++i ) { checker->checkCollision( configs[i] ); }
+  for ( int i = 0; i < 10; ++i ) { checker->checkCollisionQ( toQ( *checker, configs[i] ) ); }
 
   // Benchmark
   auto t0 = std::chrono::steady_clock::now();
   std::size_t total_safety_pairs = 0;
   for ( int i = 0; i < N; ++i ) {
-    auto result = checker->checkCollision( configs[i] );
+    auto result = checker->checkCollisionQ( toQ( *checker, configs[i] ) );
     total_safety_pairs += result.safety_zone_pairs.size();
   }
   auto t1 = std::chrono::steady_clock::now();
@@ -766,7 +779,7 @@ TEST_F( CollisionCheckerBroadphaseTest, ZeroConfig )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", 0.0 }, { "joint3", 0.0 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
   Eigen::VectorXd q = buildQ( ref_model_, positions );
   double bf_min = bruteForceMinDistance( ref_model_, ref_data_, ref_geom_model_, ref_geom_data_, q );
@@ -782,7 +795,7 @@ TEST_F( CollisionCheckerBroadphaseTest, CollisionConfig )
   std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", M_PI }, { "joint3", -M_PI / 2.0 }, { "joint4", 0.0 } };
 
-  auto result = checker->checkCollision( positions );
+  auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
   Eigen::VectorXd q = buildQ( ref_model_, positions );
   double bf_min = bruteForceMinDistance( ref_model_, ref_data_, ref_geom_model_, ref_geom_data_, q );
@@ -806,7 +819,7 @@ TEST_F( CollisionCheckerBroadphaseTest, RandomConfigurations )
                                                           { "joint3", dist( rng ) },
                                                           { "joint4", dist( rng ) } };
 
-    auto result = checker->checkCollision( positions );
+    auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
 
     Eigen::VectorXd q = buildQ( ref_model_, positions );
     double bf_min =
@@ -833,7 +846,7 @@ TEST_F( CollisionCheckerBroadphaseTest, GradientMatchesFiniteDifference )
 
   for ( size_t ci = 0; ci < configs.size(); ++ci ) {
     const auto &positions = configs[ci];
-    auto result = checker->checkCollision( positions );
+    auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
     if ( result.safety_zone_pairs.empty() )
       continue;
 
@@ -846,7 +859,7 @@ TEST_F( CollisionCheckerBroadphaseTest, GradientMatchesFiniteDifference )
     for ( const auto &[name, val] : positions ) {
       auto perturbed = positions;
       perturbed[name] = val + eps;
-      auto result_plus = checker->checkCollision( perturbed );
+      auto result_plus = checker->checkCollisionQ( toQ( *checker, perturbed ) );
       double fd_gradient = ( result_plus.min_distance - result.min_distance ) / eps;
 
       int v_idx = checker->getJointVelocityIndex( name );
@@ -885,8 +898,8 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForce )
                                                           { "joint3", dist( rng ) },
                                                           { "joint4", dist( rng ) } };
 
-    auto bf_result = bf_checker->checkCollision( positions );
-    auto bp_result = bp_checker->checkCollision( positions );
+    auto bf_result = bf_checker->checkCollisionQ( toQ( *bf_checker, positions ) );
+    auto bp_result = bp_checker->checkCollisionQ( toQ( *bp_checker, positions ) );
 
     EXPECT_EQ( bp_result.in_collision, bf_result.in_collision ) << "Config " << i;
 
@@ -960,8 +973,8 @@ TEST_F( CollisionCheckerTest, BroadphaseMatchesBruteForceAthena )
     std::unordered_map<std::string, double> positions;
     for ( const auto &name : arm_joints ) { positions[name] = dist( rng ); }
 
-    auto bf_result = bf_checker->checkCollision( positions );
-    auto bp_result = bp_checker->checkCollision( positions );
+    auto bf_result = bf_checker->checkCollisionQ( toQ( *bf_checker, positions ) );
+    auto bp_result = bp_checker->checkCollisionQ( toQ( *bp_checker, positions ) );
 
     EXPECT_EQ( bp_result.in_collision, bf_result.in_collision ) << "Athena config " << i;
 
@@ -989,7 +1002,7 @@ TEST_F( CollisionCheckerTest, MaxSafetyZonePairsCapsAndSortsByDistance )
   const std::unordered_map<std::string, double> positions = {
       { "joint1", 0.3 }, { "joint2", 0.7 }, { "joint3", -0.4 }, { "joint4", 0.2 } };
 
-  const auto uncapped = checker->checkCollision( positions );
+  const auto uncapped = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_GT( uncapped.safety_zone_pairs.size(), 2u );
 
   // Pairs must be sorted by distance ascending, closest first
@@ -1000,7 +1013,7 @@ TEST_F( CollisionCheckerTest, MaxSafetyZonePairsCapsAndSortsByDistance )
 
   // Capping keeps only the closest pairs
   checker->setMaxSafetyZonePairs( 2 );
-  const auto capped = checker->checkCollision( positions );
+  const auto capped = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_EQ( capped.safety_zone_pairs.size(), 2u );
   EXPECT_EQ( capped.safety_zone_pairs[0].pair_index, uncapped.safety_zone_pairs[0].pair_index );
   EXPECT_EQ( capped.safety_zone_pairs[1].pair_index, uncapped.safety_zone_pairs[1].pair_index );
@@ -1093,7 +1106,7 @@ TEST_F( CollisionCheckerTest, FilterKeepsExactlyTheInfluenceablePairs )
                                                               { "finger_joint", 0.0 },
                                                               { "finger2_joint", 0.0 },
                                                               { "obstacle_joint", 0.0 } };
-  const auto result = checker->checkCollision( positions );
+  const auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   const int v_arm = checker->getJointVelocityIndex( "arm_joint" );
   ASSERT_GE( v_arm, 0 );
   bool found = false;
@@ -1153,14 +1166,14 @@ TEST_F( CollisionCheckerTest, PairCapPrefersDistinctLinkPairs )
   const std::unordered_map<std::string, double> positions = { { "joint1", 0.0 }, { "joint2", 0.0 } };
 
   // Uncapped: all 5 pairs
-  const auto uncapped = checker->checkCollision( positions );
+  const auto uncapped = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_EQ( uncapped.safety_zone_pairs.size(), 5u );
 
   // Cap 3: naive closest-3 would keep {0.10, 0.14, 0.16} — two base<->link1 duplicates —
   // and evict base<->link2 entirely. Dedup must keep the closest of EACH link pair:
   // {0.10, 0.16, 0.40}.
   checker->setMaxSafetyZonePairs( 3 );
-  const auto capped = checker->checkCollision( positions );
+  const auto capped = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_EQ( capped.safety_zone_pairs.size(), 3u );
   EXPECT_NEAR( capped.safety_zone_pairs[0].distance, 0.10, 1e-6 );
   EXPECT_NEAR( capped.safety_zone_pairs[1].distance, 0.16, 1e-6 );
@@ -1168,7 +1181,7 @@ TEST_F( CollisionCheckerTest, PairCapPrefersDistinctLinkPairs )
 
   // Cap 4: the freed slot is refilled with the closest duplicate (0.14), sorted order kept
   checker->setMaxSafetyZonePairs( 4 );
-  const auto refilled = checker->checkCollision( positions );
+  const auto refilled = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_EQ( refilled.safety_zone_pairs.size(), 4u );
   EXPECT_NEAR( refilled.safety_zone_pairs[0].distance, 0.10, 1e-6 );
   EXPECT_NEAR( refilled.safety_zone_pairs[1].distance, 0.14, 1e-6 );
@@ -1187,7 +1200,7 @@ TEST_F( CollisionCheckerTest, EveryPairGradientMatchesFiniteDifferences )
 
   auto checker = makeChecker( 0.0, 0.0 );
   checker->setSafetyZoneThreshold( 10.0 ); // all pairs in the zone → all gradients
-  const auto result = checker->checkCollision( positions );
+  const auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_GT( result.safety_zone_pairs.size(), 3u );
 
   for ( const auto &pair : result.safety_zone_pairs ) {
@@ -1208,8 +1221,8 @@ TEST_F( CollisionCheckerTest, EveryPairGradientMatchesFiniteDifferences )
       auto minus = positions;
       plus[joint_name] = value + h;
       minus[joint_name] = value - h;
-      const double d_plus = find_pair_distance( checker->checkCollision( plus ) );
-      const double d_minus = find_pair_distance( checker->checkCollision( minus ) );
+      const double d_plus = find_pair_distance( checker->checkCollisionQ( toQ( *checker, plus ) ) );
+      const double d_minus = find_pair_distance( checker->checkCollisionQ( toQ( *checker, minus ) ) );
       ASSERT_FALSE( std::isnan( d_plus ) || std::isnan( d_minus ) );
 
       const double fd = ( d_plus - d_minus ) / ( 2.0 * h );
@@ -1229,7 +1242,7 @@ TEST_F( CollisionCheckerTest, PenetrationGradientPointsOutward )
   const std::unordered_map<std::string, double> positions = {
       { "joint1", 0.0 }, { "joint2", M_PI }, { "joint3", -M_PI / 2.0 }, { "joint4", 0.0 } };
 
-  const auto result = checker->checkCollision( positions );
+  const auto result = checker->checkCollisionQ( toQ( *checker, positions ) );
   ASSERT_TRUE( result.in_collision );
 
   const CollisionResult::PairInfo *worst = nullptr;
@@ -1252,7 +1265,7 @@ TEST_F( CollisionCheckerTest, PenetrationGradientPointsOutward )
       value += h * worst->gradient[vi];
     }
   }
-  const auto result2 = checker->checkCollision( perturbed );
+  const auto result2 = checker->checkCollisionQ( toQ( *checker, perturbed ) );
 
   double d1 = std::numeric_limits<double>::quiet_NaN();
   for ( const auto &pi : result2.safety_zone_pairs ) {
@@ -1262,6 +1275,83 @@ TEST_F( CollisionCheckerTest, PenetrationGradientPointsOutward )
   }
   ASSERT_FALSE( std::isnan( d1 ) );
   EXPECT_GT( d1, d0 ) << "moving along the gradient must increase the pair distance";
+}
+
+TEST_F( CollisionCheckerTest, ExactContactKeepsTheGradient )
+{
+  // Two spheres touching at one point: the witness points coincide, so they give no
+  // direction. The pair is exactly at the padding, where its damper row must still
+  // forbid closing in; a zero gradient would drop the row and let the slider move
+  // straight into the base.
+  const std::string urdf = R"(<?xml version="1.0"?>
+<robot name="test_exact_contact">
+  <link name="base_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <link name="slider_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <joint name="slide_joint" type="prismatic">
+    <parent link="base_link"/><child link="slider_link"/>
+    <origin xyz="0.25 0 0"/><axis xyz="1 0 0"/>
+    <limit lower="-1.0" upper="1.0" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>)";
+
+  for ( const bool broadphase : { false, true } ) {
+    CollisionChecker checker( node_ );
+    checker.setBroadphase( broadphase );
+    ASSERT_TRUE( checker.initFromXml( urdf, "", { "slide_joint" } ) );
+    checker.setSafetyZoneThreshold( 0.05 );
+
+    const auto &result = checker.checkCollisionQ( checker.neutralConfiguration() );
+    ASSERT_EQ( result.safety_zone_pairs.size(), 1u ) << "broadphase " << broadphase;
+    const auto &pair = result.safety_zone_pairs.front();
+    ASSERT_EQ( pair.distance, 0.0 ) << "broadphase " << broadphase;
+    const int vi = checker.getJointVelocityIndex( "slide_joint" );
+    EXPECT_NEAR( pair.gradient[vi], 1.0, 1e-9 )
+        << "sliding away (+x) increases the distance; broadphase " << broadphase;
+  }
+}
+
+TEST_F( CollisionCheckerTest, UndeterminedDistanceCountsAsPenetration )
+{
+  // A distance coal cannot determine is unknown, not far. It must reach the pipeline as
+  // a collision without a usable gradient, so the arm brakes instead of ignoring the
+  // pair (every comparison with NaN is false: never in the zone, never the minimum).
+  const std::string urdf = R"(<?xml version="1.0"?>
+<robot name="test_undetermined_distance">
+  <link name="base_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <link name="slider_link">
+    <collision><geometry><sphere radius="0.125"/></geometry></collision>
+  </link>
+  <joint name="slide_joint" type="prismatic">
+    <parent link="base_link"/><child link="slider_link"/>
+    <origin xyz="0.5 0 0"/><axis xyz="1 0 0"/>
+    <limit lower="-1.0" upper="1.0" effort="1.0" velocity="1.0"/>
+  </joint>
+</robot>)";
+
+  for ( const bool broadphase : { false, true } ) {
+    CollisionChecker checker( node_ );
+    checker.setBroadphase( broadphase );
+    ASSERT_TRUE( checker.initFromXml( urdf, "", { "slide_joint" } ) );
+    checker.setSafetyZoneThreshold( 0.05 );
+    // The geometry is shared, so a degenerate shape can be injected after init.
+    std::static_pointer_cast<coal::Sphere>( checker.geometryModel().geometryObjects[1].geometry )->radius =
+        std::numeric_limits<double>::quiet_NaN();
+
+    const auto &result = checker.checkCollisionQ( checker.neutralConfiguration() );
+    EXPECT_TRUE( result.in_collision ) << "broadphase " << broadphase;
+    ASSERT_EQ( result.safety_zone_pairs.size(), 1u ) << "broadphase " << broadphase;
+    const auto &pair = result.safety_zone_pairs.front();
+    EXPECT_EQ( pair.distance, -std::numeric_limits<double>::infinity() );
+    EXPECT_FALSE( pair.gradient.allFinite() )
+        << "a zero gradient would read as a pair the joints cannot influence; broadphase "
+        << broadphase;
+  }
 }
 
 // __gcov_dump is only available when compiled with --coverage.
@@ -1283,7 +1373,7 @@ TEST_F( CollisionCheckerTest, ManipulabilityFrameIsResolvedUpFront )
   // Yoshikawa's sqrt(det(J J^T)) is structurally zero while the model has fewer than six
   // DoF, so this four-joint URDF can only pin the frame handling, not a non-zero index.
   const std::unordered_map<std::string, double> positions{ { "joint1", 0.3 }, { "joint2", 0.4 } };
-  checker->checkCollision( positions );
+  checker->checkCollisionQ( toQ( *checker, positions ) );
   EXPECT_DOUBLE_EQ( checker->computeManipulability(), 0.0 );
 }
 

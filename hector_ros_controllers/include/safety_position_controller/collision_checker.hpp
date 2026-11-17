@@ -32,13 +32,19 @@ struct CollisionResult {
   /// Per-pair info for pairs within the safety zone (only populated when gradient computation requested).
   struct PairInfo {
     std::size_t pair_index;   ///< index into geom_model_.collisionPairs
-    double distance;          ///< pairwise distance [m]
-    Eigen::VectorXd gradient; ///< dd/dv (size model_.nv): positive = moving apart
+    double distance;          ///< pairwise distance [m]; -inf if it could not be determined
+    Eigen::VectorXd gradient; ///< dd/dv (size model_.nv): positive = moving apart; NaN if undefined
   };
   std::vector<PairInfo> safety_zone_pairs; ///< pairs with distance < safety_zone_threshold
 };
 
 /// Self-collision checker using Pinocchio + coal; optional RViz debug markers.
+///
+/// Each pair keeps a persistent narrow-phase solver that warm-starts its support search
+/// from the previous query. Distances agree with a fresh solver to within its tolerance,
+/// but where the closest points are not unique (parallel faces) the witness points, and
+/// so the gradient direction, depend on the query history. Checks that compare two
+/// checkers therefore compare distances, not witness points.
 class CollisionChecker
 {
 public:
@@ -50,6 +56,7 @@ public:
    */
   explicit CollisionChecker( const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
                              double collision_padding = 0.0, double collision_cache_epsilon = 1e-6 );
+  ~CollisionChecker();
 
   /**
    * @brief Init from URDF/SRDF XML.
@@ -69,16 +76,6 @@ public:
    * @return names in model order
    */
   std::vector<std::string> getJointNames() const;
-
-  /**
-   * @brief Collision check from name→position map.
-   * Uses the safety-zone threshold last set via setSafetyZoneThreshold (default 0).
-   * @param joint_positions rad (rev) / m (prismatic)
-   * @return the latched result (collision flag, minimum clearance, optional per-pair
-   * gradients); valid until the next collision query
-   */
-  const CollisionResult &
-  checkCollision( const std::unordered_map<std::string, double> &joint_positions );
 
   /**
    * @brief Collision check for full q.
@@ -117,15 +114,6 @@ public:
   const Eigen::VectorXd &neutralConfiguration() const { return q_default_; }
 
   /**
-   * @brief Build a full pinocchio configuration vector from a name→position map.
-   * Unknown joints are ignored (warn-throttled); unset joints keep their neutral value.
-   * Handles 1-DoF joints and continuous joints ([cos, sin]).
-   * @param joint_positions rad (revolute) / m (prismatic)
-   * @return q of size model_.nq
-   */
-  Eigen::VectorXd buildConfiguration( const std::unordered_map<std::string, double> &joint_positions );
-
-  /**
    * @brief Set the safety-zone threshold used by subsequent collision queries.
    * When > 0, the next query computes per-pair distance gradients (dd/dv) for all
    * pairs with distance < threshold; otherwise gradient computation is skipped.
@@ -134,11 +122,6 @@ public:
    * @param threshold new threshold in [m]; 0 disables gradient computation
    */
   void setSafetyZoneThreshold( double threshold );
-
-  /**
-   * @brief Currently configured safety-zone threshold [m].
-   */
-  double getSafetyZoneThreshold() const;
 
   /**
    * @brief Get the velocity-space index for a named joint.
@@ -212,6 +195,8 @@ public:
   double computeManipulability();
 
 private:
+  struct SafetyZoneDistanceCallback;
+
   /// Forget the cached configuration: the next query recomputes instead of serving
   /// last_collision_result_. Required whenever the latch and q_last_ stop agreeing
   /// (error results) or the classification parameters change.
@@ -224,9 +209,12 @@ private:
    * @brief Compute the distance gradient for a single collision pair.
    * Requires FK + computeJointJacobians to have been called already.
    * @param pair_k index into geom_model_.collisionPairs
-   * @return gradient vector of size model_.nv
+   * @param grad output, resized to model_.nv
    */
-  Eigen::VectorXd computePairGradient( std::size_t pair_k );
+  void computePairGradient( std::size_t pair_k, Eigen::VectorXd &grad );
+
+  /// Resize the latched safety-zone pairs, recycling their gradient storage.
+  void resizeSafetyZonePairs( std::size_t count );
 
   /**
    * @brief Keep only pairs attached to controlled joints (and ancestors).
@@ -249,7 +237,9 @@ private:
   std::vector<std::size_t> primaries_;
   std::vector<std::size_t> duplicates_;
   std::vector<std::pair<pinocchio::FrameIndex, pinocchio::FrameIndex>> seen_links_;
+  std::unique_ptr<SafetyZoneDistanceCallback> distance_callback_;
   CollisionResult last_collision_result_;
+  std::vector<Eigen::VectorXd> gradient_pool_; ///< spare gradients of dropped zone pairs
 
   double collision_padding_{ 0.0 };
   double collision_cache_epsilon_{ 1e-6 };
@@ -266,8 +256,10 @@ private:
   std::string root_frame_{ "base_link" };
 
   // Pre-allocated Jacobian workspace (sized in initFromXml)
-  Eigen::MatrixXd J1_workspace_; ///< 6 × nv
-  Eigen::MatrixXd J2_workspace_; ///< 6 × nv
+  Eigen::MatrixXd J1_workspace_;  ///< 6 × nv
+  Eigen::MatrixXd J2_workspace_;  ///< 6 × nv
+  Eigen::MatrixXd Jp1_workspace_; ///< 3 × nv
+  Eigen::MatrixXd Jp2_workspace_; ///< 3 × nv
 
   static constexpr pinocchio::FrameIndex kNoFrame = std::numeric_limits<pinocchio::FrameIndex>::max();
   pinocchio::FrameIndex manipulability_frame_{ kNoFrame };

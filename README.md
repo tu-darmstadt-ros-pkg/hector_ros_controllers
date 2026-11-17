@@ -20,7 +20,7 @@ A **safety layer for joint position commands**, usable both
     * *Non-chained mode*: acts as a position controller driven by `Float64MultiArray` on `~/commands`. A message whose length is not exactly the joint count is dropped whole and the previous reference kept — a prefix would leave the joints it does not name on an older command's targets.
 * **Continuous joint handling**: continuous joints always take the shortest path to the target, and the command integrates freely while the hardware reports wrapped angles.
 * **Joint limit enforcement**: the reference is clamped to the URDF limits, and the QP brakes into them along a discrete braking envelope so a limit is approached, not overshot.
-* **Self-collision avoidance by velocity damper (ProxQP)**: rather than scaling the whole command down, each cycle solves a small dense QP over joint velocities that tracks the desired velocity subject to
+* **Self-collision avoidance by velocity damper (dual active-set QP)**: rather than scaling the whole command down, each cycle solves a small dense QP over joint velocities that tracks the desired velocity subject to
     * per-joint velocity and acceleration boxes (`acceleration_limits`, `deceleration_scale`),
     * position-limit braking bounds,
     * one Faverjon–Tournassoud damper row per collision pair inside `collision_safety_zone`, combined with the braking envelope that can still stop at `collision_padding`,
@@ -39,7 +39,7 @@ A **safety layer for joint position commands**, usable both
     * `distance_lines_safety_zone` — safety-zone pairs, colored per pair: green = motion increases distance, red = decreases, yellow = no directional info.
     * `distance_lines_collision` — colliding pairs (bright red, thicker).
 * **Status topic** (`~/status`): `SafetyPositionControllerStatus` (latched) at `status_publish_rate` and on events, carrying `min_collision_distance`, `num_pairs_in_safety_zone`, `manipulability`, the QP fields `qp_solved` / `qp_braking` / `qp_push_out_relaxed` / `qp_num_collision_constraints` / `qp_solve_time_us`, the `stalled` and `parked` flags, and the bypass / E-stop / mode flags. With `set_current_limits`, also the active per-joint current limits.
-* **QP introspection** (`~/qp_debug`, `publish_qp_debug`): per-cycle desired vs commanded velocity, the velocity box, per-constraint distance and achieved approach speed, solver state. Dynamically reconfigurable.
+* **QP introspection** (`~/qp_debug`, `publish_qp_debug`): desired vs commanded velocity, the velocity box, per-constraint distance and achieved approach speed, solver state. Built and published off the control thread by a wall timer at the control rate, so it samples the cycles when the clock runs faster than real time. Dynamically reconfigurable.
 * **E-Stop**: subscribes to `e_stop_topic` (`std_msgs/Bool`, default `~/safety_estop`). Engaging holds the positions latched at the engage edge, with no limit or collision checks. Releasing does **not** resume: the pipeline is rebased and parked, so the arm waits for a new reference. Intended for a *soft* stop; a hard stop that removes drive power faults the hardware and deactivates the controller instead.
 * **Safety Bypass Mode** (for folded arm positions):
 
@@ -65,7 +65,7 @@ A **safety layer for joint position commands**, usable both
 | `deceleration_scale`               | `double`   | `3.0`   | Braking limit = this × the acceleration limit, so stops stay snappy while re-acceleration is smooth. Bounds: [1.0, 100.0]. |
 | `default_velocity_limit`           | `double`   | `1.5`   | Fallback velocity limit [rad/s] for joints whose URDF gives none. Bounds: [0.001, 100.0].                            |
 | `qp_damper_xi`                     | `double`   | `2.0`   | Collision damper gain [1/s]. Bounds: [0.01, 100.0].                                                                  |
-| `qp_max_pair_constraints`          | `int`      | `10`    | Maximum collision pairs used as constraints per cycle (closest kept). Bounds: [1, 64].                               |
+| `qp_max_pair_constraints`          | `int`      | `64`    | Maximum collision pairs used as constraints per cycle (closest kept). Bounds: [1, 64].                               |
 | `qp_max_repulsion_speed`           | `double`   | `0.05`  | Cap [m/s] on the push-out speed demanded when a pair is inside the padding. Bounds: [0.0, 10.0].                     |
 | `qp_contact_crawl_speed`           | `double`   | `0.15`  | Velocity clamp [rad/s] while any pair is inside the padding. `0` disables. Bounds: [0.0, 100.0].                     |
 | `joint_deviation_limits.*.limit`   | `double`   | `0.25`  | Max deviation [rad] of the command from the leashed reference. One-sided: never demands catch-up. `0` disables for that joint. Bounds: [0.0, 100.0]. |
@@ -85,7 +85,7 @@ A **safety layer for joint position commands**, usable both
 | `debug_visualize_collisions`       | `bool`     | `false` | Publish full collision geometry markers.                                                                            |
 | `publish_collision_distances`      | `bool`     | `false` | Publish distance lines only. Much cheaper; ignored when `debug_visualize_collisions` is true.                        |
 | `collision_visualization_rate`     | `double`   | `25.0`  | Marker rate [Hz]; `0` publishes every control cycle. Measured in ROS time, so under a simulation clock an outside tool sees this scaled by the real-time factor. Bounds: [0.0, 1000.0]. |
-| `publish_qp_debug`                 | `bool`     | `false` | Per-cycle QP introspection on `~/qp_debug`. *(dynamically reconfigurable)*                                          |
+| `publish_qp_debug`                 | `bool`     | `false` | QP introspection on `~/qp_debug`, sampled at the control rate in wall time. *(dynamically reconfigurable)*           |
 | `publish_debug_joint_states`       | `bool`     | `false` | Debug `JointState` for references and commands. *(dynamically reconfigurable)*                                       |
 | `safety_bypass_timeout`            | `double`   | `60.0`  | Time [s] after which a bypass lapses. Bounds: [0.1, 600.0].                                                          |
 | `safety_bypass_joint_limit_tolerance` | `double` | `0.03` | Fraction of joint range added to both sides during a bypass. Bounds: [0.0, 1.0].                                     |
@@ -111,7 +111,7 @@ A **safety layer for joint position commands**, usable both
 | Topic                           | Type                                    | Content                                                                | Condition |
 | ------------------------------- | --------------------------------------- | ---------------------------------------------------------------------- | --------- |
 | `~/status`                      | `SafetyPositionControllerStatus`        | Latched diagnostics: collision distance, QP state, stall/park, mode flags. | Always |
-| `~/qp_debug`                    | `SafetyQpDebug`                         | Per-cycle desired vs commanded velocity, bounds, per-constraint distances, solver state. | `publish_qp_debug = true` |
+| `~/qp_debug`                    | `SafetyQpDebug`                         | Desired vs commanded velocity, bounds, per-constraint distances, solver state; sampled.  | `publish_qp_debug = true` |
 | `~/debug_collision_geometry`    | `visualization_msgs/MarkerArray`        | Collision geometry and distance lines, colored by approach direction.  | `debug_visualize_collisions = true` or `publish_collision_distances = true` |
 | `~/debug_in_joint_states`       | `sensor_msgs/JointState`                | Names = `joints`, positions = current **references** (input commands). | `publish_debug_joint_states = true` |
 | `~/debug_out_joint_states`      | `sensor_msgs/JointState`                | Names = `joints`, positions = final **commanded** joint positions.     | `publish_debug_joint_states = true` |

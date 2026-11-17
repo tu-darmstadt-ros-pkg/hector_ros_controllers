@@ -33,7 +33,6 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
     pluginlib
     coal
     pinocchio
-    proxsuite
     rclcpp
     rclcpp_action
     rclcpp_lifecycle
@@ -97,7 +96,6 @@ target_link_libraries(
   controllers
   PUBLIC coal::coal
          pinocchio::pinocchio
-         proxsuite::proxsuite
          sync_group_velocity_to_position_controller_parameters
          self_collision_avoidance_controller_parameters
          safety_forward_controller_parameters
@@ -155,6 +153,8 @@ if(BUILD_TESTING)
   find_package(GTest CONFIG REQUIRED COMPONENTS GTest GMock)
   find_package(rtest REQUIRED)
   find_package(ament_index_cpp REQUIRED)
+  find_package(proxsuite REQUIRED)
+  find_package(Eigen3 REQUIRED)
 
   install(DIRECTORY test/config DESTINATION share/${PROJECT_NAME}/test)
 
@@ -178,7 +178,6 @@ if(BUILD_TESTING)
     coal::coal
     fcl
     pinocchio::pinocchio
-    proxsuite::proxsuite
     ad_kinematics::ad_kinematics
     sync_group_velocity_to_position_controller_parameters
     self_collision_avoidance_controller_parameters
@@ -248,7 +247,7 @@ if(BUILD_TESTING)
     src/safety_position_controller/safety_qp_limiter.cpp)
   target_include_directories(test_safety_pipeline
                              PRIVATE ${PROJECT_SOURCE_DIR}/include)
-  target_link_libraries(test_safety_pipeline proxsuite::proxsuite)
+  target_link_libraries(test_safety_pipeline Eigen3::Eigen)
   target_compile_features(test_safety_pipeline PRIVATE cxx_std_20)
 
   find_package(ament_cmake_google_benchmark REQUIRED)
@@ -258,7 +257,7 @@ if(BUILD_TESTING)
   if(TARGET benchmark_safety_qp_limiter)
     target_include_directories(benchmark_safety_qp_limiter
                                PRIVATE ${PROJECT_SOURCE_DIR}/include)
-    target_link_libraries(benchmark_safety_qp_limiter proxsuite::proxsuite)
+    target_link_libraries(benchmark_safety_qp_limiter Eigen3::Eigen)
     target_compile_features(benchmark_safety_qp_limiter PRIVATE cxx_std_20)
   endif()
 

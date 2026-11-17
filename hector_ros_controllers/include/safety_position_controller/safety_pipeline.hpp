@@ -14,6 +14,12 @@
 namespace safety_position_controller
 {
 
+/// Project a collision-model gradient dd/dv onto the controlled joints: entry i is
+/// gradient[joint_v_index[i]], or 0 where the joint is not in the model.
+/// @param projected output, size joint_v_index.size()
+void projectOntoJoints( const Eigen::VectorXd &gradient, const std::vector<int> &joint_v_index,
+                        Eigen::VectorXd &projected );
+
 /**
  * @brief ROS-free per-cycle safety pipeline between the processed reference and the
  * commanded positions.
@@ -40,9 +46,10 @@ class SafetyPipeline
 {
 public:
   struct Config {
-    double dt{ 0.01 };
     std::vector<JointInfo> joints; ///< per controlled joint, defines n
-    SafetyQpParams qp;             ///< v_max/a_acc/a_dec must be sized like joints
+    /// v_max/a_acc/a_dec must be sized like joints. qp.dt is the nominal cycle time;
+    /// every cycle steps by the period passed to prepare().
+    SafetyQpParams qp;
     /// Per-joint max deviation [rad] of the command from the leashed reference while
     /// flowing around collisions; 0 disables for that joint.
     std::vector<double> deviation_limits;
@@ -110,10 +117,13 @@ public:
    * for continuous joints the shortest path to the target is taken
    * @param measured measured positions per joint
    * @param bypass_active relaxes position limits and drops the deviation boxes
+   * @param period time this cycle covers [s]: the QP's step, the integration and the
+   * stall/park timers. 0 (or non-finite) means no time passed: step() then leaves the
+   * command, the velocity and the timers as they are.
    * @return true if a new reference released the parked state this cycle
    */
   bool prepare( const std::vector<double> &reference, const std::vector<double> &measured,
-                bool bypass_active );
+                bool bypass_active, double period );
 
   /// Current commanded configuration: evaluate the collision check here after prepare();
   /// after step() these are the positions to write to the hardware.
@@ -131,7 +141,6 @@ public:
   const SafetyQpResult &lastResult() const { return limiter_->lastResult(); }
   const SafetyQpInput &qpInput() const { return input_; }
   const Eigen::VectorXd &velocity() const { return vel_; }
-  const Eigen::VectorXd &leashedReference() const { return ref_leashed_; }
   /// Collision-pair indices of the constraints in qpInput().collisions (same order).
   const std::vector<std::size_t> &constraintPairIndices() const { return constraint_pair_indices_; }
   const SafetyQpLimiter &limiter() const { return *limiter_; }
@@ -166,12 +175,14 @@ private:
   /// reference the upstream controller is holding there is a live target.
   bool park_pending_{ false };
   bool wants_motion_{ false };
+  double period_{ 0.0 }; ///< this cycle's step [s]; 0 = no time passed
   bool measurement_diverged_{ false };
   Eigen::VectorXd cmd_;         ///< commanded positions (integration state)
   Eigen::VectorXd vel_;         ///< commanded velocities
   Eigen::VectorXd ref_leashed_; ///< leashed reference targets (deviation is measured
                                 ///< against these, so lag cannot blow the budget)
   SafetyQpInput input_;
+  Eigen::VectorXd normal_;               ///< projected gradient of the candidate being assembled
   std::vector<double> reference_;        ///< this cycle's reference (park latch source)
   std::vector<double> parked_reference_; ///< reference snapshot latched at park time
   std::vector<std::size_t> constraint_pair_indices_;

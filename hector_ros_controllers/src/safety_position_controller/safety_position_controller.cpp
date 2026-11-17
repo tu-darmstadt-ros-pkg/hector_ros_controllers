@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <utility>
 
 #include <hardware_interface/loaned_command_interface.hpp>
@@ -37,6 +38,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
   try {
     param_listener_ = std::make_shared<ParamListener>( get_node() );
     params_ = param_listener_->get_params();
+    safety_bypass_timeout_.store( params_.safety_bypass_timeout, std::memory_order_relaxed );
   } catch ( const std::exception &e ) {
     RCLCPP_WARN( get_node()->get_logger(), "Exception thrown during init stage with message: %s",
                  e.what() );
@@ -57,6 +59,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     qos.transient_local();
     semantic_description_sub_ = get_node()->create_subscription<std_msgs::msg::String>(
         "robot_description_semantic", qos, [this]( const std_msgs::msg::String::SharedPtr msg ) {
+          const std::lock_guard<std::mutex> lock( srdf_mutex_ );
           srdf_ = msg->data;
           srdf_received_ = true;
         } );
@@ -102,7 +105,7 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       [this]( const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
               std::shared_ptr<std_srvs::srv::SetBool::Response> response ) {
         if ( request->data ) {
-          const double timeout_sec = params_.safety_bypass_timeout;
+          const double timeout_sec = safety_bypass_timeout_.load( std::memory_order_relaxed );
           const auto deadline = std::chrono::steady_clock::now() +
                                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                     std::chrono::duration<double>( timeout_sec ) );
@@ -158,7 +161,11 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 
   if ( collision_checker_ ) {
     collision_checker_->setBroadphase( params_.use_broadphase );
-    if ( !collision_checker_->initFromXml( this->get_robot_description(), srdf_, params_.joints,
+    const std::string srdf = [this]() {
+      const std::lock_guard<std::mutex> lock( srdf_mutex_ );
+      return srdf_;
+    }();
+    if ( !collision_checker_->initFromXml( this->get_robot_description(), srdf, params_.joints,
                                            false ) ) {
       RCLCPP_ERROR( node->get_logger(), "Failed to initialize collision checker from URDF/SRDF." );
       return controller_interface::CallbackReturn::ERROR;
@@ -213,6 +220,7 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
+  diagnostics_->stopDebugPublishing();
   // a target from before the deactivation must never be resumed on activation
   for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
   // Nobody is supervising a controller that is only now starting, so it starts guarded
@@ -225,6 +233,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   // update params in case they changed
   param_listener_->try_update_params( params_ );
+  safety_bypass_timeout_.store( params_.safety_bypass_timeout, std::memory_order_relaxed );
   if ( params_.check_self_collisions && params_.collision_safety_zone <= params_.collision_padding ) {
     RCLCPP_ERROR( get_node()->get_logger(),
                   "collision_safety_zone (%.4f) must be > collision_padding (%.4f)",
@@ -241,12 +250,13 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     if ( params_.debug_visualize_collisions || params_.publish_collision_distances ) {
       if ( !collision_visualizer_ ) {
         collision_visualizer_ =
-            std::make_unique<CollisionVisualizer>( get_node(), params_.collision_visualization_rate );
+            std::make_shared<CollisionVisualizer>( get_node(), params_.collision_visualization_rate );
       } else {
         // Kept across a deactivate/activate cycle so the topic stays advertised; the
         // rate still has to follow a parameter change.
         collision_visualizer_->setPublishRate( params_.collision_visualization_rate );
       }
+      collision_visualizer_->setModel( *collision_checker_ );
     } else {
       collision_visualizer_.reset();
     }
@@ -288,7 +298,8 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 
   // Hand the resolved values over BEFORE the status timer can fire: publishStatus()
   // reads them from executor threads, so they must not be written while it can run.
-  diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_ );
+  diagnostics_->configure( params_.joints, stiff_current_limits_, compliant_current_limits_,
+                           static_cast<std::size_t>( params_.qp_max_pair_constraints ) );
 
   RCLCPP_INFO( get_node()->get_logger(),
                "SafetyPositionController config: joints=%zu, collisions=%s, broadphase=%s, "
@@ -309,6 +320,15 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     RCLCPP_ERROR( get_node()->get_logger(), "Expected %zu state interfaces, got %zu.",
                   all_joint_names_.size(), state_interfaces_.size() );
     return controller_interface::CallbackReturn::ERROR;
+  }
+  // Positions are read by index, so a different order would feed one joint's state to
+  // another, both to the pipeline and to the collision check.
+  for ( size_t i = 0; i < all_joint_names_.size(); ++i ) {
+    if ( state_interfaces_[i].get_name() != all_joint_names_[i] + "/position" ) {
+      RCLCPP_ERROR( get_node()->get_logger(), "State interface %zu is '%s', expected '%s/position'.",
+                    i, state_interfaces_[i].get_name().c_str(), all_joint_names_[i].c_str() );
+      return controller_interface::CallbackReturn::ERROR;
+    }
   }
 
   // check order of command interfaces
@@ -342,6 +362,9 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
     const auto period = std::chrono::duration<double>( 1.0 / params_.status_publish_rate );
     status_timer_ = get_node()->create_wall_timer( period, [this]() { publish_status(); } );
   }
+  // Debug messages are built off the control thread, polled at the control rate in wall
+  // time: with a clock faster than real time, later cycles overwrite unpublished ones.
+  diagnostics_->startDebugPublishing( pipeline_->config().qp.dt, collision_visualizer_ );
 
   publish_status();
 
@@ -352,6 +375,7 @@ controller_interface::CallbackReturn
 SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   status_timer_.reset();
+  diagnostics_->stopDebugPublishing();
   estop_engaged_.store( false, std::memory_order_relaxed );
   // A bypass is granted for as long as someone is watching this controller run. It must
   // not outlive the controller and be inherited by whatever activates next.
@@ -432,11 +456,11 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 }
 
 controller_interface::return_type
-SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
+SafetyPositionController::update_and_write_commands( const rclcpp::Time &time,
                                                      const rclcpp::Duration &period )
 {
   // Debug: incoming joint states
-  diagnostics_->publishJointStateIn( reference_interfaces_ );
+  diagnostics_->captureJointStateIn( time, reference_interfaces_ );
 
   // The bypass lapses on its own so an unattended one cannot last: enforced here rather
   // than by a timer, which would mean an unsynchronised handle shared with the control
@@ -477,7 +501,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
       hold_positions_ = current_positions_;
     }
     pipeline_->invalidate();
-    write_position_commands( hold_positions_ );
+    write_position_commands( time, hold_positions_ );
   } else if ( !read_current_positions() ) {
     // A handle is locked by another thread (async hardware). Skipping the cycle leaves
     // the previous position command in place, which is what re-writing it would do.
@@ -485,7 +509,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
     // failed collision-state read below.
     note_state_unobservable( period );
   } else {
-    status_event |= run_safety_pipeline( period );
+    status_event |= run_safety_pipeline( time, period );
     if ( params_.set_current_limits ) {
       write_current_limits();
     }
@@ -539,11 +563,10 @@ void SafetyPositionController::note_estop_request( const bool active )
 
 void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &period )
 {
-  // Nominal dt where the reported period is unusable (0 on the first cycle, paused sim
-  // clock); get_update_rate() is the same rate the pipeline integrates with.
-  const double rate = get_update_rate();
-  const double dt = period.seconds() > 0.0 ? period.seconds() : ( rate > 0.0 ? 1.0 / rate : 0.0 );
-  state_read_failure_time_ += dt;
+  // Measured time, like the pipeline's stall and park timers: a cycle in which no time
+  // passed (paused clock) does not count.
+  const double seconds = period.seconds();
+  state_read_failure_time_ += std::isfinite( seconds ) && seconds > 0.0 ? seconds : 0.0;
   // Only on the edge: invalidate() rebases the command onto the measured position, so
   // repeating it every cycle would turn the hold into "follow the measurement" and let
   // a loaded limb sag away under gravity.
@@ -594,7 +617,8 @@ bool SafetyPositionController::read_current_positions()
   return true;
 }
 
-void SafetyPositionController::write_position_commands( const std::vector<double> &commands )
+void SafetyPositionController::write_position_commands( const rclcpp::Time &time,
+                                                        const std::vector<double> &commands )
 {
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( std::isfinite( commands[i] ) && !command_interfaces_[i].set_value( commands[i] ) ) {
@@ -603,7 +627,7 @@ void SafetyPositionController::write_position_commands( const std::vector<double
                             params_.joints[i].c_str() );
     }
   }
-  diagnostics_->publishJointStateOut( commands );
+  diagnostics_->captureJointStateOut( time, commands );
 }
 
 bool SafetyPositionController::setup_pipeline_on_activate()
@@ -613,7 +637,6 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   const double dt = 1.0 / get_update_rate();
 
   SafetyPipeline::Config cfg;
-  cfg.dt = dt;
   cfg.joints = joint_infos_;
   cfg.qp.dt = dt;
   cfg.qp.v_max.resize( ni );
@@ -686,7 +709,8 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   return true;
 }
 
-bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &period )
+bool SafetyPositionController::run_safety_pipeline( const rclcpp::Time &time,
+                                                    const rclcpp::Duration &period )
 {
   const size_t n = params_.joints.size();
   const bool bypass_active = this->bypass_active();
@@ -694,7 +718,8 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
       !bypass_active && params_.check_self_collisions && collision_checker_ != nullptr;
 
   bool status_event = false;
-  if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active ) ) {
+  if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active,
+                           period.seconds() ) ) {
     RCLCPP_INFO( get_node()->get_logger(), "New reference received — resuming from parked state." );
     status_event = true;
   }
@@ -762,14 +787,14 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
   // ---- Write ----
   const auto &qp_cmd = pipeline_->commandedPositions();
   for ( size_t i = 0; i < n; ++i ) { qp_cmd_std_[i] = qp_cmd[static_cast<Eigen::Index>( i )]; }
-  write_position_commands( qp_cmd_std_ );
+  write_position_commands( time, qp_cmd_std_ );
 
   // RViz markers, colored by whether the motion moves each pair apart. Only after a
   // real check: the visualizer draws the checker's latched state, which would otherwise
   // be redrawn with fresh stamps while the arm moves on (bypass, unobservable state).
   if ( collision_visualizer_ && collision_checker_ && snapshot.observation.checks_active &&
        snapshot.observation.state_valid ) {
-    collision_visualizer_->publish( *collision_checker_,
+    collision_visualizer_->capture( time, *collision_checker_,
                                     params_.debug_visualize_collisions
                                         ? CollisionVisualizer::Level::FullGeometry
                                         : CollisionVisualizer::Level::LinesOnly,
@@ -777,7 +802,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
                                     params_.collision_safety_zone );
   }
 
-  diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );
+  diagnostics_->captureQpDebug( time, *pipeline_, reference_interfaces_ );
   return status_event;
 }
 
