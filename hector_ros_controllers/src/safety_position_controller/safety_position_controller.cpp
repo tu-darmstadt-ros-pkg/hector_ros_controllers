@@ -457,11 +457,11 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
 }
 
 controller_interface::return_type
-SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
+SafetyPositionController::update_and_write_commands( const rclcpp::Time &time,
                                                      const rclcpp::Duration &period )
 {
   // Debug: incoming joint states
-  diagnostics_->captureJointStateIn( reference_interfaces_ );
+  diagnostics_->captureJointStateIn( time, reference_interfaces_ );
 
   // The bypass lapses on its own so an unattended one cannot last: enforced here rather
   // than by a timer, which would mean an unsynchronised handle shared with the control
@@ -502,7 +502,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
       hold_positions_ = current_positions_;
     }
     pipeline_->invalidate();
-    write_position_commands( hold_positions_ );
+    write_position_commands( time, hold_positions_ );
   } else if ( !read_current_positions() ) {
     // A handle is locked by another thread (async hardware). Skipping the cycle leaves
     // the previous position command in place, which is what re-writing it would do.
@@ -510,7 +510,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
     // failed collision-state read below.
     note_state_unobservable( period );
   } else {
-    status_event |= run_safety_pipeline( period );
+    status_event |= run_safety_pipeline( time, period );
     if ( params_.set_current_limits ) {
       write_current_limits();
     }
@@ -618,7 +618,8 @@ bool SafetyPositionController::read_current_positions()
   return true;
 }
 
-void SafetyPositionController::write_position_commands( const std::vector<double> &commands )
+void SafetyPositionController::write_position_commands( const rclcpp::Time &time,
+                                                        const std::vector<double> &commands )
 {
   for ( size_t i = 0; i < params_.joints.size(); ++i ) {
     if ( std::isfinite( commands[i] ) && !command_interfaces_[i].set_value( commands[i] ) ) {
@@ -627,7 +628,7 @@ void SafetyPositionController::write_position_commands( const std::vector<double
                             params_.joints[i].c_str() );
     }
   }
-  diagnostics_->captureJointStateOut( commands );
+  diagnostics_->captureJointStateOut( time, commands );
 }
 
 bool SafetyPositionController::setup_pipeline_on_activate()
@@ -709,7 +710,8 @@ bool SafetyPositionController::setup_pipeline_on_activate()
   return true;
 }
 
-bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &period )
+bool SafetyPositionController::run_safety_pipeline( const rclcpp::Time &time,
+                                                    const rclcpp::Duration &period )
 {
   const size_t n = params_.joints.size();
   const bool bypass_active = this->bypass_active();
@@ -786,14 +788,14 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
   // ---- Write ----
   const auto &qp_cmd = pipeline_->commandedPositions();
   for ( size_t i = 0; i < n; ++i ) { qp_cmd_std_[i] = qp_cmd[static_cast<Eigen::Index>( i )]; }
-  write_position_commands( qp_cmd_std_ );
+  write_position_commands( time, qp_cmd_std_ );
 
   // RViz markers, colored by whether the motion moves each pair apart. Only after a
   // real check: the visualizer draws the checker's latched state, which would otherwise
   // be redrawn with fresh stamps while the arm moves on (bypass, unobservable state).
   if ( collision_visualizer_ && collision_checker_ && snapshot.observation.checks_active &&
        snapshot.observation.state_valid ) {
-    collision_visualizer_->capture( *collision_checker_,
+    collision_visualizer_->capture( time, *collision_checker_,
                                     params_.debug_visualize_collisions
                                         ? CollisionVisualizer::Level::FullGeometry
                                         : CollisionVisualizer::Level::LinesOnly,
@@ -801,7 +803,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
                                     params_.collision_safety_zone );
   }
 
-  diagnostics_->captureQpDebug( *pipeline_, reference_interfaces_ );
+  diagnostics_->captureQpDebug( time, *pipeline_, reference_interfaces_ );
   return status_event;
 }
 

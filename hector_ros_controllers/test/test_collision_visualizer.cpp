@@ -75,9 +75,11 @@ TEST_F( CollisionVisualizerTest, PublishesWithoutDirectionalInfo )
   const auto &result = checker_->checkCollisionQ( checker_->neutralConfiguration() );
   ASSERT_FALSE( result.safety_zone_pairs.empty() ) << "need a zone pair to reach the color branch";
 
-  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::LinesOnly,
+                        {}, 1.0 );
   visualizer_->publishPending();
-  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::FullGeometry, {}, 1.0 );
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::FullGeometry,
+                        {}, 1.0 );
   visualizer_->publishPending();
 }
 
@@ -88,11 +90,11 @@ TEST_F( CollisionVisualizerTest, PublishesWithMismatchedAndMatchingDirectionalIn
   ASSERT_GT( num_pairs, 0u );
 
   // A vector sized for a different pair set must be ignored, not indexed.
-  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::LinesOnly,
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::LinesOnly,
                         std::vector<double>( num_pairs - 1, 1.0 ), 1.0 );
   visualizer_->publishPending();
   // The matching size colors the lines.
-  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::FullGeometry,
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::FullGeometry,
                         std::vector<double>( num_pairs, -1.0 ), 1.0 );
   visualizer_->publishPending();
 }
@@ -100,7 +102,8 @@ TEST_F( CollisionVisualizerTest, PublishesWithMismatchedAndMatchingDirectionalIn
 TEST_F( CollisionVisualizerTest, PublishesBeforeAnyCheckHasRun )
 {
   // No collision query yet: the latched result is empty and every distance stale.
-  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::FullGeometry, {}, 0.05 );
+  visualizer_->capture( node_->now(), *checker_, spc::CollisionVisualizer::Level::FullGeometry,
+                        {}, 0.05 );
   visualizer_->publishPending();
 }
 
@@ -121,7 +124,9 @@ TEST_F( CollisionVisualizerTest, PublishesTheCapturedCycleOnce )
   checker_->checkCollisionQ( checker_->neutralConfiguration() );
   const std::vector<Eigen::Vector3d> captured_points = zone_points();
   ASSERT_FALSE( captured_points.empty() );
-  visualizer_->capture( *checker_, spc::CollisionVisualizer::Level::LinesOnly, {}, 1.0 );
+  const rclcpp::Time cycle_time( 42, 0, RCL_ROS_TIME );
+  visualizer_->capture( cycle_time, *checker_, spc::CollisionVisualizer::Level::LinesOnly,
+                        {}, 1.0 );
 
   Eigen::VectorXd moved = checker_->neutralConfiguration();
   CollisionChecker::writeJointPosition( moved, checker_->getJointQSlot( "joint2" ), 1.0 );
@@ -139,6 +144,8 @@ TEST_F( CollisionVisualizerTest, PublishesTheCapturedCycleOnce )
 
   std::vector<Eigen::Vector3d> published_points;
   for ( const auto &marker : array.markers ) {
+    EXPECT_EQ( rclcpp::Time( marker.header.stamp ), cycle_time )
+        << "stamped with the control cycle that captured it, not the publish time";
     if ( marker.ns == "distance_lines_safety_zone" || marker.ns == "distance_lines_collision" ) {
       for ( const auto &p : marker.points ) { published_points.emplace_back( p.x, p.y, p.z ); }
     }

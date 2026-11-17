@@ -7,10 +7,10 @@
 #include <vector>
 
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
-#include <realtime_tools/realtime_thread_safe_box.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <safety_position_controller/collision_checker.hpp>
+#include <safety_position_controller/debug_handoff.hpp>
 
 namespace safety_position_controller
 {
@@ -54,13 +54,14 @@ public:
   /**
    * @brief Capture the markers' content for the checker's latest result. Control
    * thread; does not allocate. Ignored for a checker whose model differs from setModel().
+   * @param stamp time of the control cycle; also paces the marker rate
    * @param checker source of geometry, distances and the latched result
    * @param level lines only, or lines plus geometry
    * @param directional per-pair gradient·velocity (one per collision pair, NaN = no
    * info): >= 0 colors a safety-zone line green (moving apart), < 0 red
    * @param safety_zone_threshold zone distance used to classify pairs [m]
    */
-  void capture( const CollisionChecker &checker, Level level,
+  void capture( const rclcpp::Time &stamp, const CollisionChecker &checker, Level level,
                 const std::vector<double> &directional, double safety_zone_threshold );
 
   /// Build and publish the markers of the last capture, once. Non-realtime thread only.
@@ -86,16 +87,18 @@ private:
     LineKind kind;
   };
 
+  /// Closest contact of a geometry object over its pairs; ordered by severity.
+  enum class ContactState : uint8_t { Safe, InPadding, Penetrating };
+
   struct GeometryPose {
     Eigen::Vector3d translation;
     Eigen::Matrix3d rotation;
-    uint8_t state; ///< 0 safe, 1 inside the padding, 2 penetrating
+    ContactState state;
   };
 
   /// One capture. Copying it into an instance with enough capacity does not allocate.
   struct Snapshot {
-    uint64_t seq{ 0 }; ///< 0 = nothing captured yet
-    int64_t stamp_ns{ 0 };
+    rclcpp::Time stamp{ int64_t{ 0 }, RCL_ROS_TIME };
     Level level{ Level::LinesOnly };
     std::vector<GeometryPose> geometry; ///< per geometry object; empty for LinesOnly
     std::vector<Line> lines;
@@ -127,9 +130,8 @@ private:
   void appendGeometryMarkers( const Snapshot &snap, visualization_msgs::msg::MarkerArray &array,
                               const rclcpp::Time &stamp ) const;
 
-  /// Build the markers of a not yet published capture into @p array; false if there is
-  /// none. Requires model_mutex_.
-  bool buildPending( visualization_msgs::msg::MarkerArray &array );
+  /// Build the markers of @p snap into @p array. Requires model_mutex_.
+  void buildMarkers( const Snapshot &snap, visualization_msgs::msg::MarkerArray &array );
 
   /// Build the distance-line markers into @p array.
   void appendDistanceLines( const Snapshot &snap, visualization_msgs::msg::MarkerArray &array,
@@ -143,8 +145,7 @@ private:
   // Model sizes, read by capture(); written only by setModel().
   std::size_t num_geometries_{ 0 };
   std::size_t num_pairs_{ 0 };
-  Snapshot staging_; ///< filled by the control thread, then handed over
-  realtime_tools::RealtimeThreadSafeBox<Snapshot> box_;
+  DebugHandoff<Snapshot> handoff_;
 
   /// Read by publishPending(); written by setModel(). Guarded by model_mutex_, which
   /// publishPending() holds while it builds.
@@ -153,8 +154,6 @@ private:
   /// Per geometry object: shape, scale and (for a bounding-box fallback) the local
   /// offset in pose.position, at the identity placement.
   std::vector<visualization_msgs::msg::Marker> geometry_templates_;
-  Snapshot pending_;          ///< publishPending()'s copy
-  uint64_t published_seq_{ 0 };
   /// Geometry markers of the last publish; a change re-sends DELETEALL so ids that no
   /// longer exist cannot linger.
   std::size_t last_geometry_count_{ 0 };

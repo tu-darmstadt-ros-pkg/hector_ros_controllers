@@ -87,27 +87,22 @@ void SafetyDiagnostics::configure( std::vector<std::string> joint_names,
   {
     // A new activation starts without a capture: what the previous one left must
     // neither be published again nor be read against arrays sized for another limit.
-    // The sequence numbers continue, and the empty snapshots count as published.
     const std::lock_guard<std::mutex> lock( debug_mutex_ );
-    const uint64_t qp_seq = qp_staging_.seq;
-    QpDebugSnapshot &qp = qp_staging_;
-    qp = QpDebugSnapshot{};
-    qp.seq = qp_seq;
-    for ( auto *v : { &qp.v_des, &qp.v_cmd, &qp.box_lb, &qp.box_ub, &qp.q_cmd } ) {
-      v->setZero( n );
-    }
-    qp.q_ref.assign( joint_names.size(), 0.0 );
-    qp.pair_indices.assign( max_constraints, 0 );
-    for ( auto *v : { &qp.pair_distances, &qp.pair_rhs, &qp.pair_velocities } ) {
-      v->setZero( m );
-    }
-    qp_box_.set( qp );
-    qp_published_seq_ = qp_seq;
+    qp_handoff_.reset( [&]( QpDebugSnapshot &qp ) {
+      qp = QpDebugSnapshot{};
+      for ( auto *v : { &qp.v_des, &qp.v_cmd, &qp.box_lb, &qp.box_ub, &qp.q_cmd } ) {
+        v->setZero( n );
+      }
+      qp.q_ref.assign( joint_names.size(), 0.0 );
+      qp.pair_indices.assign( max_constraints, 0 );
+      for ( auto *v : { &qp.pair_distances, &qp.pair_rhs, &qp.pair_velocities } ) {
+        v->setZero( m );
+      }
+    } );
     for ( auto *channel : { &js_in_, &js_out_ } ) {
-      channel->staging.stamp_ns = 0;
-      channel->staging.position.assign( joint_names.size(), 0.0 );
-      channel->box.set( channel->staging );
-      channel->published_seq = channel->staging.seq;
+      channel->handoff.reset( [&]( JointStateSnapshot &js ) {
+        js.position.assign( joint_names.size(), 0.0 );
+      } );
     }
 
     debug_joint_names_ = joint_names;
@@ -163,10 +158,10 @@ void SafetyDiagnostics::publishStatus( const StatusFlags &flags )
   status_pub_->publish( msg );
 }
 
-void SafetyDiagnostics::captureQpDebug( const SafetyPipeline &pipeline,
+void SafetyDiagnostics::captureQpDebug( const rclcpp::Time &stamp, const SafetyPipeline &pipeline,
                                         const std::vector<double> &processed_reference )
 {
-  QpDebugSnapshot &snap = qp_staging_;
+  QpDebugSnapshot &snap = qp_handoff_.staging();
   const auto n = static_cast<std::size_t>( snap.v_des.size() );
   if ( !qp_debug_enabled_.load( std::memory_order_relaxed ) || !qp_debug_pub_ ||
        pipeline.velocity().size() != snap.v_des.size() || processed_reference.size() < n ) {
@@ -174,7 +169,7 @@ void SafetyDiagnostics::captureQpDebug( const SafetyPipeline &pipeline,
   }
   const SafetyQpResult &qp_result = pipeline.lastResult();
 
-  snap.stamp_ns = node_->now().nanoseconds();
+  snap.stamp = stamp;
   snap.v_des = pipeline.qpInput().v_des;
   snap.v_cmd = pipeline.velocity();
   snap.box_lb = pipeline.limiter().lastBoxLower();
@@ -198,28 +193,28 @@ void SafetyDiagnostics::captureQpDebug( const SafetyPipeline &pipeline,
   snap.bounds_conflict = qp_result.bounds_conflict;
   snap.solve_time_us = qp_result.solve_time_us;
   snap.iterations = qp_result.iterations;
-  ++snap.seq;
-  qp_box_.try_set( snap ); // busy: publishDebug() is copying; this cycle is skipped
+  qp_handoff_.commit();
 }
 
-void SafetyDiagnostics::captureJointStateIn( const std::vector<double> &positions )
-{ captureJointState( js_in_, positions ); }
+void SafetyDiagnostics::captureJointStateIn( const rclcpp::Time &stamp,
+                                             const std::vector<double> &positions )
+{ captureJointState( js_in_, stamp, positions ); }
 
-void SafetyDiagnostics::captureJointStateOut( const std::vector<double> &positions )
-{ captureJointState( js_out_, positions ); }
+void SafetyDiagnostics::captureJointStateOut( const rclcpp::Time &stamp,
+                                              const std::vector<double> &positions )
+{ captureJointState( js_out_, stamp, positions ); }
 
-void SafetyDiagnostics::captureJointState( JointStateChannel &channel,
+void SafetyDiagnostics::captureJointState( JointStateChannel &channel, const rclcpp::Time &stamp,
                                            const std::vector<double> &positions )
 {
-  JointStateSnapshot &snap = channel.staging;
+  JointStateSnapshot &snap = channel.handoff.staging();
   if ( !debug_js_enabled_.load( std::memory_order_relaxed ) ||
        positions.size() != snap.position.size() ) {
     return;
   }
-  snap.stamp_ns = node_->now().nanoseconds();
+  snap.stamp = stamp;
   std::copy( positions.begin(), positions.end(), snap.position.begin() );
-  ++snap.seq;
-  channel.box.try_set( snap );
+  channel.handoff.commit();
 }
 
 void SafetyDiagnostics::startDebugPublishing( const double period,
@@ -291,15 +286,14 @@ void SafetyDiagnostics::publishDebug()
 
 std::optional<hector_ros_controllers_msgs::msg::SafetyQpDebug> SafetyDiagnostics::buildQpDebug()
 {
-  qp_box_.get( qp_pending_ );
-  const QpDebugSnapshot &snap = qp_pending_;
-  if ( snap.seq == qp_published_seq_ ) {
+  const QpDebugSnapshot *pending = qp_handoff_.take();
+  if ( !pending ) {
     return std::nullopt;
   }
-  qp_published_seq_ = snap.seq;
+  const QpDebugSnapshot &snap = *pending;
 
   hector_ros_controllers_msgs::msg::SafetyQpDebug msg;
-  msg.header.stamp = rclcpp::Time( snap.stamp_ns );
+  msg.header.stamp = snap.stamp;
   msg.joint_names = debug_joint_names_;
   msg.v_des.assign( snap.v_des.begin(), snap.v_des.end() );
   msg.v_cmd.assign( snap.v_cmd.begin(), snap.v_cmd.end() );
@@ -332,16 +326,14 @@ std::optional<hector_ros_controllers_msgs::msg::SafetyQpDebug> SafetyDiagnostics
 std::optional<sensor_msgs::msg::JointState>
 SafetyDiagnostics::buildJointState( JointStateChannel &channel )
 {
-  channel.box.get( channel.pending );
-  const JointStateSnapshot &snap = channel.pending;
-  if ( snap.seq == channel.published_seq ) {
+  const JointStateSnapshot *snap = channel.handoff.take();
+  if ( !snap ) {
     return std::nullopt;
   }
-  channel.published_seq = snap.seq;
   sensor_msgs::msg::JointState msg;
-  msg.header.stamp = rclcpp::Time( snap.stamp_ns );
+  msg.header.stamp = snap->stamp;
   msg.name = debug_joint_names_;
-  msg.position = snap.position;
+  msg.position = snap->position;
   return msg;
 }
 

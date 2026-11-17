@@ -146,9 +146,10 @@ private:
    * @brief Write per-joint position commands (non-finite entries are skipped).
    * A handle locked by another thread is logged and left unwritten: the hardware then
    * keeps the previous command.
+   * @param time time of this control cycle, for the debug echo
    * @param commands commanded positions (size == params_.joints.size())
    */
-  void write_position_commands( const std::vector<double> &commands );
+  void write_position_commands( const rclcpp::Time &time, const std::vector<double> &commands );
 
   /// Write current-limit commands (stiff/compliant) if the interfaces were claimed.
   void write_current_limits();
@@ -182,7 +183,7 @@ private:
    * write. Translates pipeline/observer events into logs.
    * @return true if an event occurred that the caller should publish a status for
    */
-  bool run_safety_pipeline( const rclcpp::Duration &period );
+  bool run_safety_pipeline( const rclcpp::Time &time, const rclcpp::Duration &period );
 
   /// True while safety checks are bypassed.
   bool bypass_active() const

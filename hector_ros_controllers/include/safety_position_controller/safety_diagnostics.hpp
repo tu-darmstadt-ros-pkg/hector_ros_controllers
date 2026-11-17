@@ -16,6 +16,7 @@
 
 #include <safety_position_controller/collision_checker.hpp>
 #include <safety_position_controller/collision_visualizer.hpp>
+#include <safety_position_controller/debug_handoff.hpp>
 #include <safety_position_controller/safety_pipeline.hpp>
 
 #include <hector_ros_controllers_msgs/msg/safety_position_controller_status.hpp>
@@ -80,13 +81,13 @@ public:
 
   /// Capture this cycle's QP introspection for ~/qp_debug if enabled (dynamic
   /// parameter). Control thread; does not allocate.
-  void captureQpDebug( const SafetyPipeline &pipeline,
+  void captureQpDebug( const rclcpp::Time &stamp, const SafetyPipeline &pipeline,
                        const std::vector<double> &processed_reference );
 
   /// Capture the debug joint-state echo of the incoming references / outgoing commands
   /// (if enabled). Control thread; does not allocate.
-  void captureJointStateIn( const std::vector<double> &positions );
-  void captureJointStateOut( const std::vector<double> &positions );
+  void captureJointStateIn( const rclcpp::Time &stamp, const std::vector<double> &positions );
+  void captureJointStateOut( const rclcpp::Time &stamp, const std::vector<double> &positions );
 
   /// Build and publish the debug messages (and the visualizer's markers) captured since
   /// the last call. Non-realtime thread only.
@@ -113,8 +114,7 @@ private:
   /// One cycle of ~/qp_debug content. Sized by configure(); copying it between equally
   /// sized instances does not allocate.
   struct QpDebugSnapshot {
-    uint64_t seq{ 0 }; ///< 0 = nothing captured yet
-    int64_t stamp_ns{ 0 };
+    rclcpp::Time stamp{ int64_t{ 0 }, RCL_ROS_TIME };
     Eigen::VectorXd v_des, v_cmd, box_lb, box_ub, q_cmd;
     std::vector<double> q_ref;
     std::size_t num_pairs{ 0 };
@@ -129,21 +129,17 @@ private:
   };
 
   struct JointStateSnapshot {
-    uint64_t seq{ 0 }; ///< 0 = nothing captured yet
-    int64_t stamp_ns{ 0 };
+    rclcpp::Time stamp{ int64_t{ 0 }, RCL_ROS_TIME };
     std::vector<double> position;
   };
 
-  /// Debug joint-state channel: control-thread staging, handoff box, publisher.
   struct JointStateChannel {
-    JointStateSnapshot staging;
-    realtime_tools::RealtimeThreadSafeBox<JointStateSnapshot> box;
-    JointStateSnapshot pending; ///< publishDebug()'s copy
-    uint64_t published_seq{ 0 };
+    DebugHandoff<JointStateSnapshot> handoff;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr pub;
   };
 
-  void captureJointState( JointStateChannel &channel, const std::vector<double> &positions );
+  void captureJointState( JointStateChannel &channel, const rclcpp::Time &stamp,
+                          const std::vector<double> &positions );
   /// Run the debug timer iff some output is enabled. Requires timer_mutex_.
   void updateDebugTimer();
   /// The message of a not yet published capture, or nothing. Require debug_mutex_.
@@ -184,10 +180,7 @@ private:
 
   std::atomic<bool> qp_debug_enabled_{ false };
   rclcpp::Publisher<hector_ros_controllers_msgs::msg::SafetyQpDebug>::SharedPtr qp_debug_pub_;
-  QpDebugSnapshot qp_staging_; ///< filled by the control thread, then handed over
-  realtime_tools::RealtimeThreadSafeBox<QpDebugSnapshot> qp_box_;
-  QpDebugSnapshot qp_pending_; ///< publishDebug()'s copy
-  uint64_t qp_published_seq_{ 0 };
+  DebugHandoff<QpDebugSnapshot> qp_handoff_;
 
   std::atomic<bool> debug_js_enabled_{ false };
   JointStateChannel js_in_;

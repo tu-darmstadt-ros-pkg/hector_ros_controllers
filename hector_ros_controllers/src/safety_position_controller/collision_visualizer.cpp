@@ -94,19 +94,12 @@ void CollisionVisualizer::setModel( const CollisionChecker &checker )
   // A new model starts without a capture: the last one belongs to the previous
   // activation and counts as published.
   const std::lock_guard<std::mutex> lock( model_mutex_ );
-  const auto reset = [this]( Snapshot &snap ) {
-    snap.stamp_ns = 0;
+  handoff_.reset( [this]( Snapshot &snap ) {
     snap.geometry.clear();
     snap.lines.clear();
     snap.geometry.reserve( num_geometries_ );
     snap.lines.reserve( num_pairs_ + 1 ); // + the closest pair drawn on its own
-  };
-  reset( staging_ );
-  box_.set( [&]( Snapshot &snap ) {
-    reset( snap );
-    snap.seq = staging_.seq;
   } );
-  published_seq_ = staging_.seq;
 
   root_frame_ = checker.rootFrame();
   geometry_templates_.clear();
@@ -270,7 +263,7 @@ void CollisionVisualizer::captureGeometry( const CollisionChecker &checker, Snap
   for ( std::size_t i = 0; i < snap.geometry.size(); ++i ) {
     snap.geometry[i].translation = geom_data.oMg[i].translation();
     snap.geometry[i].rotation = geom_data.oMg[i].rotation();
-    snap.geometry[i].state = 0;
+    snap.geometry[i].state = ContactState::Safe;
   }
   // An object is red if any fresh pair it belongs to penetrates, orange if one is inside
   // the padding.
@@ -279,13 +272,15 @@ void CollisionVisualizer::captureGeometry( const CollisionChecker &checker, Snap
       continue; // pruned by the broadphase: its distance is from an earlier cycle
     }
     const double distance = geom_data.distanceResults[k].min_distance;
-    const uint8_t level = distance <= 0.0 ? 2 : ( distance <= padding ? 1 : 0 );
-    if ( level == 0 ) {
+    const ContactState state = distance <= 0.0       ? ContactState::Penetrating
+                               : distance <= padding ? ContactState::InPadding
+                                                     : ContactState::Safe;
+    if ( state == ContactState::Safe ) {
       continue;
     }
     const auto &cp = geom_model.collisionPairs[k];
-    snap.geometry[cp.first].state = std::max( snap.geometry[cp.first].state, level );
-    snap.geometry[cp.second].state = std::max( snap.geometry[cp.second].state, level );
+    snap.geometry[cp.first].state = std::max( snap.geometry[cp.first].state, state );
+    snap.geometry[cp.second].state = std::max( snap.geometry[cp.second].state, state );
   }
 }
 
@@ -364,9 +359,9 @@ void CollisionVisualizer::appendGeometryMarkers( const Snapshot &snap,
     const Eigen::Vector3d offset( m.pose.position.x, m.pose.position.y, m.pose.position.z );
     m.pose.position = toPoint( pose.translation + q * offset );
 
-    m.color = pose.state == 2   ? makeColor( 1.0f, 0.0f, 0.0f, 1.0f )
-              : pose.state == 1 ? makeColor( 1.0f, 0.55f, 0.0f, 0.9f )
-                                : makeColor( 0.7f, 0.7f, 0.7f, 0.6f );
+    m.color = pose.state == ContactState::Penetrating ? makeColor( 1.0f, 0.0f, 0.0f, 1.0f )
+              : pose.state == ContactState::InPadding ? makeColor( 1.0f, 0.55f, 0.0f, 0.9f )
+                                                      : makeColor( 0.7f, 0.7f, 0.7f, 0.6f );
     array.markers.push_back( std::move( m ) );
   }
 }
@@ -402,7 +397,8 @@ void CollisionVisualizer::appendDistanceLines( const Snapshot &snap,
   pushLineMarker( array, std::move( lines_coll ) );
 }
 
-void CollisionVisualizer::capture( const CollisionChecker &checker, const Level level,
+void CollisionVisualizer::capture( const rclcpp::Time &stamp, const CollisionChecker &checker,
+                                   const Level level,
                                    const std::vector<double> &directional,
                                    const double safety_zone_threshold )
 {
@@ -410,7 +406,6 @@ void CollisionVisualizer::capture( const CollisionChecker &checker, const Level 
        checker.geometryModel().collisionPairs.size() != num_pairs_ ) {
     return; // setModel() did not size the snapshots for this model
   }
-  const rclcpp::Time stamp = node_->now();
   if ( min_period_ > 0.0 && last_publish_.nanoseconds() != 0 ) {
     const double elapsed = ( stamp - last_publish_ ).seconds();
     // A backwards jump (sim clock reset) publishes instead of stalling until it catches up.
@@ -419,8 +414,8 @@ void CollisionVisualizer::capture( const CollisionChecker &checker, const Level 
     }
   }
 
-  Snapshot &snap = staging_;
-  snap.stamp_ns = stamp.nanoseconds();
+  Snapshot &snap = handoff_.staging();
+  snap.stamp = stamp;
   snap.level = level;
   snap.geometry.clear();
   snap.lines.clear();
@@ -428,8 +423,7 @@ void CollisionVisualizer::capture( const CollisionChecker &checker, const Level 
     captureGeometry( checker, snap );
   }
   captureLines( checker, level, directional, safety_zone_threshold, snap );
-  ++snap.seq;
-  if ( box_.try_set( snap ) ) { // busy: publishPending() is copying; skip this cycle
+  if ( handoff_.commit() ) {
     last_publish_ = stamp;
   }
 }
@@ -441,27 +435,25 @@ void CollisionVisualizer::publishPending()
   visualization_msgs::msg::MarkerArray array;
   {
     const std::lock_guard<std::mutex> lock( model_mutex_ );
-    if ( !buildPending( array ) ) {
+    const Snapshot *snap = handoff_.take();
+    if ( !snap ) {
       return;
     }
+    buildMarkers( *snap, array );
   }
   pub_->publish( array );
 }
 
-bool CollisionVisualizer::buildPending( visualization_msgs::msg::MarkerArray &array )
+void CollisionVisualizer::buildMarkers( const Snapshot &snap,
+                                        visualization_msgs::msg::MarkerArray &array )
 {
-  box_.get( pending_ );
-  if ( pending_.seq == published_seq_ ) {
-    return false;
-  }
-  published_seq_ = pending_.seq;
-  const rclcpp::Time stamp( pending_.stamp_ns, RCL_ROS_TIME );
+  const rclcpp::Time &stamp = snap.stamp;
 
   // DELETEALL only when the marker set can have shrunk. Sending it every cycle makes
   // RViz destroy and rebuild every scene node between two frames, which both flickers
   // and dwarfs the cost of the update it is meant to deliver. Stable ids otherwise let
   // the markers be updated in place; the line markers DELETE themselves when empty.
-  const std::size_t geometry_count = pending_.geometry.size();
+  const std::size_t geometry_count = snap.geometry.size();
   if ( geometry_count != last_geometry_count_ ) {
     visualization_msgs::msg::Marker delete_all;
     delete_all.header.frame_id = root_frame_;
@@ -471,9 +463,8 @@ bool CollisionVisualizer::buildPending( visualization_msgs::msg::MarkerArray &ar
     last_geometry_count_ = geometry_count;
   }
 
-  appendGeometryMarkers( pending_, array, stamp );
-  appendDistanceLines( pending_, array, stamp );
-  return true;
+  appendGeometryMarkers( snap, array, stamp );
+  appendDistanceLines( snap, array, stamp );
 }
 
 } // namespace safety_position_controller
