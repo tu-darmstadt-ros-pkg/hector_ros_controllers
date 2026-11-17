@@ -36,11 +36,8 @@ namespace safety_position_controller
  * reconfigurable parameter callbacks, plus the human-readable formatters used in
  * warnings. Pure consumer of pipeline/checker state — never mutates control state.
  *
- * Debug output is split across threads: the control thread only copies each cycle into
- * a preallocated snapshot (capture*()), and publishDebug(), called from a non-realtime
- * timer, builds and publishes the messages. A snapshot the timer has not picked up yet
- * is overwritten by the next cycle. The timer only runs while some debug output is
- * enabled.
+ * Debug output is captured on the control thread (capture*()) and built and published
+ * by publishDebug() on a timer that runs only while some debug output is enabled.
  */
 class SafetyDiagnostics
 {
@@ -60,13 +57,9 @@ public:
   SafetyDiagnostics( rclcpp_lifecycle::LifecycleNode::SharedPtr node, const Params &params,
                      const CollisionChecker *checker );
 
-  /// Store the activation-resolved joint names, current limits and status flags:
-  /// publishStatus() runs on executor threads (status timer, service callbacks) and must
-  /// not read the controller's mutable Params fields, which on_activate rewrites in
-  /// place. Held in a box because on_activate can run while a service callback publishes.
-  /// Call from the thread that writes the Params.
-  /// Also sizes the debug snapshots for @p max_constraints collision constraints and
-  /// resolves the pair names once; not concurrently with the capture*() calls.
+  /// Copy what publishStatus() needs out of the Params, which on_activate rewrites while
+  /// executor threads may publish, and size the debug snapshots. Call from the thread
+  /// that writes the Params, not concurrently with capture*().
   void configure( std::vector<std::string> joint_names, std::vector<double> stiff_current_limits,
                   std::vector<double> compliant_current_limits, std::size_t max_constraints );
 
@@ -79,18 +72,15 @@ public:
   /// Publish ~/status (latched) from the latest snapshot; callable from any thread.
   void publishStatus( const StatusFlags &flags );
 
-  /// Capture this cycle's QP introspection for ~/qp_debug if enabled (dynamic
-  /// parameter). Control thread; does not allocate.
+  /// Capture this cycle's ~/qp_debug content if enabled. Control thread; does not allocate.
   void captureQpDebug( const rclcpp::Time &stamp, const SafetyPipeline &pipeline,
                        const std::vector<double> &processed_reference );
 
-  /// Capture the debug joint-state echo of the incoming references / outgoing commands
-  /// (if enabled). Control thread; does not allocate.
+  /// Capture the incoming references / outgoing commands if enabled. Control thread.
   void captureJointStateIn( const rclcpp::Time &stamp, const std::vector<double> &positions );
   void captureJointStateOut( const rclcpp::Time &stamp, const std::vector<double> &positions );
 
-  /// Build and publish the debug messages (and the visualizer's markers) captured since
-  /// the last call. Non-realtime thread only.
+  /// Publish what was captured since the last call, markers included. Non-realtime.
   void publishDebug();
 
   /// Call publishDebug() from a wall timer every @p period [s] while some debug output
@@ -111,8 +101,7 @@ public:
                                     double max_distance, std::size_t fallback_pair_index ) const;
 
 private:
-  /// One cycle of ~/qp_debug content. Sized by configure(); copying it between equally
-  /// sized instances does not allocate.
+  /// One cycle of ~/qp_debug content, sized by configure().
   struct QpDebugSnapshot {
     rclcpp::Time stamp{ int64_t{ 0 }, RCL_ROS_TIME };
     Eigen::VectorXd v_des, v_cmd, box_lb, box_ub, q_cmd;
@@ -186,14 +175,12 @@ private:
   JointStateChannel js_in_;
   JointStateChannel js_out_;
 
-  /// Read by publishDebug(); written by configure(). Guarded by debug_mutex_, which
-  /// publishDebug() holds while it builds (not while it publishes).
+  /// Written by configure(), read by publishDebug() while it builds.
   std::mutex debug_mutex_;
   std::vector<std::string> debug_joint_names_;
   std::vector<std::string> pair_names_; ///< "a<->b" per collision pair index
 
-  /// Debug timer and the visualizer it publishes; the parameter callbacks, activation
-  /// and the timer itself run on different threads.
+  /// Parameter callbacks, activation and the timer itself run on different threads.
   std::mutex timer_mutex_;
   rclcpp::TimerBase::SharedPtr debug_timer_;
   std::shared_ptr<CollisionVisualizer> debug_visualizer_;

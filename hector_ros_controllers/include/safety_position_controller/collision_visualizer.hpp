@@ -27,9 +27,8 @@ namespace safety_position_controller
  *   apart, plus collision pairs.
  * - full geometry: the above with every collision shape and the safe-pair lines.
  *
- * The control thread only copies the checker's latched result into a preallocated
- * snapshot (capture()); publishPending(), on a non-realtime thread, builds and
- * publishes the markers. Never mutates control state.
+ * capture() copies the checker's state on the control thread; publishPending() builds
+ * and publishes the markers on a non-realtime thread.
  */
 class CollisionVisualizer
 {
@@ -118,10 +117,8 @@ private:
   visualization_msgs::msg::Marker makeLineMarker( const std::string &ns, double thickness,
                                                   const rclcpp::Time &stamp ) const;
 
-  /// Fill the geometry poses and their collision state into @p snap.
   static void captureGeometry( const CollisionChecker &checker, Snapshot &snap );
 
-  /// Fill the distance lines of @p level into @p snap.
   static void captureLines( const CollisionChecker &checker, Level level,
                             const std::vector<double> &directional, double safety_zone_threshold,
                             Snapshot &snap );

@@ -7,14 +7,9 @@
 namespace safety_position_controller
 {
 
-/**
- * @brief Hands debug snapshots from the control thread to a non-realtime reader.
- *
- * The control thread fills staging() and commit()s it; take() returns each committed
- * snapshot at most once. A commit while the reader is copying is dropped instead of
- * waiting, and a newer commit overwrites one not yet taken. Once reset() has sized the
- * snapshots, a commit of an equally sized snapshot does not allocate.
- */
+/// Hands snapshots from the control thread to a non-realtime reader without blocking:
+/// a commit while the reader copies is dropped, a newer commit replaces an untaken one.
+/// Committing a snapshot sized like the ones reset() prepared does not allocate.
 template<typename Snapshot>
 class DebugHandoff
 {
@@ -29,8 +24,7 @@ public:
     return box_.try_set( staging_ );
   }
 
-  /// Reader: the snapshot committed since the last take(), or nullptr. Valid until the
-  /// next take() or reset().
+  /// Reader: the snapshot committed since the last take(), or nullptr.
   const Snapshot *take()
   {
     box_.get( pending_ );
@@ -41,8 +35,8 @@ public:
     return &pending_.data;
   }
 
-  /// Apply @p prepare to the staging and the handed-over snapshot (to clear and size
-  /// them) and drop any commit not taken yet. Not concurrently with commit() or take().
+  /// Clear and size both snapshots with @p prepare and drop any untaken commit.
+  /// Not concurrently with commit() or take().
   template<typename Prepare>
   void reset( Prepare &&prepare )
   {

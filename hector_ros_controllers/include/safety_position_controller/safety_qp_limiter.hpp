@@ -39,9 +39,8 @@ struct SafetyQpParams {
   std::size_t max_collision_constraints{ 10 }; ///< preallocated collision rows (closest kept)
 };
 
-/// Linearized collision constraints normal(k)^T v >= damper(distance(k)), k < size().
-/// A normal is dd/dv projected onto the controlled joints. The storage is sized once by
-/// reserve(), so refilling it every cycle does not allocate.
+/// Linearized collision constraints normal(k)^T v >= damper(distance(k)), with dd/dv
+/// projected onto the controlled joints as normal. Allocates only in reserve().
 class QpCollisionConstraints
 {
 public:
@@ -50,18 +49,15 @@ public:
 
   void clear() { size_ = 0; }
 
-  /// Append a constraint.
   /// @return false (nothing stored) if the storage is full
-  /// @pre @p normal has size n (asserted in debug builds)
+  /// @pre @p normal has size n
   bool push( const Eigen::Ref<const Eigen::VectorXd> &normal, double distance );
 
   Eigen::Index size() const { return size_; }
   bool empty() const { return size_ == 0; }
   auto normal( const Eigen::Index k ) const { return normals_.row( k ); }
   double distance( const Eigen::Index k ) const { return distances_[k]; }
-  /// The normals of the stored constraints, one per row.
-  auto normals() const { return normals_.topRows( size_ ); }
-  /// The distances of the stored constraints.
+  auto normals() const { return normals_.topRows( size_ ); } ///< one per row
   auto distances() const { return distances_.head( size_ ); }
 
 private:
@@ -100,8 +96,7 @@ struct SafetyQpResult {
   int num_collision_constraints{ 0 };
   double solve_time_us{ 0.0 };
   long iterations{ 0 }; ///< active-set additions and drops, summed over all solve stages
-  // Per collision constraint, for debugging. Sized max_collision_constraints; the first
-  // num_collision_constraints entries are valid.
+  // Per collision constraint; the first num_collision_constraints entries are valid.
   Eigen::VectorXd collision_rhs;      ///< final required minimum of g^T v (after relaxation)
   Eigen::VectorXd collision_velocity; ///< achieved g^T v at the returned v
 };

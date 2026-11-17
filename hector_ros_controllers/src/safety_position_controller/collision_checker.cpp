@@ -22,8 +22,7 @@
 namespace
 {
 /// A distance coal could not determine is unknown, not far: report it as the deepest
-/// penetration, so the pair counts as in collision and reaches the safety pipeline,
-/// which brakes on a non-finite distance.
+/// penetration, on which the safety pipeline brakes.
 double knownOrPenetrating( coal::DistanceResult &dres )
 {
   if ( !std::isfinite( dres.min_distance ) ) {
