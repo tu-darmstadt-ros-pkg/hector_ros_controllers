@@ -34,7 +34,6 @@ const char *const PENDULUM = R"(<?xml version="1.0"?>
     <joint name="joint1">
       <command_interface name="position"/>
       <command_interface name="velocity"/>
-      <command_interface name="torque_off"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
     </joint>
