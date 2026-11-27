@@ -457,7 +457,7 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
     // Check if any joint in this group has a non-zero velocity command -> cancel action
     bool velocity_override = false;
     for ( size_t idx : group_joint_indices ) {
-      if ( !std::isnan( reference_interfaces_[idx] ) && reference_interfaces_[idx] != 0.0 ) {
+      if ( !std::isnan( reference_values_[idx] ) && reference_values_[idx] != 0.0 ) {
         velocity_override = true;
         break;
       }
@@ -476,7 +476,7 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
       next_rt_state = GroupActionState::CANCELLED;
       RCLCPP_INFO( get_node()->get_logger(), "Group action for '%s' cancelled by velocity command",
                    group_names_[g].c_str() );
-      // Fall through: leave reference_interfaces_ as-is so normal velocity
+      // Fall through: leave the references as-is so normal velocity
       // control resumes for these joints this tick.
       group_last_rt_state_[g] = next_rt_state;
       continue;
@@ -550,9 +550,17 @@ bool SyncGroupVelocityToPositionController::process_group_actions( const rclcpp:
       }
     }
 
-    // Set reference interfaces to NaN for joints in this group so they're skipped by normal control
+    // Clear the references of this group's joints, in the handles too, so normal control skips
+    // them and an old velocity reference does not resume once the action ends
     for ( size_t idx : group_joint_indices ) {
-      reference_interfaces_[idx] = std::numeric_limits<double>::quiet_NaN();
+      reference_values_[idx] = std::numeric_limits<double>::quiet_NaN();
+      if ( !ordered_exported_reference_interfaces_[idx]->set_value(
+               std::numeric_limits<double>::quiet_NaN() ) ) {
+        RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+            "Reference of joint '%s' was busy and keeps its value until written again",
+            joints_[idx].c_str() );
+      }
     }
 
     group_last_rt_state_[g] = next_rt_state;

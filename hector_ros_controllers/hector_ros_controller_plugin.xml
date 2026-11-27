@@ -32,4 +32,10 @@
             disabled via the effort_command_interface parameter for position-only setups (e.g. simulation).
         </description>
   </class>
+  <class name="claim_only_controller/ClaimOnlyController" type="claim_only_controller::ClaimOnlyController" base_class_type="controller_interface::ControllerInterface">
+    <description>
+            Claims the configured command interfaces and writes nothing to them, for interfaces whose claim
+            is the command, such as a Dynamixel joint's torque_off.
+        </description>
+  </class>
 </library>

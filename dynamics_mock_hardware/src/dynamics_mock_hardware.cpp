@@ -144,25 +144,33 @@ void DynamicsMockHardware::enforceMimicConstraints( Eigen::VectorXd &q, Eigen::V
 // =============================================================================
 
 void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen::VectorXd &v,
-                                           Eigen::VectorXd &tau )
+                                           double dt, Eigen::VectorXd &tau )
 {
   tau.setZero();
 
   bool need_rnea = false;
   Eigen::VectorXd a_desired = Eigen::VectorXd::Zero( model_.nv );
 
-  for ( const auto &jd : joints_ ) {
+  for ( auto &jd : joints_ ) {
     const int iv = jd.idx_v;
 
     switch ( jd.control_mode ) {
     case ControlMode::POSITION: {
-      double q_cmd = get_command( jd.name + "/" + hardware_interface::HW_IF_POSITION );
-      if ( std::isnan( q_cmd ) )
-        q_cmd = get_state( jd.name + "/" + hardware_interface::HW_IF_POSITION );
-
       const double q_cur = jd.is_continuous ? jd.accumulated_angle : q[jd.idx_q];
-      const double v_cur = v[iv];
-      const double raw_tau = position_kp_ * ( q_cmd - q_cur ) + position_kd_ * ( 0.0 - v_cur );
+      double q_cmd = get_command( jd.name + "/" + hardware_interface::HW_IF_POSITION );
+      // Like the real drivers, a NaN holds where the joint was at the first NaN instead of sagging
+      if ( std::isnan( q_cmd ) ) {
+        if ( std::isnan( jd.nan_hold_position ) )
+          jd.nan_hold_position = q_cur;
+        q_cmd = jd.nan_hold_position;
+      } else {
+        jd.nan_hold_position = std::numeric_limits<double>::quiet_NaN();
+      }
+
+      // The PD acts on the next step's state, so a light link cannot make the explicit step diverge
+      const double damping = position_kd_ + position_kp_ * dt;
+      const double raw_tau = ( position_kp_ * ( q_cmd - q_cur ) - damping * v[iv] ) /
+                             ( 1.0 + damping * dt / effective_inertia_[iv] );
       tau[iv] = clampSymmetric( raw_tau, jd.max_torque );
       break;
     }
@@ -172,7 +180,8 @@ void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen
       if ( std::isnan( v_cmd ) )
         v_cmd = 0.0;
 
-      const double raw_tau = velocity_kp_ * ( v_cmd - v[iv] );
+      const double raw_tau =
+          velocity_kp_ * ( v_cmd - v[iv] ) / ( 1.0 + velocity_kp_ * dt / effective_inertia_[iv] );
       tau[iv] = clampSymmetric( raw_tau, jd.max_torque );
       break;
     }
@@ -195,6 +204,9 @@ void DynamicsMockHardware::computeTorques( const Eigen::VectorXd &q, const Eigen
       tau[iv] = clampSymmetric( tau_cmd, jd.max_torque );
       break;
     }
+
+    case ControlMode::TORQUE_OFF:
+      break;
     }
   }
 
@@ -385,6 +397,21 @@ DynamicsMockHardware::on_init( const hardware_interface::HardwareComponentInterf
   tau_ = Eigen::VectorXd::Zero( model_.nv );
   ddq_ = Eigen::VectorXd::Zero( model_.nv );
   q_next_ = Eigen::VectorXd::Zero( model_.nq );
+  effective_inertia_ = Eigen::VectorXd::Ones( model_.nv );
+
+  // A simulated power cut for the controller manager's hard e-stop recovery. Reads fail, and the
+  // component cannot be configured or activated until the power is back
+  if ( const auto node = get_node() ) {
+    node->declare_parameter( "simulate_power_cut", false );
+    power_cut_callback_ = node->add_post_set_parameters_callback(
+        [this]( const std::vector<rclcpp::Parameter> &params ) {
+          for ( const auto &param : params ) {
+            if ( param.get_name() == "simulate_power_cut" ) {
+              power_cut_ = param.as_bool();
+            }
+          }
+        } );
+  }
 
   return CallbackReturn::SUCCESS;
 }
@@ -395,6 +422,10 @@ DynamicsMockHardware::on_init( const hardware_interface::HardwareComponentInterf
 
 CallbackReturn DynamicsMockHardware::on_configure( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
+  if ( power_cut_ ) {
+    RCLCPP_ERROR( get_logger(), "Cannot configure: the power is cut." );
+    return CallbackReturn::FAILURE;
+  }
   for ( auto &jd : joints_ ) {
     const std::string pos_if = jd.name + "/" + hardware_interface::HW_IF_POSITION;
     const std::string vel_if = jd.name + "/" + hardware_interface::HW_IF_VELOCITY;
@@ -413,6 +444,7 @@ CallbackReturn DynamicsMockHardware::on_configure( const rclcpp_lifecycle::State
 
     jd.accumulated_angle = get_state( pos_if );
     jd.control_mode = ControlMode::POSITION;
+    jd.torque_off_claimed = false;
   }
 
   // Initialize mimic joint states
@@ -445,8 +477,15 @@ CallbackReturn DynamicsMockHardware::on_configure( const rclcpp_lifecycle::State
 
 CallbackReturn DynamicsMockHardware::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
 {
-  // Seed command interfaces from current states to prevent an initial jump.
-  for ( const auto &jd : joints_ ) {
+  if ( power_cut_ ) {
+    RCLCPP_ERROR( get_logger(), "Cannot activate: the power is cut." );
+    return CallbackReturn::FAILURE;
+  }
+  // Seed command interfaces from current states to prevent an initial jump. Activation energises
+  // every joint, also one left limp by a released torque_off.
+  for ( auto &jd : joints_ ) {
+    if ( !jd.torque_off_claimed )
+      jd.control_mode = ControlMode::POSITION;
     const auto &n = jd.name;
     if ( has_command( n + "/" + hardware_interface::HW_IF_POSITION ) )
       set_command( n + "/" + hardware_interface::HW_IF_POSITION,
@@ -482,23 +521,35 @@ CallbackReturn DynamicsMockHardware::on_deactivate( const rclcpp_lifecycle::Stat
   return CallbackReturn::SUCCESS;
 }
 
+// Leaves the component unconfigured, from where the controller manager recovers it
+CallbackReturn DynamicsMockHardware::on_error( const rclcpp_lifecycle::State & /*previous_state*/ )
+{ return CallbackReturn::SUCCESS; }
+
 // =============================================================================
 // Mode switching
 // =============================================================================
 
-return_type DynamicsMockHardware::prepare_command_mode_switch(
-    const std::vector<std::string> &start_interfaces,
-    const std::vector<std::string> & /*stop_interfaces*/ )
+return_type
+DynamicsMockHardware::prepare_command_mode_switch( const std::vector<std::string> &start_interfaces,
+                                                   const std::vector<std::string> &stop_interfaces )
 {
-  // Validate: at most one standard command interface per joint
+  // At most one command interface per joint, a held torque_off claim included
   std::unordered_map<std::string, int> joint_start_count;
 
+  for ( const auto &jd : joints_ ) {
+    const std::string torque_off = jd.name + "/" + TORQUE_OFF_INTERFACE;
+    if ( jd.torque_off_claimed && std::find( stop_interfaces.begin(), stop_interfaces.end(),
+                                             torque_off ) == stop_interfaces.end() ) {
+      joint_start_count[jd.name]++;
+    }
+  }
   for ( const auto &key : start_interfaces ) {
     for ( const auto &jd : joints_ ) {
       if ( key == jd.name + "/" + hardware_interface::HW_IF_POSITION ||
            key == jd.name + "/" + hardware_interface::HW_IF_VELOCITY ||
            key == jd.name + "/" + hardware_interface::HW_IF_ACCELERATION ||
-           key == jd.name + "/" + hardware_interface::HW_IF_EFFORT ) {
+           key == jd.name + "/" + hardware_interface::HW_IF_EFFORT ||
+           key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
         joint_start_count[jd.name]++;
       }
     }
@@ -516,16 +567,38 @@ return_type DynamicsMockHardware::prepare_command_mode_switch(
   return return_type::OK;
 }
 
-return_type DynamicsMockHardware::perform_command_mode_switch(
-    const std::vector<std::string> &start_interfaces,
-    const std::vector<std::string> & /*stop_interfaces*/ )
+return_type
+DynamicsMockHardware::perform_command_mode_switch( const std::vector<std::string> &start_interfaces,
+                                                   const std::vector<std::string> &stop_interfaces )
 {
+  // A joint whose motion interface stops without a successor holds where it is. A released
+  // torque_off stays limp, and a motion start brings torque back holding where the joint was left.
+  // A handover keeps the successor's command, which hcm writes before this call.
+  const auto handed_over = [&]( const JointData &jd ) {
+    const auto moves = [&]( const std::string &key ) {
+      return key.rfind( jd.name + "/", 0 ) == 0 && key != jd.name + "/" + TORQUE_OFF_INTERFACE;
+    };
+    return std::any_of( start_interfaces.begin(), start_interfaces.end(), moves ) &&
+           std::any_of( stop_interfaces.begin(), stop_interfaces.end(), moves );
+  };
+  for ( const auto &key : stop_interfaces ) {
+    for ( auto &jd : joints_ ) {
+      if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
+        jd.torque_off_claimed = false;
+      } else if ( key.rfind( jd.name + "/", 0 ) == 0 && !handed_over( jd ) ) {
+        jd.control_mode = ControlMode::POSITION;
+        const std::string position = jd.name + "/" + hardware_interface::HW_IF_POSITION;
+        if ( has_command( position ) )
+          set_command( position, get_state( position ) );
+      }
+    }
+  }
   for ( const auto &key : start_interfaces ) {
     for ( auto &jd : joints_ ) {
       if ( key == jd.name + "/" + hardware_interface::HW_IF_POSITION ) {
         jd.control_mode = ControlMode::POSITION;
         // Seed position command to current position to prevent jump
-        if ( has_command( key ) )
+        if ( has_command( key ) && !handed_over( jd ) )
           set_command( key, get_state( key ) );
       } else if ( key == jd.name + "/" + hardware_interface::HW_IF_VELOCITY ) {
         jd.control_mode = ControlMode::VELOCITY;
@@ -533,6 +606,9 @@ return_type DynamicsMockHardware::perform_command_mode_switch(
         jd.control_mode = ControlMode::ACCELERATION;
       } else if ( key == jd.name + "/" + hardware_interface::HW_IF_EFFORT ) {
         jd.control_mode = ControlMode::EFFORT;
+      } else if ( key == jd.name + "/" + TORQUE_OFF_INTERFACE ) {
+        jd.control_mode = ControlMode::TORQUE_OFF;
+        jd.torque_off_claimed = true;
       }
     }
   }
@@ -554,6 +630,8 @@ static const char *controlModeStr( ControlMode m )
     return "A";
   case ControlMode::EFFORT:
     return "E";
+  case ControlMode::TORQUE_OFF:
+    return "T";
   }
   return "?";
 }
@@ -598,6 +676,9 @@ void DynamicsMockHardware::logDebugState() const
                 ? get_command( name + "/" + hardware_interface::HW_IF_EFFORT )
                 : std::numeric_limits<double>::quiet_NaN();
       break;
+    case ControlMode::TORQUE_OFF:
+      cmd = std::numeric_limits<double>::quiet_NaN();
+      break;
     }
 
     oss << "  " << name << "[" << controlModeStr( jd.control_mode ) << "]"
@@ -617,6 +698,10 @@ void DynamicsMockHardware::logDebugState() const
 return_type DynamicsMockHardware::read( const rclcpp::Time & /*time*/,
                                         const rclcpp::Duration & /*period*/ )
 {
+  if ( power_cut_ ) {
+    RCLCPP_ERROR_THROTTLE( get_logger(), *get_clock(), 1000, "Read failed: the power is cut." );
+    return return_type::ERROR;
+  }
   // States are already set by the previous write() cycle.
   return return_type::OK;
 }
@@ -639,13 +724,17 @@ return_type DynamicsMockHardware::write( const rclcpp::Time & /*time*/,
   rosToPin_q( q_ );
   rosToPin_v( v_ );
 
+  // The inertia a joint's own torque moves, with the rest of the robot free
+  pinocchio::computeMinverse( model_, data_, q_ );
+  effective_inertia_ = data_.Minv.diagonal().cwiseInverse();
+
   for ( int step = 0; step < num_steps; ++step ) {
     // Enforce mimic constraints before computing torques so ABA sees consistent state
     enforceMimicConstraints( q_, v_ );
 
     // Compute per-joint torques from commands (re-evaluated each sub-step
     // so position/velocity PD controllers use the latest simulated state)
-    computeTorques( q_, v_, tau_ );
+    computeTorques( q_, v_, dt, tau_ );
 
     // Mimic joints receive no external torque (mechanically constrained)
     for ( const auto &mjd : mimic_joints_ ) { tau_[mjd.idx_v] = 0.0; }

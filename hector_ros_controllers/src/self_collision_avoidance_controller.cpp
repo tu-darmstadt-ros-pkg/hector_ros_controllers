@@ -1,6 +1,9 @@
 #include "self_collision_avoidance_controller/self_collision_avoidance_controller.hpp"
 #include "controller_interface/helpers.hpp"
+#include "hector_ros_controllers/reference_handles.hpp"
 #include "pluginlib/class_list_macros.hpp"
+
+#include <tuple>
 
 namespace self_collision_avoidance_controller
 {
@@ -71,27 +74,35 @@ controller_interface::return_type SelfCollisionAvoidanceController::update_refer
 {
   auto joint_commands = rt_buffer_ptr_.readFromRT();
   if ( joint_commands && *joint_commands ) {
-    if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
-      RCLCPP_ERROR_THROTTLE(
-          get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
-          "command size (%zu) does not match number of reference interfaces (%zu)",
-          ( *joint_commands )->data.size(), reference_interfaces_.size() );
-      return controller_interface::return_type::ERROR;
+    const auto &data = ( *joint_commands )->data;
+    const auto &references = ordered_exported_reference_interfaces_;
+    if ( references.size() != data.size() ) {
+      // Not a command to this controller, and keeping the previous one would keep a velocity
+      // running. No target holds; an ERROR would stop the whole chain for one bad message.
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                            "Holding: a command of size %zu, %zu joints are controlled",
+                            data.size(), references.size() );
+      std::ignore = hector_ros_controllers::clear_references( references );
+      return controller_interface::return_type::OK;
     }
-    reference_interfaces_ = ( *joint_commands )->data;
+    if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                            "%zu reference interfaces were busy; they keep their previous value",
+                            busy );
+    }
   }
 
   return controller_interface::return_type::OK;
 }
 
-std::vector<hardware_interface::CommandInterface>
-SelfCollisionAvoidanceController::on_export_reference_interfaces()
+std::vector<hardware_interface::CommandInterface::SharedPtr>
+SelfCollisionAvoidanceController::on_export_reference_interfaces_list()
 {
-  std::vector<hardware_interface::CommandInterface> reference_interfaces;
+  std::vector<hardware_interface::CommandInterface::SharedPtr> reference_interfaces;
 
   for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
-    reference_interfaces.push_back( hardware_interface::CommandInterface(
-        get_node()->get_name(), reference_interface_names_[i], &reference_interfaces_[i] ) );
+    reference_interfaces.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        get_node()->get_name(), reference_interface_names_[i] ) );
   }
 
   return reference_interfaces;
@@ -181,10 +192,8 @@ controller_interface::CallbackReturn SelfCollisionAvoidanceController::process_p
 
   // reference_interface_names_.shrink_to_fit();
   //  for any case make reference interfaces size of command interfaces
-  reference_interfaces_.resize( reference_interface_names_.size(),
-                                std::numeric_limits<double>::quiet_NaN() );
-
-  prev_command_vals_ = std::vector<double>( reference_interface_names_.size() );
+  reference_values_.assign( reference_interface_names_.size(),
+                            std::numeric_limits<double>::quiet_NaN() );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -201,12 +210,13 @@ SelfCollisionAvoidanceController::on_configure( const rclcpp_lifecycle::State & 
 
   transformTree_ = std::make_shared<ad_kinematics::Tree>( urdf );
 
-  // Get SRDF: prefer parameter, fall back to topic subscription
+  // Get SRDF: prefer parameter, fall back to topic subscription. Declared, because the
+  // controller manager passes it as a parameter override, which only a declared parameter sees.
   srdf_received_ = false;
-  std::string srdf_xml;
-  if ( get_node()->has_parameter( "robot_description_semantic" ) ) {
-    srdf_xml = get_node()->get_parameter( "robot_description_semantic" ).as_string();
+  if ( !get_node()->has_parameter( "robot_description_semantic" ) ) {
+    get_node()->declare_parameter<std::string>( "robot_description_semantic", "" );
   }
+  const std::string srdf_xml = get_node()->get_parameter( "robot_description_semantic" ).as_string();
   if ( !srdf_xml.empty() ) {
     srdf_ = srdf::Model();
     srdf_.initString( *urdf, srdf_xml );
@@ -302,11 +312,15 @@ SelfCollisionAvoidanceController::on_activate( const rclcpp_lifecycle::State & /
 
   // reset command buffer if a command came through callback when controller was inactive
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<DataType>>( nullptr );
+  // A block before this activation's first valid command holds instead of replaying an old one
+  prev_command_vals_.assign( command_interface_names_.size(),
+                             std::numeric_limits<double>::quiet_NaN() );
 
   RCLCPP_INFO( this->get_node()->get_logger(), "activate successful" );
 
-  std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
-             std::numeric_limits<double>::quiet_NaN() );
+  if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
+    return controller_interface::CallbackReturn::ERROR;
+  }
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -319,7 +333,11 @@ SelfCollisionAvoidanceController::on_deactivate( const rclcpp_lifecycle::State &
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-bool SelfCollisionAvoidanceController::on_set_chained_mode( bool /*chained_mode*/ ) { return true; }
+bool SelfCollisionAvoidanceController::on_set_chained_mode( bool /*chained_mode*/ )
+{
+  // The previous source's last reference must not outlive the switch
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
+}
 
 void SelfCollisionAvoidanceController::update_joint_angles()
 {
@@ -358,10 +376,10 @@ bool SelfCollisionAvoidanceController::write_valid_reference_commands(
 
   bool success = true;
   for ( size_t i = 0; i < command_interfaces_.size(); i++ ) {
-    if ( !std::isnan( reference_interfaces_[i] ) ) {
+    if ( !std::isnan( reference_values_[i] ) ) {
       if ( !collision_results[i] ) {
-        success = success && command_interfaces_[i].set_value( reference_interfaces_[i] );
-        prev_command_vals_[i] = reference_interfaces_[i];
+        success = success && command_interfaces_[i].set_value( reference_values_[i] );
+        prev_command_vals_[i] = reference_values_[i];
       } else {
         success = success && block_joint( i );
       }
@@ -375,6 +393,12 @@ controller_interface::return_type
 SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time & /*time*/,
                                                              const rclcpp::Duration &p )
 {
+  if ( const auto busy = hector_ros_controllers::read_references(
+           ordered_exported_reference_interfaces_, reference_values_ );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                          "%zu reference interfaces were busy; using their last value", busy );
+  }
   // Apply joint updates read from state interfaces
   update_joint_angles();
 
@@ -384,17 +408,17 @@ SelfCollisionAvoidanceController::update_and_write_commands( const rclcpp::Time 
   for ( size_t i = 0; i < controlled_joints_.size(); i++ ) {
 
     // skip if no command received from high level controller
-    if ( std::isnan( reference_interfaces_[i] ) )
+    if ( std::isnan( reference_values_[i] ) )
       continue;
 
     double pre_command_angle = joint_angles_[q_indices_controlled_[i]];
 
     // Set hypothetical joint position
     if ( interface_types_[i] == "position" ) {
-      joint_angles_[q_indices_controlled_[i]] = reference_interfaces_[i];
+      joint_angles_[q_indices_controlled_[i]] = reference_values_[i];
     } else {
       joint_angles_[q_indices_controlled_[i]] +=
-          reference_interfaces_[i] * velocity_look_ahead_factor_ * p.seconds();
+          reference_values_[i] * velocity_look_ahead_factor_ * p.seconds();
     }
 
     bool any_collision = false;

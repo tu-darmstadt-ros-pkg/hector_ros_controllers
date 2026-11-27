@@ -1,4 +1,7 @@
 #include "test_helpers.hpp"
+#include <algorithm>
+
+#include <std_msgs/msg/bool.hpp>
 
 #include <shared_mutex>
 #include <thread>
@@ -47,8 +50,8 @@ public:
 
   void findControllerSpecificMocks( const std::string &node_name )
   {
-    bypass_service_mock_ =
-        rtest::findService<std_srvs::srv::SetBool>( controller_->get_node(), "~/bypass_safety_checks" );
+    bypass_service_mock_ = rtest::findService<std_srvs::srv::SetBool>( controller_->get_node(),
+                                                                       "~/bypass_safety_checks" );
   }
 
   void SetUp() override { controller_ = std::make_shared<ControllerType>(); }
@@ -99,6 +102,8 @@ public:
                                           "unconfigured" );
     auto cb = controller_->on_configure( unconfigured );
     ASSERT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
+    // The controller manager exports the references after configure
+    ASSERT_EQ( controller_->export_reference_interfaces().size(), controller_->params_.joints.size() );
   }
 
   void setupHardwareInterfaces( const std::vector<std::string> &joints = {} )
@@ -113,17 +118,13 @@ public:
     cmd_ifaces_.clear();
     state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     for ( size_t i = 0; i < cj.size(); ++i ) {
-      cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-          cj[i], "position", &hw_cmd_values_[i] ) );
+      cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
     }
     for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
-      state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-          controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+      state_ifaces_.push_back(
+          hw_state_values_.make_state( i, controller_->all_joint_names_[i], "position" ) );
     }
-#pragma GCC diagnostic pop
 
     controller_->command_interfaces_.clear();
     controller_->state_interfaces_.clear();
@@ -197,12 +198,12 @@ TEST_F( SafetyPositionControllerTest, ReferenceAbovePositionLimitIsClamped )
   activateController();
 
   // Set current positions to 0
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // Set reference beyond limit: joint2 upper is 1.5
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 5.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 5.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
   EXPECT_LE( hw_cmd_values_[1], 1.5 );
@@ -217,12 +218,12 @@ TEST_F( SafetyPositionControllerTest, ReferenceBelowPositionLimitIsClamped )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // joint2 lower limit is -1.5
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = -5.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = -5.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
   EXPECT_GE( hw_cmd_values_[1], -1.5 );
@@ -243,8 +244,8 @@ TEST_F( SafetyPositionControllerTest, ContinuousJointTakesShortestPath )
   setStateValue( "joint4", 10.0 );
   setStateValue( "joint1", 0.0 );
 
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.1; // equivalent to 0.1 + 4*pi
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.1; // equivalent to 0.1 + 4*pi
 
   callUpdate();
 
@@ -255,84 +256,6 @@ TEST_F( SafetyPositionControllerTest, ContinuousJointTakesShortestPath )
 // ============================================================================
 // Velocity Limiting Tests (no collision fixture — collision checks disabled)
 // ============================================================================
-
-// ============================================================================
-// E-Stop Tests
-// ============================================================================
-
-TEST_F( SafetyPositionControllerTest, EstopEngageHoldsPositions )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  setStateValue( "joint1", 0.5 );
-  setStateValue( "joint2", -0.3 );
-  setStateValue( "joint3", 1.0 );
-
-  // Provide valid references
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  // First update to read positions
-  callUpdate();
-
-  sendEstop( true );
-  callUpdate();
-
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.3 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
-}
-
-TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewReference )
-{
-  // An E-stop abandons whatever was being tracked. On release the arm must hold even
-  // though the upstream controller keeps writing the pre-E-stop target every cycle.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
-
-  sendEstop( true );
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  const double position_at_estop = hw_cmd_values_[0];
-
-  sendEstop( false );
-  for ( int i = 0; i < 50; ++i ) {
-    controller_->reference_interfaces_[0] = 1.0; // upstream keeps commanding it
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
-        << "the pre-E-stop target must stay abandoned (cycle " << i << ")";
-  }
-
-  // A changed reference is a new command and releases the hold.
-  for ( int i = 0; i < 20; ++i ) {
-    controller_->reference_interfaces_[0] = 1.1;
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
-}
 
 TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
 {
@@ -349,21 +272,16 @@ TEST_F( SafetyPositionControllerTest, ImpossibleCurrentLimitsRefuseActivation )
   hw_cmd_values_.assign( cj.size() * 2, 0.0 );
   cmd_ifaces_.clear();
   state_ifaces_.clear();
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        cj[i], "position", &hw_cmd_values_[i] ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
   }
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        cj[i], "current", &hw_cmd_values_[cj.size() + i] ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "max_current" ) );
   }
   for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+    state_ifaces_.push_back(
+        hw_state_values_.make_state( i, controller_->all_joint_names_[i], "position" ) );
   }
-#pragma GCC diagnostic pop
   controller_->command_interfaces_.clear();
   controller_->state_interfaces_.clear();
   for ( auto &ci : cmd_ifaces_ ) {
@@ -498,7 +416,7 @@ TEST_F( SafetyPositionControllerTest, BypassLapsesOnItsOwn )
   bypass_service_mock_->handle_request( req_header, request );
   ASSERT_TRUE( controller_->bypass_active() );
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
   EXPECT_TRUE( controller_->bypass_active() ) << "still within the timeout";
 
@@ -522,34 +440,35 @@ TEST_F( SafetyPositionControllerTest, WrongSizedCommandIsRejectedWhole )
   activateController();
   ASSERT_FALSE( controller_->is_in_chained_mode() );
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
   sendCommand( { 0.2, -0.1, 0.3 } );
   ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 );
-  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
-  ASSERT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+  ASSERT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.2 );
+  ASSERT_DOUBLE_EQ( hector_test::reference( *controller_, 1 ), -0.1 );
+  ASSERT_DOUBLE_EQ( hector_test::reference( *controller_, 2 ), 0.3 );
 
   sendCommand( { 0.9 } ); // too short
   ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 ) << "no prefix may be applied";
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.2 ) << "no prefix may be applied";
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 1 ), -0.1 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 2 ), 0.3 );
 
   sendCommand( { 0.9, 0.9, 0.9, 0.9 } ); // too long
   ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 ) << "no truncation may be applied";
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], -0.1 );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.3 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.2 )
+      << "no truncation may be applied";
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 1 ), -0.1 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 2 ), 0.3 );
 
   sendCommand( {} ); // empty
   ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.2 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.2 );
 
   sendCommand( { 0.4, 0.5, 0.6 } ); // the right size is still accepted
   ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.4 );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[1], 0.5 );
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[2], 0.6 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.4 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 1 ), 0.5 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 2 ), 0.6 );
 }
 
 TEST_F( SafetyPositionControllerTest, RejectedCommandCannotReleaseAPark )
@@ -567,16 +486,14 @@ TEST_F( SafetyPositionControllerTest, RejectedCommandCannotReleaseAPark )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
   sendCommand( { 0.5, 0.0, 0.0 } );
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
     followCommands();
   }
 
-  sendEstop( true );
-  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  sendEstop( false );
+  controller_->pipeline_->invalidate();
   ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
   ASSERT_TRUE( controller_->pipeline_->parked() );
   const double parked_at = hw_cmd_values_[0];
@@ -596,133 +513,6 @@ TEST_F( SafetyPositionControllerTest, RejectedCommandCannotReleaseAPark )
   }
   EXPECT_FALSE( controller_->pipeline_->parked() );
   EXPECT_GT( hw_cmd_values_[0], parked_at + 1e-4 ) << "control returns once the sender is fixed";
-}
-
-TEST_F( SafetyPositionControllerTest, EstopTopicIsConfigurable )
-{
-  // The controller has to listen where the robot's e-stop actually is. On Athena that
-  // is the SOFT stop, whose "please stop" the arm can honour by holding position; the
-  // hard stop cuts power, faults the hardware and deactivates every controller, so no
-  // controller-side handling would run for it anyway.
-  const std::string topic = "e_stop_manager/aggregated_state/emergency_stop_software";
-  initController( {}, false, false, "test_robot.urdf",
-                  { rclcpp::Parameter( "e_stop_topic", topic ) } );
-
-  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node(),
-                   topic ) != nullptr )
-      << "the configured topic must be the one subscribed";
-
-  EXPECT_TRUE( rtest::findSubscription<std_msgs::msg::Bool>(
-                   controller_->get_node(),
-                   "test_safety_position/safety_estop" ) == nullptr )
-      << "the default topic must not also be subscribed";
-}
-
-TEST_F( SafetyPositionControllerTest, EstopSubscriptionKeepsTheLatchedState )
-{
-  // The e-stop manager publishes its aggregated state once per change and latches it
-  // (RELIABLE, TRANSIENT_LOCAL). A volatile subscriber that joins after the operator
-  // engaged the stop is told nothing and runs as if none were in effect, so the
-  // durability here is load bearing, not a default.
-  initController();
-  const auto sub = rtest::findSubscription<std_msgs::msg::Bool>(
-      controller_->get_node(),
-      "test_safety_position/safety_estop" );
-  ASSERT_TRUE( sub != nullptr );
-
-  const auto qos = sub->get_actual_qos();
-  EXPECT_EQ( qos.durability(), rclcpp::DurabilityPolicy::TransientLocal )
-      << "a volatile subscriber would miss a stop engaged before it subscribed";
-  EXPECT_EQ( qos.reliability(), rclcpp::ReliabilityPolicy::Reliable );
-  // An engage and the release after it can be delivered together while the executor is
-  // busy; a depth of one would let the release overwrite the unread engage.
-  EXPECT_GT( qos.depth(), 1u ) << "the engage must survive until its callback runs";
-}
-
-TEST_F( SafetyPositionControllerTest, EstopPulseBetweenCyclesIsHonored )
-{
-  // A stalled executor can deliver the engage and the release back to back, so the
-  // update loop never samples the engaged level. The engage must still abandon the
-  // pre-E-stop target instead of cancelling out against the release.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the target";
-
-  // Both messages land between two update cycles.
-  controller_->note_estop_request( true );
-  controller_->note_estop_request( false );
-
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  const double position_at_estop = hw_cmd_values_[0];
-  EXPECT_TRUE( controller_->estop_engaged_.load() ) << "the latched engage must produce one cycle";
-
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  followCommands();
-  EXPECT_FALSE( controller_->estop_engaged_.load() )
-      << "the latch must be consumed, so the release is seen on the next cycle";
-
-  for ( int i = 0; i < 50; ++i ) {
-    controller_->reference_interfaces_[0] = 1.0; // upstream keeps commanding it
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
-        << "the pulse must abandon the pre-E-stop target (cycle " << i << ")";
-  }
-}
-
-TEST_F( SafetyPositionControllerTest, EstopReleaseHoldsUntilNewCommandOnCommandTopic )
-{
-  // Same contract in non-chained mode. The "~/commands" message stays in the realtime
-  // buffer and is re-read every cycle, so the hold cannot rely on clearing references.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-  ASSERT_FALSE( controller_->is_in_chained_mode() );
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  sendCommand( { 1.0, 0.0, 0.0 } );
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 ) << "should have started moving toward the command";
-
-  sendEstop( true );
-  ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-  const double position_at_estop = hw_cmd_values_[0];
-
-  sendEstop( false );
-  for ( int i = 0; i < 50; ++i ) {
-    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-    followCommands();
-    ASSERT_NEAR( hw_cmd_values_[0], position_at_estop, 1e-6 )
-        << "the buffered command must stay abandoned (cycle " << i << ")";
-  }
-
-  sendCommand( { 1.1, 0.0, 0.0 } );
-  for ( int i = 0; i < 20; ++i ) {
-    ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  EXPECT_GT( hw_cmd_values_[0], position_at_estop + 1e-3 );
 }
 
 // ============================================================================
@@ -791,9 +581,9 @@ TEST_F( SafetyPositionControllerTest, NaNReferenceHoldsAtCurrentPosition )
   setStateValue( "joint2", -0.2 );
   setStateValue( "joint3", 0.1 );
 
-  controller_->reference_interfaces_[0] = std::numeric_limits<double>::quiet_NaN();
-  controller_->reference_interfaces_[1] = std::numeric_limits<double>::quiet_NaN();
-  controller_->reference_interfaces_[2] = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 0 ) = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 1 ) = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 2 ) = std::numeric_limits<double>::quiet_NaN();
 
   for ( int i = 0; i < 20; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -807,7 +597,7 @@ TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
 {
   // A reference that becomes NaN means "no target" and must make the joint brake to a
   // stop and hold. It must NOT keep tracking the target that was valid before: the
-  // reference interfaces are reset to NaN on an E-stop release and on activation, and
+  // reference interfaces are reset to NaN on activation, and
   // resuming the old target there would be unexpected delayed motion.
   initController();
   configureController();
@@ -816,10 +606,10 @@ TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   // Move toward the target for a while; the mock hardware follows the command exactly.
   for ( int i = 0; i < 10; ++i ) {
@@ -831,8 +621,8 @@ TEST_F( SafetyPositionControllerTest, NaNAfterValidReferenceBrakesAndHolds )
   ASSERT_LT( cmd_when_invalidated, 1.0 ) << "should not have arrived yet";
 
   // Upstream stops commanding: all references become NaN.
-  for ( auto &ref : controller_->reference_interfaces_ ) {
-    ref = std::numeric_limits<double>::quiet_NaN();
+  for ( std::size_t i = 0; i < controller_->ordered_exported_reference_interfaces_.size(); ++i ) {
+    hector_test::reference( *controller_, i ) = std::numeric_limits<double>::quiet_NaN();
   }
 
   for ( int i = 0; i < 100; ++i ) {
@@ -860,10 +650,10 @@ TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 10; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -875,7 +665,7 @@ TEST_F( SafetyPositionControllerTest, ReactivateDoesNotResumeStaleReference )
 
   // Fresh activation: references are NaN and nothing new is commanded.
   for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    ASSERT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) );
+    ASSERT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) );
   }
   const double position_at_activation = hw_state_values_[0];
 
@@ -910,58 +700,6 @@ TEST_F( SafetyPositionControllerTest, StatusPublishesCorrectFields )
   EXPECT_FALSE( captured.compliant_mode );
   EXPECT_FALSE( captured.current_limits_enabled );
   EXPECT_FALSE( captured.collision_check_enabled ); // disabled in params
-  EXPECT_FALSE( captured.estop_engaged );
-}
-
-TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopEngage )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-
-  SafetyPositionControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-  EXPECT_FALSE( captured.estop_engaged );
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-}
-
-TEST_F( SafetyPositionControllerTest, StatusUpdatesOnEstopRelease )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-
-  SafetyPositionControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-
-  sendEstop( false );
-  callUpdate();
-  EXPECT_FALSE( captured.estop_engaged );
 }
 
 TEST_F( SafetyPositionControllerTest, StatusReflectsCollisionCheckEnabled )
@@ -1020,138 +758,24 @@ TEST_F( SafetyPositionControllerTest, RepeatedActivateDeactivateCycles )
 
     // Verify references are NaN after activation (reset)
     for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-      EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
+      EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) )
           << "Cycle " << cycle << ": reference_interfaces_[" << i << "] not NaN after activate";
     }
 
     // Set valid references and verify operation
-    for ( auto &v : hw_state_values_ ) v = 0.0;
-    controller_->reference_interfaces_[0] = 0.01;
-    controller_->reference_interfaces_[1] = 0.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hw_state_values_.fill( 0.0 );
+    hector_test::reference( *controller_, 0 ) = 0.01;
+    hector_test::reference( *controller_, 1 ) = 0.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     auto ret = callUpdate();
     EXPECT_EQ( ret, controller_interface::return_type::OK );
     EXPECT_GT( std::abs( hw_cmd_values_[0] ), 0.0 );
 
     deactivateController();
 
-    // The engaged E-stop is cleared; the subscriptions outlive the activation
-    EXPECT_FALSE( controller_->estop_engaged_.load() );
-    EXPECT_TRUE( controller_->estop_subscriber_ != nullptr );
+    // The subscription outlives the activation
     EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
   }
-}
-
-TEST_F( SafetyPositionControllerTest, EventStatusReportsTheCurrentCycle )
-{
-  // The status timer never fires in these tests, which is exactly the documented
-  // status_publish_rate=0 mode: what an event publishes is all a consumer ever sees.
-  // An E-stop release parks the pipeline within the same cycle, so the message the
-  // release publishes must already report that.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-
-  SafetyPositionControllerStatus captured;
-  int publishes = 0;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).WillRepeatedly( [&]( const auto &msg ) {
-    captured = msg;
-    ++publishes;
-  } );
-
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-  for ( int i = 0; i < 5; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-
-  sendEstop( true );
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_TRUE( captured.estop_engaged );
-
-  sendEstop( false );
-  const int publishes_before_release = publishes;
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  ASSERT_GT( publishes, publishes_before_release ) << "the release must publish a status";
-  EXPECT_FALSE( captured.estop_engaged );
-  EXPECT_TRUE( captured.parked ) << "the release parks the pipeline in this very cycle";
-}
-
-TEST_F( SafetyPositionControllerTest, ReactivateAfterEstop )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-
-  deactivateController();
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-
-  sendEstop( false );
-  activateController();
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-
-  // References should be NaN (fresh activation)
-  for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) );
-  }
-
-  // Verify it works normally after re-activation
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.01;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
-  EXPECT_GT( std::abs( hw_cmd_values_[0] ), 0.0 );
-}
-
-TEST_F( SafetyPositionControllerTest, EstopSurvivesReactivation )
-{
-  // estop_active_ tracks the external safety signal, so restarting the controller must
-  // not silently release it: the first cycle after activation re-engages the hold.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  setStateValue( "joint1", 0.5 );
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  sendEstop( true );
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  ASSERT_TRUE( controller_->estop_engaged_.load() );
-
-  deactivateController();
-  EXPECT_TRUE( controller_->estop_active_.load() ) << "the E-stop request must survive";
-
-  activateController();
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_TRUE( controller_->estop_engaged_.load() )
-      << "a still-active E-stop must re-engage instead of resuming motion";
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
 }
 
 TEST_F( SafetyPositionControllerTest, BusyStateHandleSkipsTheCycleWithoutFailing )
@@ -1166,10 +790,10 @@ TEST_F( SafetyPositionControllerTest, BusyStateHandleSkipsTheCycleWithoutFailing
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -1202,10 +826,10 @@ TEST_F( SafetyPositionControllerTest, NonFiniteJointStateHoldsPositionAndIsNever
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -1245,10 +869,10 @@ TEST_F( SafetyPositionControllerTest, ProlongedBusyStateHandleParksOnRecovery )
       .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -1279,7 +903,7 @@ TEST_F( SafetyPositionControllerTest, ProlongedBusyStateHandleParksOnRecovery )
   }
 
   // A NEW reference releases the park and is tracked again
-  controller_->reference_interfaces_[0] = 0.1;
+  hector_test::reference( *controller_, 0 ) = 0.1;
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
   EXPECT_FALSE( controller_->pipeline_->parked() );
   const double resume_start = hw_cmd_values_[0];
@@ -1301,10 +925,10 @@ TEST_F( SafetyPositionControllerTest, ProlongedNonFiniteJointStateParksOnRecover
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -1338,10 +962,10 @@ TEST_F( SafetyPositionControllerTest, ProlongedMeasurementDivergenceParksOnRecov
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -1377,53 +1001,6 @@ TEST_F( SafetyPositionControllerTest, ProlongedMeasurementDivergenceParksOnRecov
   }
 }
 
-TEST_F( SafetyPositionControllerTest, EstopPulseDuringStateReadOutageIsHonored )
-{
-  // An E-stop must not need working joint-state reads: an engage (or a whole
-  // engage+release pulse) inside a read outage previously fell through the skip-cycle
-  // early return and was lost — the arm resumed the pre-outage reference untouched.
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  for ( int i = 0; i < 5; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    followCommands();
-  }
-  ASSERT_GT( hw_cmd_values_[0], 0.0 );
-
-  {
-    const auto state_index = static_cast<size_t>( controller_->joint_index_[0] );
-    std::unique_lock<std::shared_mutex> busy( state_ifaces_[state_index]->get_mutex() );
-    sendEstop( true );
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    EXPECT_TRUE( controller_->estop_engaged_.load() )
-        << "the engage edge must not wait for joint states";
-    sendEstop( false );
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    EXPECT_FALSE( controller_->estop_engaged_.load() );
-  }
-
-  // The E-stop abandoned the reference: recovery must hold and park, not resume the
-  // pre-outage target.
-  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-  EXPECT_TRUE( controller_->pipeline_->parked() )
-      << "the release must park like any E-stop release";
-  const double held = hw_cmd_values_[0];
-  for ( int i = 0; i < 10; ++i ) {
-    ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
-    EXPECT_NEAR( hw_cmd_values_[0], held, 1e-9 ) << "the abandoned reference must not be resumed";
-  }
-}
-
 TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
 {
   initController();
@@ -1433,14 +1010,50 @@ TEST_F( SafetyPositionControllerTest, BusyCommandHandleDoesNotFailTheCycle )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   std::unique_lock<std::shared_mutex> busy( cmd_ifaces_[0]->get_mutex() );
   EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
       << "a busy command handle must not fail the update";
+}
+
+TEST_F( SafetyPositionControllerTest, SemanticDescriptionComesFromTheParameterOverride )
+{
+  const std::string srdf = "<robot name=\"test_robot\"/>";
+  initController( {}, false, false, "test_robot.urdf",
+                  { rclcpp::Parameter( "robot_description_semantic", srdf ) } );
+  EXPECT_TRUE( controller_->srdf_received_ ) << "the controller manager passes the SRDF as an "
+                                                "override, which only a declared parameter sees";
+  EXPECT_EQ( controller_->srdf_, srdf );
+}
+
+TEST_F( SafetyPositionControllerTest, BusyReferenceHandleDoesNotFailTheCycle )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  followCommands();
+  const double before = hw_cmd_values_[0];
+
+  {
+    std::unique_lock<std::shared_mutex> busy(
+        controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+    EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+        << "a busy reference handle must not fail the update";
+  }
+  EXPECT_GT( hw_cmd_values_[0], before ) << "the joint keeps moving to last cycle's target";
 }
 
 // ============================================================================
@@ -1457,18 +1070,52 @@ TEST_F( SafetyPositionControllerTest, SwitchingChainedModeInvalidatesReferences 
   activateController();
 
   for ( const bool chained : { true, false } ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 2.0;
-    controller_->reference_interfaces_[2] = 3.0;
+    hector_test::reference( *controller_, 0 ) = 1.0;
+    hector_test::reference( *controller_, 1 ) = 2.0;
+    hector_test::reference( *controller_, 2 ) = 3.0;
 
     controller_->on_set_chained_mode( chained );
 
     for ( size_t i = 0; i < controlled_joints_.size(); ++i ) {
-      EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) )
+      EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) )
           << "reference_interfaces_[" << i << "] must be NaN after switching to "
           << ( chained ? "chained" : "unchained" ) << " mode";
     }
   }
+}
+
+TEST_F( SafetyPositionControllerTest, AZeroUpdateRateRefusesConfiguration )
+{
+  controller_interface::ControllerInterfaceParams params;
+  params.controller_name = "test_safety_position";
+  params.robot_description = hector_test::loadUrdfFile( "test_robot.urdf" );
+  params.update_rate = 0;
+  params.controller_manager_update_rate = 0;
+  rclcpp::NodeOptions opts;
+  opts.parameter_overrides( { rclcpp::Parameter( "joints", controlled_joints_ ),
+                              rclcpp::Parameter( "check_self_collisions", false ) } );
+  params.node_options = opts;
+  ASSERT_EQ( controller_->init( params ), controller_interface::return_type::OK );
+  ASSERT_EQ( controller_->get_update_rate(), 0u );
+  controller_->srdf_received_ = true;
+  EXPECT_EQ( controller_->on_configure( rclcpp_lifecycle::State() ),
+             controller_interface::CallbackReturn::ERROR );
+}
+
+// The controller manager owns the e-stop and stops this controller on it
+TEST_F( SafetyPositionControllerTest, SubscribesToNoEstop )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  EXPECT_FALSE( controller_->get_node()->has_parameter( "e_stop_topic" ) );
+  EXPECT_FALSE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                              node_name + "/safety_estop" ) );
 }
 
 TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
@@ -1487,10 +1134,8 @@ TEST_F( SafetyPositionControllerTest, InputSubscriptionsSurviveReactivation )
   const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
   EXPECT_TRUE( rtest::findSubscription<safety_position_controller::CmdType>(
       controller_->get_node(), node_name + "/commands" ) );
-  EXPECT_TRUE(
-      rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(), node_name + "/safety_estop" ) );
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
   sendCommand( { 0.5, 0.0, 0.0 } );
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callFullUpdate(), controller_interface::return_type::OK );
@@ -1579,6 +1224,8 @@ public:
                                           "unconfigured" );
     auto cb = controller_->on_configure( unconfigured );
     ASSERT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
+    // The controller manager exports the references after configure
+    ASSERT_EQ( controller_->export_reference_interfaces().size(), controller_->params_.joints.size() );
   }
 
   void setupHardwareInterfaces( const std::vector<std::string> &joints = {} )
@@ -1591,17 +1238,13 @@ public:
     cmd_ifaces_.clear();
     state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     for ( size_t i = 0; i < cj.size(); ++i ) {
-      cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-          cj[i], "position", &hw_cmd_values_[i] ) );
+      cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
     }
     for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
-      state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-          controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+      state_ifaces_.push_back(
+          hw_state_values_.make_state( i, controller_->all_joint_names_[i], "position" ) );
     }
-#pragma GCC diagnostic pop
 
     controller_->command_interfaces_.clear();
     controller_->state_interfaces_.clear();
@@ -1641,13 +1284,13 @@ TEST_F( SafetyPositionControllerCollisionTest, NoCollisionAllowsMovement )
   activateController();
 
   // Start at [0,0,0] (straight chain, no collision)
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // Command a small safe movement
   double small_step = 0.01;
-  controller_->reference_interfaces_[0] = small_step;
-  controller_->reference_interfaces_[1] = small_step;
-  controller_->reference_interfaces_[2] = small_step;
+  hector_test::reference( *controller_, 0 ) = small_step;
+  hector_test::reference( *controller_, 1 ) = small_step;
+  hector_test::reference( *controller_, 2 ) = small_step;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -1671,9 +1314,9 @@ TEST_F( SafetyPositionControllerCollisionTest, CollisionBlocksMovement )
   setStateValue( "joint3", -M_PI );
 
   // Command to the same colliding position
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = M_PI;
-  controller_->reference_interfaces_[2] = -M_PI;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = M_PI;
+  hector_test::reference( *controller_, 2 ) = -M_PI;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -1698,13 +1341,13 @@ TEST_F( SafetyPositionControllerCollisionTest, CollisionBypassSkipsCheck )
   armBypassOn( *controller_ );
 
   // Start at safe position
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // Command a small movement
   double small_step = 0.01;
-  controller_->reference_interfaces_[0] = small_step;
-  controller_->reference_interfaces_[1] = small_step;
-  controller_->reference_interfaces_[2] = small_step;
+  hector_test::reference( *controller_, 0 ) = small_step;
+  hector_test::reference( *controller_, 1 ) = small_step;
+  hector_test::reference( *controller_, 2 ) = small_step;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -1729,14 +1372,14 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointNoCollisionAtZero 
   activateController();
 
   // All joints at 0 (straight chain, no collision)
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // Command small movement on joint4 (continuous)
   double small_step = 0.01;
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-  controller_->reference_interfaces_[3] = small_step;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
+  hector_test::reference( *controller_, 3 ) = small_step;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -1757,14 +1400,14 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointAtLargeAngle )
   activateController();
 
   // Straight chain, joint4 at 2*pi (should be equivalent to 0 for collision)
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
   setStateValue( "joint4", 2.0 * M_PI );
 
   // Command near current position (small perturbation)
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-  controller_->reference_interfaces_[3] = 2.0 * M_PI + 0.01;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
+  hector_test::reference( *controller_, 3 ) = 2.0 * M_PI + 0.01;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -1793,10 +1436,10 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointCollisionDetected 
   setStateValue( "joint4", 0.0 );
 
   // Command to the same colliding position
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = M_PI;
-  controller_->reference_interfaces_[2] = -M_PI;
-  controller_->reference_interfaces_[3] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = M_PI;
+  hector_test::reference( *controller_, 2 ) = -M_PI;
+  hector_test::reference( *controller_, 3 ) = 0.0;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -1820,6 +1463,19 @@ TEST_F( SafetyPositionControllerCollisionTest, ContinuousJointCollisionDetected 
 // Current Limits Tests
 // ============================================================================
 
+// A cap beside position, so the claim never asks the hardware for a torque goal
+TEST_F( SafetyPositionControllerTest, CurrentLimitsClaimMaxCurrent )
+{
+  initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true );
+  configureController();
+  const auto names = controller_->command_interface_configuration().names;
+  for ( const auto &joint : controlled_joints_ ) {
+    EXPECT_NE( std::find( names.begin(), names.end(), joint + "/max_current" ), names.end() )
+        << joint;
+    EXPECT_EQ( std::find( names.begin(), names.end(), joint + "/current" ), names.end() ) << joint;
+  }
+}
+
 TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteStiffByDefault )
 {
   initController( {}, /*check_self_collisions=*/false, /*set_current_limits=*/true );
@@ -1833,21 +1489,16 @@ TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteStiffByDefault )
   cmd_ifaces_.clear();
   state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        cj[i], "position", &hw_cmd_values_[i] ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
   }
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        cj[i], "current", &hw_cmd_values_[cj.size() + i] ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "max_current" ) );
   }
   for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+    state_ifaces_.push_back(
+        hw_state_values_.make_state( i, controller_->all_joint_names_[i], "position" ) );
   }
-#pragma GCC diagnostic pop
 
   controller_->command_interfaces_.clear();
   controller_->state_interfaces_.clear();
@@ -1860,10 +1511,10 @@ TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteStiffByDefault )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
 
@@ -1886,21 +1537,16 @@ TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteCompliantWhenEnabled )
   cmd_ifaces_.clear();
   state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        cj[i], "position", &hw_cmd_values_[i] ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, cj[i], "position" ) );
   }
   for ( size_t i = 0; i < cj.size(); ++i ) {
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        cj[i], "current", &hw_cmd_values_[cj.size() + i] ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( cj.size() + i, cj[i], "max_current" ) );
   }
   for ( size_t i = 0; i < controller_->all_joint_names_.size(); ++i ) {
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        controller_->all_joint_names_[i], "position", &hw_state_values_[i] ) );
+    state_ifaces_.push_back(
+        hw_state_values_.make_state( i, controller_->all_joint_names_[i], "position" ) );
   }
-#pragma GCC diagnostic pop
 
   controller_->command_interfaces_.clear();
   controller_->state_interfaces_.clear();
@@ -1916,10 +1562,10 @@ TEST_F( SafetyPositionControllerTest, CurrentLimitsWriteCompliantWhenEnabled )
   // Enable compliant mode
   controller_->in_compliant_mode_.store( true );
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
 
@@ -1945,14 +1591,14 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
 
   // Start close to the limit so per-cycle velocity stepping (active also during bypass)
   // does not dominate the test: joint2 max step = 2.0/100 * 1.5 = 0.03.
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
   setStateValue( "joint2", 1.5 );
 
   // joint2 upper limit is 1.5, range = 3.0, tolerance = 3% -> 0.09 extra
   // Without bypass: command beyond 1.5 should clamp to 1.5
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 1.55;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 1.55;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
   EXPECT_LE( hw_cmd_values_[1], 1.5 ) << "Without bypass, should clamp to upper limit";
@@ -1960,9 +1606,9 @@ TEST_F( SafetyPositionControllerTest, SafetyBypassRelaxesJointLimits )
   // Enable bypass
   armBypassOn( *controller_ );
 
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 1.55;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 1.55;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
 
@@ -2060,9 +1706,9 @@ TEST_F( SafetyPositionControllerCollisionTest, BypassSkipsCollisionButAllowsRela
   setStateValue( "joint3", -M_PI );
 
   // Command to the colliding position
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = M_PI;
-  controller_->reference_interfaces_[2] = -M_PI;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = M_PI;
+  hector_test::reference( *controller_, 2 ) = -M_PI;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -2085,12 +1731,12 @@ TEST_F( SafetyPositionControllerCollisionTest, InfInputDetectedAsCollision )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // Command with infinity — should be treated as collision (safe default)
-  controller_->reference_interfaces_[0] = std::numeric_limits<double>::infinity();
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = std::numeric_limits<double>::infinity();
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   // First need to call update so collision checker sees the inf
   // The inf is clamped to the position limits (joint1 has limits [-pi, pi])
@@ -2098,49 +1744,6 @@ TEST_F( SafetyPositionControllerCollisionTest, InfInputDetectedAsCollision )
   // So this tests the controller's overall handling — commands should still be safe
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
-}
-
-// ============================================================================
-// E-stop holds positions across multiple cycles
-// ============================================================================
-
-TEST_F( SafetyPositionControllerTest, EstopHoldsAcrossMultipleCycles )
-{
-  initController();
-  configureController();
-  setupHardwareInterfaces();
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  setStateValue( "joint1", 0.5 );
-  setStateValue( "joint2", -0.3 );
-  setStateValue( "joint3", 1.0 );
-
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-
-  // First update to read positions
-  callUpdate();
-
-  sendEstop( true );
-  callUpdate();
-
-  // Commands should be held positions regardless of what reference says
-  controller_->reference_interfaces_[0] = 999.0;
-  controller_->reference_interfaces_[1] = 999.0;
-  controller_->reference_interfaces_[2] = 999.0;
-
-  callUpdate();
-
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.3 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
-
-  // Third cycle still holds
-  callUpdate();
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
 }
 
 // ============================================================================
@@ -2175,12 +1778,12 @@ TEST_F( SafetyPositionControllerCollisionTest, TransientUncontrolledJointGlitchD
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // Settle at a collision-free target so the configuration is stationary.
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   for ( int cycle = 0; cycle < 300; ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
     setStateValue( "joint1", hw_cmd_values_[0] );
@@ -2195,7 +1798,7 @@ TEST_F( SafetyPositionControllerCollisionTest, TransientUncontrolledJointGlitchD
   setStateValue( "joint4", 0.0 );
 
   // A new reference after the recovery must be tracked again.
-  controller_->reference_interfaces_[0] = 0.2;
+  hector_test::reference( *controller_, 0 ) = 0.2;
   for ( int cycle = 0; cycle < 300; ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
     setStateValue( "joint1", hw_cmd_values_[0] );
@@ -2219,10 +1822,10 @@ TEST_F( SafetyPositionControllerCollisionTest, ProlongedUncontrolledJointOutageP
   } );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 5; ++i ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -2275,12 +1878,12 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeRampsAndReachesTarget )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // joint1 rotates the whole chain about z → no collision along the way
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   double prev_cmd = 0.0, prev_v = 0.0, max_dv = 0.0, max_v = 0.0;
   int reached_at = -1;
@@ -2316,12 +1919,12 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeStopsAtCollisionAndReportsS
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // joint2 = pi folds link4 into link1 → collision on the way
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = M_PI;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = M_PI;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int cycle = 0; cycle < 500; ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -2371,12 +1974,12 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeParksAfterStallAndResumesOn
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
+  hw_state_values_.fill( 0.0 );
 
   // joint2 = pi folds into a self-collision → the QP stalls at the boundary
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = M_PI;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = M_PI;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int cycle = 0; cycle < 600 && !controller_->pipeline_->parked(); ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -2397,7 +2000,7 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeParksAfterStallAndResumesOn
   EXPECT_NEAR( hw_cmd_values_[1], parked_cmd, 1e-6 ) << "parked limb must not creep";
 
   // A NEW reference (retract away from the collision) releases the park and is tracked
-  controller_->reference_interfaces_[1] = 0.3;
+  hector_test::reference( *controller_, 1 ) = 0.3;
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
   EXPECT_FALSE( controller_->pipeline_->parked() );
 
@@ -2424,10 +2027,10 @@ TEST_F( SafetyPositionControllerCollisionTest, ParkEventPublishesTheParkedState 
 
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = M_PI; // folds into a self-collision
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = M_PI; // folds into a self-collision
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int cycle = 0; cycle < 600 && !controller_->pipeline_->parked(); ++cycle ) {
     ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
@@ -2450,10 +2053,10 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeJointDeviationBoxWiring )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.5; // leash: v_max(1.0) * 0.3 s → leashed ref 0.3
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 0.5; // leash: v_max(1.0) * 0.3 s → leashed ref 0.3
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
 
@@ -2479,10 +2082,10 @@ TEST_F( SafetyPositionControllerCollisionTest, QpModeWorksWithoutCollisionChecke
 
   EXPECT_TRUE( controller_->collision_checker_ == nullptr );
 
-  for ( auto &v : hw_state_values_ ) v = 0.0;
-  controller_->reference_interfaces_[0] = 0.3;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hw_state_values_.fill( 0.0 );
+  hector_test::reference( *controller_, 0 ) = 0.3;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   double prev_cmd = 0.0, prev_v = 0.0, max_dv = 0.0;
   for ( int cycle = 0; cycle < 200; ++cycle ) {

@@ -5,10 +5,12 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "controller_interface/helpers.hpp"
 #include "hardware_interface/loaned_command_interface.hpp"
+#include "hector_ros_controllers/reference_handles.hpp"
 #include "rclcpp/logging.hpp"
 #include "rclcpp/qos.hpp"
 
@@ -18,7 +20,7 @@ namespace sync_group_velocity_to_position_controller
 SyncGroupVelocityToPositionController::SyncGroupVelocityToPositionController()
     : controller_interface::ChainableControllerInterface(), stopping_vel_threshold_( 0.005 ),
       max_velocity_( 1.0 ), max_acceleration_( 2.0 ), max_deceleration_( 4.0 ),
-      e_stop_active_( false ), interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
+      interfaces_valid_( false ), kp_( 0.0 ), kd_( 0.0 ), kp_sync_( 0.0 ),
       velocity_command_timeout_( 0.0 ), rt_buffer_ptr_( nullptr )
 {
 }
@@ -104,7 +106,7 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read
   }
 
   const size_t num_joints = reference_interface_names_.size();
-  reference_interfaces_.resize( num_joints );
+  reference_values_.assign( num_joints, std::numeric_limits<double>::quiet_NaN() );
   hold_positions_.resize( num_joints );
   desired_positions_.resize( num_joints );
   move_states_.resize( num_joints );
@@ -115,7 +117,6 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::read
   joint_lower_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
   joint_upper_limits_.assign( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
 
-  e_stop_topic_ = params_.e_stop_topic;
   kp_ = params_.kp;
   kd_ = params_.kd;
   kp_sync_ = params_.kp_sync;
@@ -341,28 +342,15 @@ SyncGroupVelocityToPositionController::on_activate( const rclcpp_lifecycle::Stat
 
   // Reset command buffer and reference interfaces to prevent stale velocity commands
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
-  std::fill( reference_interfaces_.begin(), reference_interfaces_.end(),
-             std::numeric_limits<double>::quiet_NaN() );
-  e_stop_active_.writeFromNonRT( false );
+  if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
+    return controller_interface::CallbackReturn::ERROR;
+  }
 
   // Topic subscriber for non-chained mode
   auto cmd_qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
   cmd_sub_ = get_node()->create_subscription<CmdType>(
       "~/commands", cmd_qos,
       [this]( const CmdType::SharedPtr msg ) { rt_buffer_ptr_.writeFromNonRT( msg ); } );
-
-  auto qos = rclcpp::QoS( rclcpp::KeepLast( 1 ) );
-  hard_estop_sub_ = this->get_node()->create_subscription<std_msgs::msg::Bool>(
-      e_stop_topic_, qos, [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
-        if ( msg->data ) {
-          RCLCPP_WARN(
-              get_node()->get_logger(),
-              "Hard E-Stop activated, stopping all joints && enable continuous target pos update" );
-          e_stop_active_.writeFromNonRT( true );
-        } else {
-          e_stop_active_.writeFromNonRT( false );
-        }
-      } );
 
   update_joint_states_if_valid();
 
@@ -431,7 +419,6 @@ controller_interface::CallbackReturn SyncGroupVelocityToPositionController::on_d
   sync_flipper_action_server_.reset();
   rt_buffer_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
   cmd_sub_.reset();
-  hard_estop_sub_.reset();
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -484,16 +471,16 @@ SyncGroupVelocityToPositionController::state_interface_configuration() const
   return config;
 }
 
-std::vector<hardware_interface::CommandInterface>
-SyncGroupVelocityToPositionController::on_export_reference_interfaces()
+std::vector<hardware_interface::CommandInterface::SharedPtr>
+SyncGroupVelocityToPositionController::on_export_reference_interfaces_list()
 {
-  std::vector<hardware_interface::CommandInterface> reference_interfaces;
+  std::vector<hardware_interface::CommandInterface::SharedPtr> reference_interfaces;
   RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interfaces" );
   for ( size_t i = 0; i < reference_interface_names_.size(); ++i ) {
     RCLCPP_INFO( get_node()->get_logger(), "Exporting reference interface %s",
                  reference_interface_names_[i].c_str() );
-    reference_interfaces.emplace_back( get_node()->get_name(), reference_interface_names_[i],
-                                       &reference_interfaces_[i] );
+    reference_interfaces.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        get_node()->get_name(), reference_interface_names_[i] ) );
   }
   return reference_interfaces;
 }
@@ -504,22 +491,32 @@ SyncGroupVelocityToPositionController::update_reference_from_subscribers(
 {
   auto joint_commands = rt_buffer_ptr_.readFromRT();
   if ( joint_commands && *joint_commands ) {
-    if ( reference_interfaces_.size() != ( *joint_commands )->data.size() ) {
-      RCLCPP_ERROR_THROTTLE(
-          get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
-          "command size (%zu) does not match number of reference interfaces (%zu)",
-          ( *joint_commands )->data.size(), reference_interfaces_.size() );
-      return controller_interface::return_type::ERROR;
+    const auto &data = ( *joint_commands )->data;
+    const auto &references = ordered_exported_reference_interfaces_;
+    if ( references.size() != data.size() ) {
+      // Not a command to this controller, and keeping the previous one would keep a velocity
+      // running. No target holds; an ERROR would stop the whole chain for one bad message.
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                            "Holding: a command of size %zu, %zu joints are controlled",
+                            data.size(), references.size() );
+      std::ignore = hector_ros_controllers::clear_references( references );
+      return controller_interface::return_type::OK;
     }
-    std::copy( ( *joint_commands )->data.begin(), ( *joint_commands )->data.end(),
-               reference_interfaces_.begin() );
+    if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {
+      RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                            "%zu reference interfaces were busy; they keep their previous value",
+                            busy );
+    }
   }
 
   return controller_interface::return_type::OK;
 }
 
 bool SyncGroupVelocityToPositionController::on_set_chained_mode( bool /*chained_mode*/ )
-{ return true; }
+{
+  // The previous source's last reference must not outlive the switch
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
+}
 
 // ---------------------------------------------------------------------------
 // State reading
@@ -792,7 +789,7 @@ void SyncGroupVelocityToPositionController::publish_debug_joint_state_in()
 
   debug_in_js_msg_.header.stamp = get_node()->now();
   for ( size_t i = 0; i < joints_.size(); i++ ) {
-    debug_in_js_msg_.velocity[i] = reference_interfaces_[i];
+    debug_in_js_msg_.velocity[i] = reference_values_[i];
   }
   rt_debug_in_js_pub_->try_publish( debug_in_js_msg_ );
 }
@@ -822,7 +819,7 @@ void SyncGroupVelocityToPositionController::publish_sync_status(
   msg.header.stamp = get_node()->now();
 
   for ( size_t i = 0; i < joints_.size(); ++i ) {
-    msg.vel_command_in[i] = reference_interfaces_[i];
+    msg.vel_command_in[i] = reference_values_[i];
     msg.vel_command_out[i] = vel_commands_out[i];
 
     if ( sync_pairs_.has_partner( i ) ) {
@@ -846,6 +843,12 @@ controller_interface::return_type
 SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::Time &time,
                                                                   const rclcpp::Duration &period )
 {
+  if ( const auto busy = hector_ros_controllers::read_references(
+           ordered_exported_reference_interfaces_, reference_values_ );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 1000,
+                          "%zu reference interfaces were busy; using their last value", busy );
+  }
   update_joint_states_if_valid();
 
   // Snapshot positions for non-RT consumers (action feedback). try_set is non-blocking.
@@ -856,8 +859,8 @@ SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::
   // Velocity command timeout: zero references if no non-zero command received within timeout
   if ( velocity_command_timeout_ > 0.0 ) {
     bool has_nonzero_command = false;
-    for ( size_t i = 0; i < reference_interfaces_.size(); i++ ) {
-      if ( !std::isnan( reference_interfaces_[i] ) && reference_interfaces_[i] != 0.0 ) {
+    for ( size_t i = 0; i < reference_values_.size(); i++ ) {
+      if ( !std::isnan( reference_values_[i] ) && reference_values_[i] != 0.0 ) {
         has_nonzero_command = true;
         break;
       }
@@ -865,9 +868,9 @@ SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::
     if ( has_nonzero_command ) {
       last_command_time_ = time;
     } else if ( ( time - last_command_time_ ).seconds() > velocity_command_timeout_ ) {
-      for ( size_t i = 0; i < reference_interfaces_.size(); i++ ) {
-        if ( !std::isnan( reference_interfaces_[i] ) ) {
-          reference_interfaces_[i] = 0.0;
+      for ( size_t i = 0; i < reference_values_.size(); i++ ) {
+        if ( !std::isnan( reference_values_[i] ) ) {
+          reference_values_[i] = 0.0;
         }
       }
     }
@@ -876,10 +879,10 @@ SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::
   bool successful = true;
 
   // Process active group actions (drive/sync). This may write position commands directly
-  // and set reference_interfaces_ to NaN for controlled joints to skip normal control.
+  // and clear the references of the joints it drives to skip normal control.
   successful &= process_group_actions( time );
 
-  update_sync_states( reference_interfaces_ );
+  update_sync_states( reference_values_ );
 
   const double dt = period.seconds();
   std::vector<double> vel_commands_out( joints_.size(), std::numeric_limits<double>::quiet_NaN() );
@@ -890,7 +893,7 @@ SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::
     // before the upstream chain produces commands, and is intentionally
     // nulled by process_group_actions() while a group action is driving the
     // joint -- both are normal, so this is debug-level only.
-    if ( std::isnan( reference_interfaces_[joint_idx] ) ) {
+    if ( std::isnan( reference_values_[joint_idx] ) ) {
       RCLCPP_DEBUG_THROTTLE( get_node()->get_logger(), *( get_node()->get_clock() ), 2000,
                              "No velocity reference for joint '%s' (idle or group-action driven)",
                              joints_[joint_idx].c_str() );
@@ -910,7 +913,7 @@ SyncGroupVelocityToPositionController::update_and_write_commands( const rclcpp::
     // Clamp velocity reference to max_velocity (use abs to be safe if param is set negative)
     const double velocity_limit = std::abs( max_velocity_ );
     const double vel_command =
-        std::clamp( reference_interfaces_[joint_idx], -velocity_limit, velocity_limit );
+        std::clamp( reference_values_[joint_idx], -velocity_limit, velocity_limit );
 
     update_move_states( vel_command, joint_idx, time );
 

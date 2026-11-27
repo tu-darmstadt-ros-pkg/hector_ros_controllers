@@ -127,7 +127,6 @@ private:
   // terminal flag (succeed/abort/canceled set in RT) before the next accept replaces
   // the timer. Access ONLY via {store,load,exchange}_goal_slot.
   RealtimeGoalHandlePtr previous_rt_goal_;
-  GripperCommandAction::Result::SharedPtr pre_alloc_result_;
   rclcpp::TimerBase::SharedPtr goal_handle_timer_;
   rclcpp::Duration action_monitor_period_;
   rclcpp::Time last_movement_time_;

@@ -39,7 +39,6 @@ public:
   struct StatusFlags {
     bool bypass_active{ false };
     bool compliant_mode{ false };
-    bool estop_engaged{ false };
   };
 
   /**

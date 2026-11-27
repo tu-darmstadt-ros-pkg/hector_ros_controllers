@@ -5,7 +5,9 @@
 // into a ResourceManager, and drives the read/write loop directly.
 
 #include <cmath>
+#include <fstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "gmock/gmock.h"
@@ -13,12 +15,15 @@
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#include "dynamics_mock_hardware/dynamics_mock_hardware.hpp"
+#include "hardware_interface/component_parser.hpp"
 #include "hardware_interface/loaned_command_interface.hpp"
 #include "hardware_interface/loaned_state_interface.hpp"
 #pragma GCC diagnostic pop
 #include "hardware_interface/resource_manager.hpp"
 #include "hardware_interface/types/lifecycle_state_names.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
+#include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/node.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 
@@ -557,6 +562,163 @@ TEST_F( DynamicsMockHardwareTest, ModeSwitching_RejectsMultipleInterfaces )
 }
 
 // ===========================================================================
+// Test: torque_off is a mode, claimed without a value
+// ===========================================================================
+
+std::string withTorqueOff( std::string block )
+{
+  const std::string anchor = R"(<command_interface name="effort"/>)";
+  block.insert( block.find( anchor ) + anchor.size(), R"(<command_interface name="torque_off"/>)" );
+  return block;
+}
+
+// A released torque_off stays limp, as a hold after a fault releases it, and a motion start brings
+// the torque back holding where the joint was left
+TEST_F( DynamicsMockHardwareTest, TorqueOffGoesLimpAndHoldsOnlyWithAMotionStart )
+{
+  const std::string urdf =
+      std::string( URDF_HEAD ) +
+      withTorqueOff( makeHardwareBlock( -9.81, 100.0, 100.0, 20.0, 10.0, 0.001, 0.5 ) ) +
+      std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+
+  auto pos_s = rm.claim_state_interface( "joint1/position" );
+  {
+    auto pos_c = rm.claim_command_interface( "joint1/position" );
+    ASSERT_TRUE( pos_c.set_value( 0.5 ) );
+  }
+  run_cycles( rm, 50 );
+  ASSERT_NEAR( pos_s.get_optional().value(), 0.5, 0.1 );
+
+  ASSERT_TRUE( rm.prepare_command_mode_switch( { "joint1/torque_off" }, { "joint1/position" } ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/torque_off" }, { "joint1/position" } ) );
+  run_cycles( rm, 30 );
+  const double released_at = pos_s.get_optional().value();
+  EXPECT_LT( released_at, 0.3 ) << "a limp pendulum falls under gravity";
+
+  ASSERT_TRUE( rm.prepare_command_mode_switch( {}, { "joint1/torque_off" } ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( {}, { "joint1/torque_off" } ) );
+  run_cycles( rm, 30 );
+  const double restarted_at = pos_s.get_optional().value();
+  EXPECT_LT( restarted_at, released_at - 0.1 ) << "releasing torque_off alone brought torque back";
+
+  ASSERT_TRUE( rm.prepare_command_mode_switch( { "joint1/position" }, {} ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/position" }, {} ) );
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( pos_s.get_optional().value(), restarted_at, 0.1 )
+      << "torque came back driving to the goal from before the torque off";
+}
+
+// Like the real drivers, a NaN position command holds the position at the first NaN
+TEST_F( DynamicsMockHardwareTest, NaNPositionHoldsLatched )
+{
+  const std::string urdf = std::string( URDF_HEAD ) +
+                           makeHardwareBlock( -9.81, 100.0, 100.0, 20.0, 10.0, 0.001, 0.5 ) +
+                           std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+  auto pos_s = rm.claim_state_interface( "joint1/position" );
+  run_cycles( rm, 50 );
+  const double before = pos_s.get_optional().value();
+  {
+    auto pos_c = rm.claim_command_interface( "joint1/position" );
+    ASSERT_TRUE( pos_c.set_value( std::numeric_limits<double>::quiet_NaN() ) );
+  }
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( pos_s.get_optional().value(), before, 0.05 ) << "sagged under gravity";
+}
+
+// A stop without a successor (hcm's handover) holds instead of keeping the last velocity
+TEST_F( DynamicsMockHardwareTest, StopOnlyHolds )
+{
+  const std::string urdf = std::string( URDF_HEAD ) +
+                           makeHardwareBlock( 0.0, 100.0, 100.0, 20.0, 50.0, 0.001 ) +
+                           std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/velocity" }, { "joint1/position" } ) );
+  auto pos_s = rm.claim_state_interface( "joint1/position" );
+  {
+    auto vel_c = rm.claim_command_interface( "joint1/velocity" );
+    ASSERT_TRUE( vel_c.set_value( 1.0 ) );
+  }
+  run_cycles( rm, 50 );
+
+  ASSERT_TRUE( rm.perform_command_mode_switch( {}, { "joint1/velocity" } ) );
+  run_cycles( rm, 20 );
+  const double stopped_at = pos_s.get_optional().value();
+  run_cycles( rm, 100 );
+  EXPECT_NEAR( pos_s.get_optional().value(), stopped_at, 0.02 ) << "kept moving after the stop";
+}
+
+// hcm runs the successor's first update before the perform that hands the joint over
+TEST_F( DynamicsMockHardwareTest, AHandoverKeepsTheSuccessorsFirstCommand )
+{
+  const std::string urdf =
+      std::string( URDF_HEAD ) + makeHardwareBlock( 0.0 ) + std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/velocity" }, { "joint1/position" } ) );
+  run_cycles( rm, 10 );
+  {
+    auto pos_c = rm.claim_command_interface( "joint1/position" );
+    ASSERT_TRUE( pos_c.set_value( 0.5 ) );
+  }
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/position" }, { "joint1/velocity" } ) );
+  auto pos_c = rm.claim_command_interface( "joint1/position" );
+  EXPECT_EQ( pos_c.get_optional().value(), 0.5 );
+}
+
+// The plant for the hard e-stop recovery. A cut faults the reads and blocks configure and activate
+// until the power is back, and on_error leaves the component unconfigured
+TEST_F( DynamicsMockHardwareTest, PowerCutFaultsAndRecovers )
+{
+  const std::string urdf =
+      std::string( URDF_HEAD ) + makeHardwareBlock( 0.0 ) + std::string( URDF_TAIL );
+  auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+  hardware_interface::HardwareComponentParams params;
+  params.hardware_info = hardware_interface::parse_control_resources_from_urdf( urdf ).at( 0 );
+  params.clock = node_->get_clock();
+  params.logger = node_->get_logger();
+  params.executor = executor;
+  dynamics_mock_hardware::DynamicsMockHardware hw;
+  ASSERT_EQ( hw.init( params ), hardware_interface::CallbackReturn::SUCCESS );
+  std::ignore = hw.on_export_state_interfaces();
+  std::ignore = hw.on_export_command_interfaces();
+  const rclcpp_lifecycle::State state;
+  ASSERT_EQ( hw.on_configure( state ), hardware_interface::CallbackReturn::SUCCESS );
+  ASSERT_EQ( hw.on_activate( state ), hardware_interface::CallbackReturn::SUCCESS );
+  const auto period = rclcpp::Duration::from_seconds( PERIOD_SEC );
+  ASSERT_EQ( hw.read( TIME, period ), hardware_interface::return_type::OK );
+
+  ASSERT_TRUE(
+      hw.get_node()->set_parameter( rclcpp::Parameter( "simulate_power_cut", true ) ).successful );
+  EXPECT_EQ( hw.read( TIME, period ), hardware_interface::return_type::ERROR );
+  EXPECT_EQ( hw.on_error( state ), hardware_interface::CallbackReturn::SUCCESS );
+  EXPECT_EQ( hw.on_configure( state ), hardware_interface::CallbackReturn::FAILURE );
+
+  ASSERT_TRUE(
+      hw.get_node()->set_parameter( rclcpp::Parameter( "simulate_power_cut", false ) ).successful );
+  ASSERT_EQ( hw.on_configure( state ), hardware_interface::CallbackReturn::SUCCESS );
+  ASSERT_EQ( hw.on_activate( state ), hardware_interface::CallbackReturn::SUCCESS );
+  EXPECT_EQ( hw.read( TIME, period ), hardware_interface::return_type::OK );
+}
+
+TEST_F( DynamicsMockHardwareTest, TorqueOffRefusesAMotionInterfaceOnTheSameJoint )
+{
+  const std::string urdf = std::string( URDF_HEAD ) + withTorqueOff( makeHardwareBlock( 0.0 ) ) +
+                           std::string( URDF_TAIL );
+  TestableResourceManager rm( node_, urdf );
+  activate_components( rm );
+
+  EXPECT_FALSE( rm.prepare_command_mode_switch( { "joint1/torque_off", "joint1/position" }, {} ) );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/torque_off" }, { "joint1/position" } ) );
+  EXPECT_FALSE( rm.prepare_command_mode_switch( { "joint1/position" }, {} ) );
+  EXPECT_TRUE( rm.prepare_command_mode_switch( { "joint1/position" }, { "joint1/torque_off" } ) );
+}
+
+// ===========================================================================
 // Test: different torque limits produce different behavior (sync drift)
 // ===========================================================================
 
@@ -834,6 +996,52 @@ TEST_F( DynamicsMockHardwareTest, MimicJoint_TracksReference )
   // Mimic velocity should track: mimic_vel = 0.909 * servo_vel
   EXPECT_NEAR( 0.909 * servo_vel, mimic_vel, 0.1 )
       << "Mimic velocity should track reference velocity";
+}
+
+std::string athenaUrdf()
+{
+  std::ifstream file( ATHENA_URDF );
+  return { std::istreambuf_iterator<char>( file ), std::istreambuf_iterator<char>() };
+}
+
+// Athena's light wrist and gripper links made the explicit PD step chatter at the velocity limit,
+// which pushed arm_joint_1 by about 0.64 rad after every activation and every hold
+TEST_F( DynamicsMockHardwareTest, AthenaArmHoldsAfterActivationAndAStop )
+{
+  TestableResourceManager rm( node_, athenaUrdf() );
+  activate_components( rm, { "athena_arm_interface" } );
+  auto joint_1 = rm.claim_state_interface( "arm_joint_1/position" );
+  auto velocity_7 = rm.claim_state_interface( "arm_joint_7/velocity" );
+
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( joint_1.get_optional().value(), 0.0, 0.01 ) << "moved after the activation";
+  EXPECT_NEAR( velocity_7.get_optional().value(), 0.0, 0.01 ) << "the wrist chatters";
+
+  ASSERT_TRUE( rm.perform_command_mode_switch( {}, { "arm_joint_1/position" } ) );
+  run_cycles( rm, 200 );
+  EXPECT_NEAR( joint_1.get_optional().value(), 0.0, 0.01 ) << "moved after a stop";
+}
+
+// A link of a few grams, like Athena's gripper servo, in velocity mode
+TEST_F( DynamicsMockHardwareTest, ALightLinkTracksAVelocity )
+{
+  std::string light_pendulum = URDF_HEAD;
+  for ( const auto &[from, to] : std::vector<std::pair<std::string, std::string>>{
+            { R"(<mass value="1.0"/>)", R"(<mass value="0.001"/>)" },
+            { R"(ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.01")",
+              R"(ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5")" } } ) {
+    ASSERT_NE( light_pendulum.find( from ), std::string::npos ) << from;
+    light_pendulum.replace( light_pendulum.find( from ), from.size(), to );
+  }
+  TestableResourceManager rm( node_, light_pendulum + makeHardwareBlock( 0.0 ) + URDF_TAIL );
+  activate_components( rm );
+  ASSERT_TRUE( rm.perform_command_mode_switch( { "joint1/velocity" }, { "joint1/position" } ) );
+  auto velocity = rm.claim_command_interface( "joint1/velocity" );
+  auto velocity_s = rm.claim_state_interface( "joint1/velocity" );
+  ASSERT_TRUE( velocity.set_value( 0.5 ) );
+
+  run_cycles( rm, 100 );
+  EXPECT_NEAR( velocity_s.get_optional().value(), 0.5, 0.01 ) << "chatters";
 }
 
 // ===========================================================================

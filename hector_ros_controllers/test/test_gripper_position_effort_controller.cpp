@@ -5,6 +5,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,9 @@
 #include <controller_interface/controller_interface_params.hpp>
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
+
+#include "handle_values.hpp"
 
 using GripperController = gripper_position_effort_controller::GripperPositionEffortController;
 
@@ -55,8 +59,8 @@ protected:
   std::shared_ptr<GripperController> controller_;
 
   // Backing storage: cmd[0]=position, cmd[1]=effort; state[0]=position, state[1]=velocity, state[2]=effort
-  std::vector<double> hw_cmd_values_;
-  std::vector<double> hw_state_values_;
+  hector_test::HandleValues hw_cmd_values_;
+  hector_test::HandleValues hw_state_values_;
   std::vector<std::shared_ptr<hardware_interface::CommandInterface>> cmd_ifaces_;
   std::vector<std::shared_ptr<hardware_interface::StateInterface>> state_ifaces_;
 
@@ -114,19 +118,11 @@ protected:
     cmd_ifaces_.clear();
     state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        joint_name_, "position", &hw_cmd_values_[0] ) );
-    cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-        joint_name_, "effort", &hw_cmd_values_[1] ) );
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        joint_name_, "position", &hw_state_values_[0] ) );
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        joint_name_, "velocity", &hw_state_values_[1] ) );
-    state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-        joint_name_, "effort", &hw_state_values_[2] ) );
-#pragma GCC diagnostic pop
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( 0, joint_name_, "position" ) );
+    cmd_ifaces_.push_back( hw_cmd_values_.make_command( 1, joint_name_, "effort" ) );
+    state_ifaces_.push_back( hw_state_values_.make_state( 0, joint_name_, "position" ) );
+    state_ifaces_.push_back( hw_state_values_.make_state( 1, joint_name_, "velocity" ) );
+    state_ifaces_.push_back( hw_state_values_.make_state( 2, joint_name_, "effort" ) );
 
     controller_->command_interfaces_.clear();
     controller_->state_interfaces_.clear();
@@ -276,17 +272,10 @@ TEST_F( GripperPositionEffortControllerTest, DisabledModeWritesPositionOnly )
   hw_state_values_.assign( 3, 0.0 );
   cmd_ifaces_.clear();
   state_ifaces_.clear();
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-      joint_name_, "position", &hw_cmd_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "position", &hw_state_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "velocity", &hw_state_values_[1] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "effort", &hw_state_values_[2] ) );
-#pragma GCC diagnostic pop
+  cmd_ifaces_.push_back( hw_cmd_values_.make_command( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 1, joint_name_, "velocity" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 2, joint_name_, "effort" ) );
   controller_->command_interfaces_.clear();
   controller_->state_interfaces_.clear();
   for ( auto &ci : cmd_ifaces_ ) controller_->command_interfaces_.emplace_back( ci, []() { } );
@@ -310,17 +299,10 @@ TEST_F( GripperPositionEffortControllerTest, RequiredModeFailsActivateWhenEffort
   hw_state_values_.assign( 3, 0.0 );
   cmd_ifaces_.clear();
   state_ifaces_.clear();
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-      joint_name_, "position", &hw_cmd_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "position", &hw_state_values_[0] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "velocity", &hw_state_values_[1] ) );
-  state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-      joint_name_, "effort", &hw_state_values_[2] ) );
-#pragma GCC diagnostic pop
+  cmd_ifaces_.push_back( hw_cmd_values_.make_command( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 0, joint_name_, "position" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 1, joint_name_, "velocity" ) );
+  state_ifaces_.push_back( hw_state_values_.make_state( 2, joint_name_, "effort" ) );
   controller_->command_interfaces_.clear();
   controller_->state_interfaces_.clear();
   for ( auto &ci : cmd_ifaces_ ) controller_->command_interfaces_.emplace_back( ci, []() { } );
@@ -331,19 +313,47 @@ TEST_F( GripperPositionEffortControllerTest, RequiredModeFailsActivateWhenEffort
   EXPECT_EQ( controller_->on_activate( inactive ), controller_interface::CallbackReturn::ERROR );
 }
 
-TEST_F( GripperPositionEffortControllerTest, ActivateInitialisesTargetToCurrentPosition )
+// The hardware's goal may be a grasp: current-based position squeezing beyond the object. Writing
+// the measured position as the goal would release it, so activation commands nothing.
+TEST_F( GripperPositionEffortControllerTest, ActivationKeepsTheHardwaresGoal )
 {
   initController();
   configureController();
   setupHardwareInterfaces();
   setPosition( 0.3 );
+  hw_cmd_values_[0] = 0.25;
+  hw_cmd_values_[1] = 0.7;
 
   activateController();
-
-  // First update should hold at 0.3 with default_max_effort
   callUpdate( 0.0 );
-  EXPECT_DOUBLE_EQ( cmdPos(), 0.3 );
-  EXPECT_DOUBLE_EQ( cmdEffort(), 1.0 ); // default_max_effort
+  callUpdate( 0.01 );
+  EXPECT_DOUBLE_EQ( cmdPos(), 0.25 ) << "activation overwrote the goal";
+  EXPECT_DOUBLE_EQ( cmdEffort(), 0.7 ) << "activation overwrote the current limit";
+
+  injectPositionCommand( 0.4 );
+  callUpdate( 0.02 );
+  EXPECT_DOUBLE_EQ( cmdPos(), 0.4 );
+}
+
+// A position state locked by another thread at activation is no reason to drive to 0
+TEST_F( GripperPositionEffortControllerTest, ABusyStateAtActivationCommandsNothing )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  setPosition( 0.3 );
+  hw_cmd_values_[0] = 0.25;
+  {
+    std::unique_lock<std::shared_mutex> busy( state_ifaces_[0]->get_mutex() );
+    activateController();
+  }
+
+  callUpdate( 0.0 );
+  EXPECT_DOUBLE_EQ( cmdPos(), 0.25 ) << "the hardware's goal was overwritten";
+
+  injectVelocityCommand( 1.0 );
+  callUpdate( 0.01 );
+  EXPECT_NEAR( cmdPos(), 0.3 + 1.0 * kPeriodSec, 1e-9 ) << "velocity integrates from where it is";
 }
 
 // ============================================================================
@@ -644,18 +654,21 @@ TEST_F( GripperPositionEffortControllerTest, IsGraspedRequiresEffortAboveThresho
 // Hold position when no goal received
 // ============================================================================
 
-TEST_F( GripperPositionEffortControllerTest, HoldsPositionWithoutAnyCommand )
+// Without any command the hardware holds its own goal
+TEST_F( GripperPositionEffortControllerTest, WritesNothingWithoutAnyCommand )
 {
   initController();
   configureController();
   setupHardwareInterfaces();
   setPosition( 0.42 );
+  hw_cmd_values_[0] = 0.4;
+  hw_cmd_values_[1] = 0.6;
   activateController();
 
   for ( int i = 0; i < 10; ++i ) {
     callUpdate( i * kPeriodSec );
-    EXPECT_NEAR( cmdPos(), 0.42, 1e-9 );
-    EXPECT_NEAR( cmdEffort(), 1.0, 1e-9 ); // default_max_effort
+    EXPECT_DOUBLE_EQ( cmdPos(), 0.4 );
+    EXPECT_DOUBLE_EQ( cmdEffort(), 0.6 );
   }
 }
 
@@ -707,8 +720,8 @@ protected:
     setupHardwareInterfaces();
     activateController();
 
-    server_mock_ = rtest::experimental::findActionServer<ActionT>(
-        controller_->get_node(), "~/gripper_cmd" );
+    server_mock_ =
+        rtest::experimental::findActionServer<ActionT>( controller_->get_node(), "~/gripper_cmd" );
     ASSERT_TRUE( server_mock_ ) << "Failed to find ActionServerMock for ~/gripper_cmd";
   }
 
@@ -801,21 +814,33 @@ TEST_F( GripperPositionEffortLifecycleTest, CancelBeforeUpdateDoesNotMoveGripper
   EXPECT_NEAR( cmdEffort(), 1.0, 1e-9 );
 }
 
-// Bug 3 regression: a terminal goal state must actually be delivered to the action client.
-// cancel_callback runs on a non-RT thread and synchronously flushes the realtime wrapper
-// before clearing the active goal, so gh.canceled() must have been called by the time
-// cancel_callback returns.
+// rclcpp_action moves a goal to canceling only after cancel_callback returns, and canceled() is
+// valid only from there. The goal timer delivers the result on its next tick.
 TEST_F( GripperPositionEffortLifecycleTest, CancelDeliversCanceledToClient )
 {
   initAndActivateWithActionServer();
 
-  auto gh = acceptGoal( 0.5, 2.0, []( testing::NiceMock<GoalHandleMock> &mock ) {
-    EXPECT_CALL( mock, canceled( testing::_ ) ).Times( 1 );
+  auto canceling = std::make_shared<std::atomic<bool>>( false );
+  auto gh = acceptGoal( 0.5, 2.0, [canceling]( testing::NiceMock<GoalHandleMock> &mock ) {
+    ON_CALL( mock, is_canceling() ).WillByDefault( testing::Invoke( [canceling]() {
+      return canceling->load();
+    } ) );
+    ON_CALL( mock, is_executing() ).WillByDefault( testing::Invoke( [canceling]() {
+      return !canceling->load();
+    } ) );
+    EXPECT_CALL( mock, canceled( testing::_ ) ).Times( 0 );
   } );
 
   cancelGoal( gh );
   EXPECT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) )
       << "Active goal must be cleared after cancel";
+  testing::Mock::VerifyAndClearExpectations( gh.get() );
+
+  canceling->store( true );
+  EXPECT_CALL( *gh, canceled( testing::_ ) ).Times( 1 );
+  auto prev = std::atomic_load( &controller_->previous_rt_goal_ );
+  ASSERT_TRUE( prev ) << "the canceled goal waits for the goal timer";
+  prev->runNonRealtime();
 }
 
 // Bug 3 regression for the success path: check_for_success runs in RT and only sets the
@@ -1088,6 +1113,31 @@ TEST_F( GripperPositionEffortLifecycleTest, AcceptingTwoGoalsRapidlyDeliversBoth
   EXPECT_FALSE( std::atomic_load( &controller_->previous_rt_goal_ ) )
       << "previous_rt_goal_ must have been flushed and cleared by accepted_callback";
   // gh_a.succeed should have fired exactly once, verified by the EXPECT_CALL above.
+}
+
+// Each goal reports through its own result, so a later goal never rewrites the result an
+// earlier goal handed to its client.
+TEST_F( GripperPositionEffortLifecycleTest, ALaterGoalLeavesAnEarlierGoalsResultAlone )
+{
+  initAndActivateWithActionServer();
+
+  std::shared_ptr<ActionT::Result> result_a;
+  auto gh_a = acceptGoal( 0.5, 2.0, [&result_a]( testing::NiceMock<GoalHandleMock> &mock ) {
+    EXPECT_CALL( mock, succeed( testing::_ ) ).WillOnce( testing::SaveArg<0>( &result_a ) );
+  } );
+  setPosition( 0.5 );
+  setVelocity( 0.0 );
+  callUpdate( 0.0 );
+
+  auto gh_b = acceptGoal( 0.7, 2.0 );
+  ASSERT_TRUE( result_a ) << "accepting goal B flushes goal A";
+  EXPECT_TRUE( result_a->reached_goal );
+  EXPECT_DOUBLE_EQ( result_a->position, 0.5 );
+
+  setPosition( 0.7 );
+  callUpdate( 0.01 );
+  ASSERT_FALSE( std::atomic_load( &controller_->rt_active_goal_ ) ) << "goal B succeeded";
+  EXPECT_DOUBLE_EQ( result_a->position, 0.5 ) << "goal B rewrote goal A's result";
 }
 
 // Bug 4 regression: NaN on the position topic must not be written to hardware.

@@ -32,8 +32,8 @@ protected:
   std::vector<std::string> joints_{ "joint1", "joint2", "joint3" };
 
   std::shared_ptr<VelToPosController> controller_;
-  std::vector<double> hw_cmd_values_;
-  std::vector<double> hw_state_values_;
+  hector_test::HandleValues hw_cmd_values_;
+  hector_test::HandleValues hw_state_values_;
   std::vector<std::shared_ptr<hardware_interface::CommandInterface>> cmd_ifaces_;
   std::vector<std::shared_ptr<hardware_interface::StateInterface>> state_ifaces_;
 
@@ -71,7 +71,6 @@ protected:
         rclcpp::Parameter( "kd", 0.1 ),
         rclcpp::Parameter( "kp_sync", 1.0 ),
         rclcpp::Parameter( "passthrough_controller", std::string( "" ) ),
-        rclcpp::Parameter( "e_stop_topic", std::string( "estop_board/hard_estop" ) ),
         rclcpp::Parameter( "synchronous_groups", sync_groups ),
         // Keep profiles short so the monitor thread sees COMPLETED quickly.
         rclcpp::Parameter( "max_velocity", 5.0 ),
@@ -93,8 +92,8 @@ protected:
     auto cb = controller_->on_configure( unconfigured );
     ASSERT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
 
-    controller_->reference_interfaces_.assign( joints_.size(),
-                                               std::numeric_limits<double>::quiet_NaN() );
+    // The controller manager exports the references after configure
+    ASSERT_EQ( controller_->export_reference_interfaces().size(), joints_.size() );
   }
 
   void setupHardwareInterfaces()
@@ -105,17 +104,11 @@ protected:
     cmd_ifaces_.clear();
     state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     for ( size_t i = 0; i < joints_.size(); ++i ) {
-      cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-          joints_[i], "position", &hw_cmd_values_[i] ) );
-      state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-          joints_[i], "position", &hw_state_values_[2 * i] ) );
-      state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-          joints_[i], "velocity", &hw_state_values_[2 * i + 1] ) );
+      cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, joints_[i], "position" ) );
+      state_ifaces_.push_back( hw_state_values_.make_state( 2 * i, joints_[i], "position" ) );
+      state_ifaces_.push_back( hw_state_values_.make_state( 2 * i + 1, joints_[i], "velocity" ) );
     }
-#pragma GCC diagnostic pop
 
     controller_->command_interfaces_.clear();
     controller_->state_interfaces_.clear();
@@ -305,7 +298,7 @@ TEST_F( VelToPosControllerActionTest, DriveFlipperGroup_CancelledByVelocityComma
 
   // Tick a few cycles, then inject a velocity command on joint 0 in g_a.
   tickWithMonitorPump( 5 );
-  controller_->reference_interfaces_[0] = 0.5;
+  hector_test::reference( *controller_, 0 ) = 0.5;
   tickWithMonitorPump( 30 );
 
   std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );

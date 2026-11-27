@@ -19,7 +19,6 @@
 #include "realtime_tools/realtime_publisher.hpp"
 #include "realtime_tools/realtime_thread_safe_box.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "sync_group_velocity_to_position_controller/sync_pair_manager.hpp"
 #include "urdf_parser/urdf_parser.h"
@@ -99,7 +98,8 @@ public:
   bool on_set_chained_mode( bool chained_mode ) override;
 
 protected:
-  std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
+  std::vector<hardware_interface::CommandInterface::SharedPtr>
+  on_export_reference_interfaces_list() override;
 
   controller_interface::return_type
   update_reference_from_subscribers( const rclcpp::Time &time,
@@ -144,6 +144,7 @@ private:
   // Position tracking
   std::vector<double> desired_positions_;
   std::vector<double> hold_positions_;
+  std::vector<double> reference_values_; ///< references of this cycle, read once from the handles
 
   // State machine
   std::vector<MoveState> move_states_;
@@ -169,8 +170,6 @@ private:
   std::vector<bool> group_pending_recapture_;
 
   // E-stop
-  std::string e_stop_topic_;
-  realtime_tools::RealtimeBuffer<bool> e_stop_active_;
   bool interfaces_valid_;
 
   // PID gains
@@ -215,7 +214,6 @@ private:
   // RT-safe command buffer and subscriptions
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_buffer_ptr_;
   rclcpp::Subscription<CmdType>::SharedPtr cmd_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hard_estop_sub_;
 
   // Parameters
   std::shared_ptr<ParamListener> param_listener_;

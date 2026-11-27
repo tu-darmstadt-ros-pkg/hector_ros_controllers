@@ -1,5 +1,11 @@
 # Hector Ros Controllers
 
+> **Requires hector_controller_manager with e-stop topics.** On this branch the controllers and the
+> hardware interface have no e-stop of their own: `hector_controller_manager` stops them on a hard
+> or soft e-stop. Run it with both e-stop topics configured (`estop_topics`, hard and soft). Under
+> the stock `ros2_control` controller manager nothing stops them on an e-stop. Do not deploy this
+> branch with a launch that still starts the stock controller manager.
+
 A set of ROS 2 controllers focused on **safety**, **self-collision avoidance**, **safe position command handling**, and **gripper control with effort limiting**.
 All controllers are compatible with **ros2_control**; most can be inserted as **chain controllers** (the gripper action controller is a terminal endpoint).
 
@@ -38,9 +44,9 @@ A **safety layer for joint position commands**, usable both
     * `distance_lines_safe` — nearest-point lines for pairs outside the safety zone.
     * `distance_lines_safety_zone` — safety-zone pairs, colored per pair: green = motion increases distance, red = decreases, yellow = no directional info.
     * `distance_lines_collision` — colliding pairs (bright red, thicker).
-* **Status topic** (`~/status`): `SafetyPositionControllerStatus` (latched) at `status_publish_rate` and on events, carrying `min_collision_distance`, `num_pairs_in_safety_zone`, `manipulability`, the QP fields `qp_solved` / `qp_braking` / `qp_push_out_relaxed` / `qp_num_collision_constraints` / `qp_solve_time_us`, the `stalled` and `parked` flags, and the bypass / E-stop / mode flags. With `set_current_limits`, also the active per-joint current limits.
+* **Status topic** (`~/status`): `SafetyPositionControllerStatus` (latched) at `status_publish_rate` and on events, carrying `min_collision_distance`, `num_pairs_in_safety_zone`, `manipulability`, the QP fields `qp_solved` / `qp_braking` / `qp_push_out_relaxed` / `qp_num_collision_constraints` / `qp_solve_time_us`, the `stalled` and `parked` flags, and the bypass / mode flags. With `set_current_limits`, also the active per-joint current limits.
 * **QP introspection** (`~/qp_debug`, `publish_qp_debug`): per-cycle desired vs commanded velocity, the velocity box, per-constraint distance and achieved approach speed, solver state. Dynamically reconfigurable.
-* **E-Stop**: subscribes to `e_stop_topic` (`std_msgs/Bool`, default `~/safety_estop`). Engaging holds the positions latched at the engage edge, with no limit or collision checks. Releasing does **not** resume: the pipeline is rebased and parked, so the arm waits for a new reference. Intended for a *soft* stop; a hard stop that removes drive power faults the hardware and deactivates the controller instead.
+* **E-Stop**: the controller manager owns it. It stops this controller, and the hardware holds.
 * **Safety Bypass Mode** (for folded arm positions):
 
     * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) drops collision checking and widens the joint limits by `safety_bypass_joint_limit_tolerance`.
@@ -78,7 +84,6 @@ A **safety layer for joint position commands**, usable both
 | `stall_park_timeout`               | `double`   | `5.0`   | Stalled this long [s] → park: abandon the reference and hold until a new one. `0` disables. Bounds: [0.0, 3600.0].   |
 | `park_resume_reference_threshold`  | `double`   | `0.01`  | Per-joint reference change [rad] that counts as a new command and releases a park. Bounds: [0.0001, 10.0].           |
 | `state_read_timeout`               | `double`   | `0.1`   | Time [s] of unobservable safety state after which the pipeline is rebased and parked. Set to at least twice the control period. Bounds: [0.001, 10.0]. |
-| `e_stop_topic`                     | `string`   | `~/safety_estop` | Topic carrying the **soft** emergency stop. Subscribed transient-local and reliable, so a publisher must latch. *(read-only)* |
 | `set_current_limits`               | `bool`     | `false` | If `true`, claims and writes `<joint>/current`. *(read-only)*                                                        |
 | `current_limits.*.compliant_limit` | `double`   | `3.0`   | Per-joint limit [A] in compliant mode. Must be positive and ≤ `stiff_limit`. Bounds: (0.0, 30.0).                    |
 | `current_limits.*.stiff_limit`     | `double`   | `5.0`   | Per-joint limit [A] in stiff mode. A Dynamixel holds this in a two-byte 0.001 A register, so ≥ 32.768 A does not fit and reaches the motor as **zero**. Bounds: (0.0, 30.0). |
@@ -103,7 +108,6 @@ A **safety layer for joint position commands**, usable both
 | Topic                        | Type                                | Used for                                                                     |
 | ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
 | `~/commands`                 | `std_msgs/Float64MultiArray`        | **Non-chained mode**: position commands, exactly one per joint. Any other length is refused. |
-| `e_stop_topic`               | `std_msgs/Bool`                     | Soft E-Stop. `true` → hold the latched positions; `false` → rebase and park until a new reference. Transient-local, reliable. |
 | `robot_description_semantic` | `std_msgs/String` (transient local) | SRDF XML for self-collision checking.                                        |
 
 **Publications**
@@ -127,12 +131,10 @@ A **safety layer for joint position commands**, usable both
 
 ## 2. Safety Forward Controller
 
-The **Safety Forward Controller** is a chainable ROS 2 controller that forwards joint commands while enforcing three
+The **Safety Forward Controller** is a chainable ROS 2 controller that forwards joint commands while enforcing two
 safety mechanisms:
 
 * **Safety timeout:** If no commands arrive for a specified duration (standalone mode only), outputs are set to zero.
-* **Emergency Stop (E-Stop):** Immediately stops motion; in position mode the controller holds the current joint
-  positions.
 * **Joint Limit Enforcement** Makes sure the command value is within the allowed limits. Warning only checks the limit
   of the used interface (e.g. in velocity mode are no position limits checked).
   It supports *position*, *velocity*, and *effort* command interfaces and can operate in:
@@ -146,13 +148,13 @@ safety mechanisms:
 |--------------------------------|-----------------------------|------------------------|------------------------|
 | Normal operation               | Forward command             | Forward command        | Forward command        |
 | Safety timeout *(not chained)* | (optional) or no-op         | 0.0                    | 0.0                    |
-| E-Stop engaged                 | Hold last measured position | 0.0                    | 0.0                    |
-| E-Stop released                | Resume forwarding           | Resume forwarding      | Resume forwarding      |
 | Chained mode                   | Use upstream reference      | Use upstream reference | Use upstream reference |
 
 **Important:**
 The **safety timer is disabled in chained mode** and is only active when the controller receives commands via
 `~/commands`.
+
+The controller manager owns the emergency stop: it stops this controller, and the hardware holds.
 
 ### Parameters
 
@@ -165,10 +167,9 @@ The **safety timer is disabled in chained mode** and is only active when the con
 
 ### Topics
 
-| Topic            | Type                | Description                                                |
-|------------------|---------------------|------------------------------------------------------------|
-| `~/commands`     | `Float64MultiArray` | Input commands (not used in chained mode).                 |
-| `~/safety_estop` | `Bool`              | Engages (`true`) or releases (`false`) the emergency stop. |
+| Topic        | Type                | Description                                |
+|--------------|---------------------|--------------------------------------------|
+| `~/commands` | `Float64MultiArray` | Input commands (not used in chained mode). |
 
 ---
 
@@ -218,8 +219,8 @@ Converts **velocity references** into **position commands** for joint hardware. 
     * Goals are **rejected** if any target group is already executing another goal. If acceptance succeeds but a later group fails to start (e.g. invalid joint state), already-started groups are rolled back so the failed goal result accurately reflects no in-flight motion.
 * **URDF position limit clamping:**
     * Position commands are clamped to URDF joint limits for revolute/prismatic joints. Continuous joints are unclamped.
-* **E-Stop support:**
-    * Subscribes to an E-Stop topic and tracks the latest state. The freeze-on-engage logic in the update loop is currently disabled (TODO); the subscription remains so downstream consumers can read the state.
+* **E-Stop:**
+    * The controller manager owns the e-stop: it stops this controller, and the hardware holds.
 * **Chainable controller:**
     * Can receive velocity references from an upstream controller or from a `~/commands` topic.
 * **Debug joint state publishers:**
@@ -253,7 +254,6 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | **max_deceleration**            | `double`       | `4.0`                    | Maximum deceleration in rad/s². Used for braking profiles when velocity commands go to zero. Higher than max_acceleration for faster stopping.  |
 | **synchronous_groups**          | `string_array` | `[]`                     | Group names per joint for synchronization (empty = no sync).                                                                                    |
 | **passthrough_controller**      | `string`       | `""`                     | Prefix for the lower-level controller exposing command interfaces.                                                                              |
-| **e_stop_topic**                | `string`       | `estop_board/hard_estop` | Topic for emergency stop messages (`std_msgs/Bool`).                                                                                            |
 | **velocity_command_timeout**    | `double`       | `0.0`                    | Timeout in seconds. If no non-zero velocity command arrives within this duration, references are zeroed. 0 disables.                            |
 | **upright_position**            | `double`       | `1.517`                  | Default target position for the drive flipper group action (rad).                                                                               |
 | **publish_debug_joint_states**  | `bool`         | `false`                  | If `true`, publishes `~/debug_in_joint_states` (velocity refs) and `~/debug_out_joint_states` (position cmds) as `sensor_msgs/JointState`.     |
@@ -263,7 +263,6 @@ pos_cmd = desired_pos[i] + vel_p - vel_d + sync_correction
 | Topic                      | Type                     | Description                                                            |
 |----------------------------|--------------------------|------------------------------------------------------------------------|
 | `~/commands`               | `Float64MultiArray`      | Velocity commands (not used in chained mode).                          |
-| E-Stop topic               | `Bool`                   | Engages (`true`) or releases (`false`) the e-stop.                     |
 | `~/debug_in_joint_states`  | `sensor_msgs/JointState` | Incoming velocity references (only when `publish_debug_joint_states`). |
 | `~/debug_out_joint_states` | `sensor_msgs/JointState` | Outgoing position commands (only when `publish_debug_joint_states`).   |
 | `~/sync_status`            | `hector_ros_controllers_msgs/SyncStatus` | Per-joint input/output velocities and desired/current sync offsets (only when `publish_debug_joint_states`). |
@@ -304,10 +303,7 @@ A **safety layer for joint position commands**, usable both
 * **Block-if-too-far**:
 
     * Limits per-cycle motion based on URDF velocity limits and controller update rate.
-* **E-Stop**:
-
-    * Subscribes to `~/safety_estop` (`std_msgs/Bool`).
-    * On activation → records current positions and *holds them* (no limit/collision checks) until E-Stop is released.
+* **E-Stop**: the controller manager owns it. It stops this controller, and the hardware holds.
 * **Safety Bypass Mode** (for folded arm positions):
 
     * Service `~/bypass_safety_checks` (`std_srvs/SetBool`) to temporarily disable collision checks and relax joint limits.
@@ -352,7 +348,6 @@ A **safety layer for joint position commands**, usable both
 | Topic                        | Type                                | Used for                                                                     |
 | ---------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
 | `~/commands`                 | `std_msgs/Float64MultiArray`        | **Non-chained mode**: incoming position commands (one per joint).            |
-| `~/safety_estop`             | `std_msgs/Bool`                     | E-Stop control. `true` → latch and hold current positions; `false` → resume. |
 | `robot_description_semantic` | `std_msgs/String` (transient local) | SRDF XML for self-collision checking.                                        |
 
 **Publications (debug, optional)**
@@ -406,8 +401,8 @@ other tooling, and additionally accepts goals via two topics for teleop / script
       effort stays above `is_grasped_effort_threshold` for `is_grasped_dwell_cycles` consecutive update cycles.
     * Published at `action_monitor_rate`. Informational only — does not end an active action goal.
 * **Joint limit clamping** from URDF for revolute/prismatic joints (continuous joints are unclamped).
-* **Holds last position** with `default_max_effort` whenever no goal is active, so the actuator does not jump on
-  controller activation.
+* **No target on activation**: the controller writes nothing until the first command arrives, so the hardware keeps
+  its current goal and a held grasp is not released.
 
 ### Required Hardware Interfaces
 
@@ -491,6 +486,28 @@ ros2 topic pub --rate 20 /gripper_controller/velocity_command std_msgs/msg/Float
 
 # Grasp detection
 ros2 topic echo /gripper_controller/is_grasped
+```
+
+---
+
+## 6. Claim Only Controller
+
+`claim_only_controller/ClaimOnlyController` claims the listed command interfaces and writes nothing to them. It is
+meant for interfaces where the claim itself is the command, such as `<joint>/torque_off` on a Dynamixel joint: while
+the controller is active the joint is limp and the hardware refuses any motion claim on it.
+
+Mark it `protected: true` in the controller manager, so a conflicting switch or an e-stop does not end the claim.
+
+```yaml
+controller_manager:
+  ros__parameters:
+    arm_torque_off_controller:
+      type: claim_only_controller/ClaimOnlyController
+      protected: true
+
+arm_torque_off_controller:
+  ros__parameters:
+    command_interfaces: [ arm_joint_1/torque_off, arm_joint_2/torque_off ]
 ```
 
 ---

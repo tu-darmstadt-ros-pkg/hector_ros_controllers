@@ -1,0 +1,2 @@
+claim_only_controller:
+  command_interfaces: {type: string_array, default_value: [], description: 'Command interfaces to claim, as joint/interface. Nothing is written to them: the claim is the command, for example <joint>/torque_off.', validation: {not_empty<>: []}}

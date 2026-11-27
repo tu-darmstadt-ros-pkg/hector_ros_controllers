@@ -18,6 +18,7 @@
 #include <controller_interface/chainable_controller_interface.hpp>
 #include <safety_forward_controller/safety_forward_controller.hpp>
 #include <safety_position_controller/safety_position_controller.hpp>
+#include <self_collision_avoidance_controller/self_collision_avoidance_controller.hpp>
 #include <sync_group_velocity_to_position_controller/sync_group_velocity_to_position_controller.hpp>
 #undef protected
 #undef private
@@ -25,7 +26,10 @@
 #include <controller_interface/controller_interface_params.hpp>
 #include <hardware_interface/loaned_command_interface.hpp>
 #include <hardware_interface/loaned_state_interface.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
 #include <rtest/static_registry.hpp>
+
+#include "handle_values.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
@@ -71,8 +75,8 @@ protected:
   static constexpr unsigned int kUpdateRate = 100;
 
   // Hardware interface backing storage
-  std::vector<double> hw_cmd_values_;
-  std::vector<double> hw_state_values_;
+  hector_test::HandleValues hw_cmd_values_;
+  hector_test::HandleValues hw_state_values_;
   std::vector<std::shared_ptr<hardware_interface::CommandInterface>> cmd_ifaces_;
   std::vector<std::shared_ptr<hardware_interface::StateInterface>> state_ifaces_;
 
@@ -111,14 +115,12 @@ protected:
   {
     auto node_name = std::string( derived().controller_->get_node()->get_fully_qualified_name() );
     auto status_topic = node_name + "/status";
-    derived().status_pub_mock_ =
-        rtest::findPublisher<typename Derived::StatusMsgType>( derived().controller_->get_node(), status_topic );
+    derived().status_pub_mock_ = rtest::findPublisher<typename Derived::StatusMsgType>(
+        derived().controller_->get_node(), status_topic );
     ASSERT_TRUE( derived().status_pub_mock_ ) << "Failed to find status publisher mock for node '"
                                               << node_name << "' topic '" << status_topic << "'";
     derived().findControllerSpecificMocks( node_name );
   }
-
-  void sendEstop( bool active ) { derived().controller_->estop_active_.store( active ); }
 
 private:
   Derived &derived() { return static_cast<Derived &>( *this ); }

@@ -9,6 +9,7 @@
 #include <hardware_interface/loaned_state_interface.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 
+#include <hector_ros_controllers/reference_handles.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 namespace safety_position_controller
@@ -22,8 +23,7 @@ SafetyPositionController::SafetyPositionController()
 bool SafetyPositionController::on_set_chained_mode( const bool )
 {
   // switching the reference source must not resume a stale target
-  for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
-  return true;
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
 }
 
 controller_interface::CallbackReturn SafetyPositionController::on_init()
@@ -43,10 +43,12 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // Get SRDF: prefer parameter, fall back to topic subscription
-  if ( get_node()->has_parameter( "robot_description_semantic" ) ) {
-    srdf_ = get_node()->get_parameter( "robot_description_semantic" ).as_string();
+  // Get SRDF: prefer parameter, fall back to topic subscription. Declared, because the
+  // controller manager passes it as a parameter override, which only a declared parameter sees.
+  if ( !get_node()->has_parameter( "robot_description_semantic" ) ) {
+    get_node()->declare_parameter<std::string>( "robot_description_semantic", "" );
   }
+  srdf_ = get_node()->get_parameter( "robot_description_semantic" ).as_string();
   if ( !srdf_.empty() ) {
     srdf_received_ = true;
     RCLCPP_INFO( get_node()->get_logger(), "Loaded robot_description_semantic from parameter." );
@@ -128,17 +130,6 @@ controller_interface::CallbackReturn SafetyPositionController::on_init()
       "~/commands", rclcpp::SystemDefaultsQoS(),
       [this]( const CmdType::SharedPtr msg ) { rt_command_ptr_.writeFromNonRT( msg ); } );
 
-  // Transient local, matching the e-stop manager, which publishes its aggregated state
-  // once per change and latches it: a volatile subscriber joining afterwards is told
-  // nothing and would run as if no stop were in effect. A depth of one would be enough
-  // for the latch, but an engage and the release after it can arrive together while the
-  // executor is busy, and the engage must not be overwritten before its callback runs.
-  estop_subscriber_ = node->create_subscription<std_msgs::msg::Bool>(
-      params_.e_stop_topic, rclcpp::QoS( rclcpp::KeepLast( 10 ) ).reliable().transient_local(),
-      [this]( const std_msgs::msg::Bool::SharedPtr msg ) { note_estop_request( msg->data ); } );
-  RCLCPP_INFO( node->get_logger(), "Listening for the soft e-stop on '%s'.",
-               params_.e_stop_topic.c_str() );
-
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -146,6 +137,12 @@ controller_interface::CallbackReturn
 SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 {
   const auto node = get_node();
+
+  // The pipeline integrates with 1 / rate
+  if ( get_update_rate() == 0 ) {
+    RCLCPP_ERROR( node->get_logger(), "An update rate of 0 Hz leaves no control period." );
+    return controller_interface::CallbackReturn::ERROR;
+  }
 
   if ( params_.joints.empty() ) {
     RCLCPP_ERROR( node->get_logger(), "'joints' parameter must not be empty." );
@@ -186,10 +183,9 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
   }
 
   const size_t n = params_.joints.size();
-  reference_interfaces_.assign( n, std::numeric_limits<double>::quiet_NaN() );
+  reference_values_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   joint_index_.assign( n, -1 );
   current_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
-  hold_positions_.assign( n, std::numeric_limits<double>::quiet_NaN() );
   all_positions_.assign( all_joint_names_.size(), std::numeric_limits<double>::quiet_NaN() );
 
   if ( !gather_joint_indices() ) {
@@ -213,11 +209,13 @@ SafetyPositionController::on_configure( const rclcpp_lifecycle::State & )
 controller_interface::CallbackReturn
 SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
 {
-  // a target from before the deactivation must never be resumed on activation
-  for ( auto &ref : reference_interfaces_ ) { ref = std::numeric_limits<double>::quiet_NaN(); }
   // Nobody is supervising a controller that is only now starting, so it starts guarded
   // whatever was in effect before. First, so no failing check below can skip it.
   clear_bypass();
+  // a target from before the deactivation must never be resumed on activation
+  if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
+    return controller_interface::CallbackReturn::ERROR;
+  }
   // Compliant mode is granted the same way and must not be inherited either: a
   // controller that comes back compliant holds with the lower current ceiling, which is
   // how an arm sags or drops what it was carrying.
@@ -319,7 +317,7 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
       return controller_interface::CallbackReturn::ERROR;
     }
     if ( params_.set_current_limits && command_interfaces_[i + params_.joints.size()].get_name() !=
-                                           params_.joints[i] + "/current" ) {
+                                           params_.joints[i] + "/max_current" ) {
       RCLCPP_ERROR( get_node()->get_logger(),
                     "Current limit command interfaces are not in the expected order." );
       return controller_interface::CallbackReturn::ERROR;
@@ -331,9 +329,6 @@ SafetyPositionController::on_activate( const rclcpp_lifecycle::State & )
   state_read_failure_time_ = 0.0;
   park_on_recovery_pending_ = false;
   last_manipulability_ = 0.0;
-  // A pulse received while inactive must not park a freshly activated controller; a
-  // held E-stop is carried by estop_active_ and re-engages on the first cycle.
-  estop_engage_pending_.store( false, std::memory_order_relaxed );
 
   // Last, so a failed activation does not leave a timer publishing status for a
   // controller that never became active.
@@ -352,7 +347,6 @@ controller_interface::CallbackReturn
 SafetyPositionController::on_deactivate( const rclcpp_lifecycle::State & )
 {
   status_timer_.reset();
-  estop_engaged_.store( false, std::memory_order_relaxed );
   // A bypass is granted for as long as someone is watching this controller run. It must
   // not outlive the controller and be inherited by whatever activates next.
   clear_bypass();
@@ -367,7 +361,7 @@ SafetyPositionController::command_interface_configuration() const
   conf.type = controller_interface::interface_configuration_type::INDIVIDUAL;
   for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/position" ); }
   if ( params_.set_current_limits ) {
-    for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/current" ); }
+    for ( const auto &j : params_.joints ) { conf.names.emplace_back( j + "/max_current" ); }
   }
   return conf;
 }
@@ -381,18 +375,19 @@ SafetyPositionController::state_interface_configuration() const
   return conf;
 }
 
-std::vector<hardware_interface::CommandInterface>
-SafetyPositionController::on_export_reference_interfaces()
+std::vector<hardware_interface::CommandInterface::SharedPtr>
+SafetyPositionController::on_export_reference_interfaces_list()
 {
   const size_t n = params_.joints.size();
-  std::vector<hardware_interface::CommandInterface> refs;
+  std::vector<hardware_interface::CommandInterface::SharedPtr> refs;
   refs.reserve( n );
 
   const std::string controller_name = get_node()->get_name();
 
   for ( size_t i = 0; i < n; ++i ) {
     const std::string resource_name = controller_name + "/" + params_.joints[i];
-    refs.emplace_back( resource_name, hardware_interface::HW_IF_POSITION, &reference_interfaces_[i] );
+    refs.push_back( std::make_shared<hardware_interface::CommandInterface>(
+        resource_name, hardware_interface::HW_IF_POSITION ) );
   }
   return refs;
 }
@@ -409,7 +404,7 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
   // Non-chained mode: read from RT buffer
   const auto cmd = rt_command_ptr_.readFromRT();
   if ( !cmd || !( *cmd ) ) {
-    // no new command → keep previous reference_interfaces_
+    // no new command → keep the previous references
     return controller_interface::return_type::OK;
   }
 
@@ -426,8 +421,13 @@ SafetyPositionController::update_reference_from_subscribers( const rclcpp::Time 
     return controller_interface::return_type::OK;
   }
 
-  for ( size_t i = 0; i < n_expected; ++i ) { reference_interfaces_[i] = data[i]; }
-
+  if ( const auto busy =
+           hector_ros_controllers::write_references( ordered_exported_reference_interfaces_, data );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                          "%zu reference interfaces were busy; they keep their previous target",
+                          busy );
+  }
   return controller_interface::return_type::OK;
 }
 
@@ -435,8 +435,15 @@ controller_interface::return_type
 SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
                                                      const rclcpp::Duration &period )
 {
+  // A busy reference keeps last cycle's target, like a busy state or command handle never fails
+  if ( const auto busy = hector_ros_controllers::read_references(
+           ordered_exported_reference_interfaces_, reference_values_ );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), throttle_logging_msg,
+                          "%zu reference interfaces were busy; keeping their last target", busy );
+  }
   // Debug: incoming joint states
-  diagnostics_->publishJointStateIn( reference_interfaces_ );
+  diagnostics_->publishJointStateIn( reference_values_ );
 
   // The bypass lapses on its own so an unattended one cannot last: enforced here rather
   // than by a timer, which would mean an unsynchronised handle shared with the control
@@ -444,41 +451,7 @@ SafetyPositionController::update_and_write_commands( const rclcpp::Time &,
   // guarded.
   bool status_event = expire_bypass();
 
-  // E-stop first: it must act even while the joint states are unreadable, otherwise an
-  // engage (or a whole engage+release pulse) during a read outage would be lost.
-  // Consumed unconditionally (not short-circuited): a held E-stop is carried by the
-  // level, and the latch must not survive into the release cycle.
-  const bool engage_pending = estop_engage_pending_.exchange( false, std::memory_order_relaxed );
-  const bool estop_active = estop_active_.load( std::memory_order_relaxed ) || engage_pending;
-
-  if ( estop_active != estop_engaged_.load( std::memory_order_relaxed ) ) {
-    if ( estop_active ) {
-      // Mark the hold as unrecorded; it is taken from the freshest readable states
-      // below. Non-finite entries are never written, so until then nothing moves.
-      hold_positions_.assign( params_.joints.size(), std::numeric_limits<double>::quiet_NaN() );
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: holding positions for %zu joints",
-                   params_.joints.size() );
-    } else {
-      // release E-stop; the pipeline is parked, so the arm holds until a new reference
-      RCLCPP_WARN( get_node()->get_logger(),
-                   "E-STOP released: holding until a new reference arrives" );
-    }
-    estop_engaged_.store( estop_active, std::memory_order_relaxed );
-    status_event = true;
-  }
-
-  if ( estop_active ) {
-    // Record the hold from the first read that succeeds — normally the engage cycle
-    // itself; during a read outage (the engage must not wait for one) the first valid
-    // read after it. Once recorded, no state read is needed to keep holding.
-    if ( std::any_of( hold_positions_.begin(), hold_positions_.end(),
-                      []( const double p ) { return !std::isfinite( p ); } ) &&
-         read_current_positions() ) {
-      hold_positions_ = current_positions_;
-    }
-    pipeline_->invalidate();
-    write_position_commands( hold_positions_ );
-  } else if ( !read_current_positions() ) {
+  if ( !read_current_positions() ) {
     // A handle is locked by another thread (async hardware). Skipping the cycle leaves
     // the previous position command in place, which is what re-writing it would do.
     // The safety state is unobservable, so this counts toward the same watchdog as a
@@ -524,17 +497,6 @@ bool SafetyPositionController::expire_bypass()
   }
   RCLCPP_WARN( get_node()->get_logger(), "Safety bypass expired; safety checks are back on." );
   return true;
-}
-
-void SafetyPositionController::note_estop_request( const bool active )
-{
-  const bool prev = estop_active_.exchange( active, std::memory_order_relaxed );
-  if ( active ) {
-    estop_engage_pending_.store( true, std::memory_order_relaxed );
-  }
-  if ( active != prev ) {
-    RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s", active ? "ENGAGED" : "DISENGAGED" );
-  }
 }
 
 void SafetyPositionController::note_state_unobservable( const rclcpp::Duration &period )
@@ -694,7 +656,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
       !bypass_active && params_.check_self_collisions && collision_checker_ != nullptr;
 
   bool status_event = false;
-  if ( pipeline_->prepare( reference_interfaces_, current_positions_, bypass_active ) ) {
+  if ( pipeline_->prepare( reference_values_, current_positions_, bypass_active ) ) {
     RCLCPP_INFO( get_node()->get_logger(), "New reference received — resuming from parked state." );
     status_event = true;
   }
@@ -777,7 +739,7 @@ bool SafetyPositionController::run_safety_pipeline( const rclcpp::Duration &peri
                                     params_.collision_safety_zone );
   }
 
-  diagnostics_->maybePublishQpDebug( *pipeline_, reference_interfaces_ );
+  diagnostics_->maybePublishQpDebug( *pipeline_, reference_values_ );
   return status_event;
 }
 
@@ -849,7 +811,6 @@ void SafetyPositionController::publish_status()
   SafetyDiagnostics::StatusFlags flags;
   flags.bypass_active = bypass_active();
   flags.compliant_mode = in_compliant_mode_.load( std::memory_order_relaxed );
-  flags.estop_engaged = estop_engaged_.load( std::memory_order_relaxed );
   diagnostics_->publishStatus( flags );
 }
 

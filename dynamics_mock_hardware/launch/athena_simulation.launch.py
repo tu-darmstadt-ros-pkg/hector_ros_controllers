@@ -52,7 +52,7 @@ def generate_launch_description():
 
     # --- Controller Manager ---
     controller_manager = Node(
-        package="controller_manager",
+        package="hector_controller_manager",
         executable="ros2_control_node",
         name="controller_manager",
         namespace=robot_ns,

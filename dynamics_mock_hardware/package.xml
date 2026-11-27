@@ -18,6 +18,7 @@
   <depend>rclcpp_lifecycle</depend>
 
   <exec_depend>controller_manager</exec_depend>
+  <exec_depend>hector_controller_manager</exec_depend>
   <exec_depend>hector_controller_spawner</exec_depend>
   <exec_depend>hector_gamepad_manager</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
@@ -27,6 +28,8 @@
   <exec_depend>rviz2</exec_depend>
 
   <test_depend>ament_cmake_gmock</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>hardware_contract_tests</test_depend>
   <test_depend>lifecycle_msgs</test_depend>
   <test_depend>ros2_control_test_assets</test_depend>
 

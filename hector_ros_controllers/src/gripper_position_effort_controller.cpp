@@ -215,9 +215,9 @@ GripperPositionEffortController::on_activate( const rclcpp_lifecycle::State & )
   velocity_state_interface_ = *vel_state_it;
   effort_state_interface_ = *eff_state_it;
 
-  // Initialise target to current position so the actuator does not jump on activation
-  const double current_position = position_state_interface_->get().get_optional().value_or( 0.0 );
-  target_.position = current_position;
+  // No target until a command arrives: the hardware keeps its goal, so a held grasp stays held.
+  // The measured position as a goal would release it.
+  target_.position = std::numeric_limits<double>::quiet_NaN();
   target_.max_effort = params_.default_max_effort;
 
   // Reset action / topic state
@@ -237,8 +237,6 @@ GripperPositionEffortController::on_activate( const rclcpp_lifecycle::State & )
   is_grasped_ = false;
   is_grasped_dwell_counter_ = 0;
   last_is_grasped_publish_time_ = rclcpp::Time( 0, 0, RCL_ROS_TIME );
-
-  pre_alloc_result_ = std::make_shared<GripperCommandAction::Result>();
 
   // Action server
   action_server_ = rclcpp_action::create_server<GripperCommandAction>(
@@ -314,8 +312,7 @@ GripperPositionEffortController::cancel_callback( std::shared_ptr<GoalHandle> go
   clear_pending_action_command();
   auto res = std::make_shared<GripperCommandAction::Result>();
   active_goal->setCanceled( res );
-  // Non-RT executor thread: flush synchronously so canceled status reaches the client.
-  active_goal->runNonRealtime();
+  // rclcpp_action marks the goal canceling only after this returns, so the goal timer delivers it
   clear_active_goal();
   return rclcpp_action::CancelResponse::ACCEPT;
 }
@@ -339,7 +336,7 @@ void GripperPositionEffortController::accepted_callback( std::shared_ptr<GoalHan
   rt_action_command_.writeFromNonRT( cmd );
   action_cmd_seq_.store( input_seq_counter_.fetch_add( 1 ) + 1 );
 
-  // last_movement_time_ and pre_alloc_result_ flags are owned by the RT update thread.
+  // last_movement_time_ is owned by the RT update thread.
 
   auto rt_goal = std::make_shared<RealtimeGoalHandle>( goal_handle );
   rt_goal->execute();
@@ -507,8 +504,10 @@ GripperPositionEffortController::update( const rclcpp::Time &time, const rclcpp:
     preempt_active_goal( "preempted by velocity_command topic" );
     last_velocity_msg_time_ = time;
     velocity_cached_valid_ = true;
-    target_.position = clamp_to_limits( target_.position + pending_vel->data * period.seconds(),
-                                        joint_lower_limit_, joint_upper_limit_ );
+    target_.position =
+        clamp_to_limits( ( std::isfinite( target_.position ) ? target_.position : current_position ) +
+                             pending_vel->data * period.seconds(),
+                         joint_lower_limit_, joint_upper_limit_ );
     target_.max_effort = params_.default_max_effort;
     break;
   case InputSource::None:
@@ -518,7 +517,9 @@ GripperPositionEffortController::update( const rclcpp::Time &time, const rclcpp:
   }
 
   // ----- Write commands -----
-  if ( !std::isfinite( target_.position ) || !std::isfinite( target_.max_effort ) ) {
+  if ( std::isnan( target_.position ) ) {
+    // No target yet, nothing to write
+  } else if ( !std::isfinite( target_.position ) || !std::isfinite( target_.max_effort ) ) {
     RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 1000,
                           "Refusing to write non-finite command (pos=%f, eff=%f)", target_.position,
                           target_.max_effort );
@@ -620,11 +621,12 @@ void GripperPositionEffortController::check_for_success( const rclcpp::Time &tim
     return;
 
   if ( std::fabs( error_position ) < params_.goal_tolerance ) {
-    pre_alloc_result_->position = current_position;
-    pre_alloc_result_->effort = current_effort;
-    pre_alloc_result_->reached_goal = true;
-    pre_alloc_result_->stalled = false;
-    active_goal->setSucceeded( pre_alloc_result_ );
+    auto &result = *active_goal->preallocated_result_;
+    result.position = current_position;
+    result.effort = current_effort;
+    result.reached_goal = true;
+    result.stalled = false;
+    active_goal->setSucceeded();
     clear_active_goal();
     return;
   }
@@ -635,14 +637,15 @@ void GripperPositionEffortController::check_for_success( const rclcpp::Time &tim
   }
 
   if ( ( time - last_movement_time_ ).seconds() > params_.stall_timeout ) {
-    pre_alloc_result_->position = current_position;
-    pre_alloc_result_->effort = current_effort;
-    pre_alloc_result_->reached_goal = false;
-    pre_alloc_result_->stalled = true;
+    auto &result = *active_goal->preallocated_result_;
+    result.position = current_position;
+    result.effort = current_effort;
+    result.reached_goal = false;
+    result.stalled = true;
     if ( params_.allow_stalling ) {
-      active_goal->setSucceeded( pre_alloc_result_ );
+      active_goal->setSucceeded();
     } else {
-      active_goal->setAborted( pre_alloc_result_ );
+      active_goal->setAborted();
     }
     clear_active_goal();
   }

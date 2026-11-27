@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <std_msgs/msg/bool.hpp>
+
 using VelToPosController =
     sync_group_velocity_to_position_controller::SyncGroupVelocityToPositionController;
 using MoveState = sync_group_velocity_to_position_controller::MoveState;
@@ -22,8 +24,8 @@ protected:
 
   // Hardware interface backing storage
   // State interfaces: interleaved [pos0, vel0, pos1, vel1, ...]
-  std::vector<double> hw_cmd_values_;
-  std::vector<double> hw_state_values_;
+  hector_test::HandleValues hw_cmd_values_;
+  hector_test::HandleValues hw_state_values_;
   std::vector<std::shared_ptr<hardware_interface::CommandInterface>> cmd_ifaces_;
   std::vector<std::shared_ptr<hardware_interface::StateInterface>> state_ifaces_;
 
@@ -54,7 +56,6 @@ protected:
         rclcpp::Parameter( "kp_sync", 1.0 ),
         rclcpp::Parameter( "stopping_velocity_threshold", 0.005 ),
         rclcpp::Parameter( "passthrough_controller", passthrough ),
-        rclcpp::Parameter( "e_stop_topic", std::string( "estop_board/hard_estop" ) ),
     };
     if ( !sync_groups.empty() ) {
       overrides.emplace_back( "synchronous_groups", sync_groups );
@@ -77,9 +78,8 @@ protected:
     auto cb = controller_->on_configure( unconfigured );
     ASSERT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
 
-    // on_export_reference_interfaces is normally called by CM; we must size reference_interfaces_
-    controller_->reference_interfaces_.assign( joints_.size(),
-                                               std::numeric_limits<double>::quiet_NaN() );
+    // The controller manager exports the references after configure
+    ASSERT_EQ( controller_->export_reference_interfaces().size(), joints_.size() );
   }
 
   void setupHardwareInterfaces()
@@ -91,17 +91,11 @@ protected:
     cmd_ifaces_.clear();
     state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     for ( size_t i = 0; i < joints_.size(); ++i ) {
-      cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-          joints_[i], "position", &hw_cmd_values_[i] ) );
-      state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-          joints_[i], "position", &hw_state_values_[2 * i] ) );
-      state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-          joints_[i], "velocity", &hw_state_values_[2 * i + 1] ) );
+      cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, joints_[i], "position" ) );
+      state_ifaces_.push_back( hw_state_values_.make_state( 2 * i, joints_[i], "position" ) );
+      state_ifaces_.push_back( hw_state_values_.make_state( 2 * i + 1, joints_[i], "velocity" ) );
     }
-#pragma GCC diagnostic pop
 
     controller_->command_interfaces_.clear();
     controller_->state_interfaces_.clear();
@@ -181,7 +175,6 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OnConfigureFailsEmptyJoints )
   opts.parameter_overrides( {
       rclcpp::Parameter( "joints", std::vector<std::string>{} ),
       rclcpp::Parameter( "passthrough_controller", std::string( "" ) ),
-      rclcpp::Parameter( "e_stop_topic", std::string( "estop" ) ),
       rclcpp::Parameter( "synchronous_groups", std::vector<std::string>{} ),
   } );
   params.node_options = opts;
@@ -219,9 +212,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, BasicPositionIntegration )
 
   // All joints at position 0, velocity 0
   // Command velocity = 1.0 rad/s on joint 0
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -244,9 +237,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, NegativeVelocityIntegration )
   setPosition( 0, 1.0 );
   activateController();
 
-  controller_->reference_interfaces_[0] = -0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = -0.5;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -273,9 +266,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityTrackingPTerm )
   setVelocity( 0, 0.5 );
   activateController();
 
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -301,9 +294,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, DTermDampsProportionalToVeloc
 
   // vel_cmd = 1.0, vel_actual = 0 -> D-term = 0 (no motion to damp)
   setVelocity( 0, 0.0 );
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   // desired_pos = 0.01, vel_p = 0.02, vel_d = 0.1 * 0.0 * 0.01 = 0
@@ -312,7 +305,7 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, DTermDampsProportionalToVeloc
 
   // Now set high measured velocity -> D-term should pull back
   setVelocity( 0, 5.0 );
-  controller_->reference_interfaces_[0] = 1.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
   callUpdate();
 
   // desired_pos = 0.02, vel_p = 2.0*(1.0-5.0)*0.01 = -0.08, vel_d = 0.1*5.0*0.01 = 0.005
@@ -334,9 +327,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, DTermZeroWhenJointAtRest )
 
   // vel_actual = 0 -> D-term must be exactly 0
   setVelocity( 0, 0.0 );
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   // desired_pos = 0.01, vel_p = 2.0*(1.0-0.0)*0.01 = 0.02, vel_d = 0
@@ -366,9 +359,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, StoppedHoldsPosition )
   activateController();
 
   // Joint starts in STOPPED state after activation, vel_cmd = 0
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -389,9 +382,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, MovingToStoppingWithBrakingPr
   activateController();
 
   // Start moving
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
 
@@ -400,7 +393,7 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, MovingToStoppingWithBrakingPr
   setVelocity( 0, 0.5 );
 
   // Stop commanding -> should enter STOPPING with a trapezoidal braking profile
-  controller_->reference_interfaces_[0] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
 
@@ -436,9 +429,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, StoppedToMovingResyncsDesired
   setPosition( 0, 1.5 );
 
   // Now start moving -> desired_positions should re-sync to actual position (1.5)
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
@@ -456,22 +449,22 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, ResumeFromStoppingResyncsDesi
   activateController();
 
   // Start moving
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
 
   // Stop -> enters STOPPING (braking)
   setPosition( 0, 0.7 );
   setVelocity( 0, 0.3 );
-  controller_->reference_interfaces_[0] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
 
   // Resume moving from STOPPING -> should re-sync to actual position
   setPosition( 0, 0.8 );
-  controller_->reference_interfaces_[0] = 1.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
   callUpdate();
   EXPECT_EQ( controller_->move_states_[0], MoveState::MOVING );
   // desired_positions was re-synced to 0.8 before integration
@@ -488,9 +481,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, HoldPositionUsesDesiredNotAct
   activateController();
 
   // Move for several cycles
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 5; i++ ) { callUpdate(); }
 
@@ -498,39 +491,52 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, HoldPositionUsesDesiredNotAct
   EXPECT_DOUBLE_EQ( controller_->hold_positions_[0], controller_->desired_positions_[0] );
 }
 
-// ============================================================================
-// E-Stop Tests
-// ============================================================================
-
-// Verify e-stop freezes all joints in STOPPED state with positions reset
-// TODO: e-stop logic is currently disabled, re-enable when e-stop is fixed
-TEST_F( SyncGroupVelocityToPositionControllerTest, DISABLED_EStopHoldsAndResets )
+// The controller manager owns the e-stop and stops this controller on it
+TEST_F( SyncGroupVelocityToPositionControllerTest, SubscribesToNoEstop )
 {
   initController();
   configureController();
   setupHardwareInterfaces();
-
-  setPosition( 0, 0.5 );
-  setPosition( 1, -0.3 );
-  setPosition( 2, 1.0 );
   activateController();
 
-  // Start moving
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 1.0;
-  controller_->reference_interfaces_[2] = 1.0;
-  callUpdate();
+  EXPECT_FALSE( controller_->get_node()->has_parameter( "e_stop_topic" ) );
+  EXPECT_FALSE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                              "/estop_board/hard_estop" ) );
+}
 
-  // Engage e-stop
-  controller_->e_stop_active_.writeFromNonRT( true );
-  callUpdate();
-
-  // All joints should be STOPPED with hold positions = current positions
-  for ( size_t i = 0; i < joints_.size(); i++ ) {
-    EXPECT_EQ( controller_->move_states_[i], MoveState::STOPPED );
-    EXPECT_DOUBLE_EQ( controller_->hold_positions_[i], controller_->joint_position_states_[i] );
-    EXPECT_DOUBLE_EQ( controller_->desired_positions_[i], controller_->joint_position_states_[i] );
+TEST_F( SyncGroupVelocityToPositionControllerTest, ChainedModeSwitchInvalidatesReferences )
+{
+  initController();
+  configureController();
+  for ( const bool chained : { true, false } ) {
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      hector_test::reference( *controller_, i ) = 0.5;
+    }
+    ASSERT_TRUE( controller_->on_set_chained_mode( chained ) );
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) )
+          << ( chained ? "chained" : "unchained" ) << " mode kept reference " << i;
+    }
   }
+}
+
+// Not a command to this controller: no target, so a running velocity does not keep running
+TEST_F( SyncGroupVelocityToPositionControllerTest, AWrongSizeCommandHolds )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+  hector_test::reference( *controller_, 0 ) = 0.2;
+
+  auto msg = std::make_shared<std_msgs::msg::Float64MultiArray>();
+  msg->data = { 1.0 };
+  controller_->rt_buffer_ptr_.writeFromNonRT( msg );
+  EXPECT_EQ( controller_->update_reference_from_subscribers( rclcpp::Time( 0, 0, RCL_ROS_TIME ),
+                                                             rclcpp::Duration( 0, 10000000 ) ),
+             controller_interface::return_type::OK );
+  EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, 0 ) ) )
+      << "kept the previous command";
 }
 
 // ============================================================================
@@ -545,9 +551,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, NaNReferenceSkipsWriting )
   setupHardwareInterfaces();
   activateController();
 
-  controller_->reference_interfaces_[0] = std::numeric_limits<double>::quiet_NaN();
-  controller_->reference_interfaces_[1] = std::numeric_limits<double>::quiet_NaN();
-  controller_->reference_interfaces_[2] = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 0 ) = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 1 ) = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 2 ) = std::numeric_limits<double>::quiet_NaN();
 
   // Set command values to known value to verify they don't change
   hw_cmd_values_[0] = 99.0;
@@ -561,6 +567,26 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, NaNReferenceSkipsWriting )
   EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 99.0 );
   EXPECT_DOUBLE_EQ( hw_cmd_values_[1], 99.0 );
   EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 99.0 );
+}
+
+TEST_F( SyncGroupVelocityToPositionControllerTest, BusyReferenceHandleKeepsLastCyclesValue )
+{
+  initController();
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = std::numeric_limits<double>::quiet_NaN();
+  hector_test::reference( *controller_, 2 ) = std::numeric_limits<double>::quiet_NaN();
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  hw_cmd_values_[0] = 99.0;
+
+  std::unique_lock<std::shared_mutex> busy(
+      controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+  EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+      << "a busy reference handle must not fail the update";
+  EXPECT_NE( hw_cmd_values_[0], 99.0 ) << "last cycle's velocity still drives the joint";
 }
 
 // ============================================================================
@@ -584,9 +610,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, RepeatedActivateDeactivateCyc
     }
 
     // Verify functional after activation
-    controller_->reference_interfaces_[0] = 0.5;
-    controller_->reference_interfaces_[1] = 0.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 0.5;
+    hector_test::reference( *controller_, 1 ) = 0.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     auto ret = callUpdate();
     EXPECT_EQ( ret, controller_interface::return_type::OK );
 
@@ -594,8 +620,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, RepeatedActivateDeactivateCyc
   }
 }
 
-// Verify controller is functional after e-stop + deactivate + reactivate cycle
-TEST_F( SyncGroupVelocityToPositionControllerTest, ReactivateAfterEstop )
+// Verify controller is functional after a deactivate + reactivate cycle during motion
+TEST_F( SyncGroupVelocityToPositionControllerTest, ReactivateAfterMotion )
 {
   initController();
   configureController();
@@ -603,12 +629,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, ReactivateAfterEstop )
 
   activateController();
 
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-  callUpdate();
-
-  controller_->e_stop_active_.writeFromNonRT( true );
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   deactivateController();
@@ -620,9 +643,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, ReactivateAfterEstop )
   }
 
   // Verify functional after re-activation
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
 }
@@ -642,9 +665,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SynchronizationCorrection )
   activateController();
 
   // Both joints start at 0 with same velocity -> synchronized
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 1.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 1.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   // Joint0 and joint1 should be synced
@@ -663,9 +686,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SyncGroupDifferentVelocitiesN
   activateController();
 
   // Different velocities -> not synchronized
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.5;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.5;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   EXPECT_FALSE( controller_->sync_states_[0] );
@@ -701,9 +724,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, MultiCyclePositionTracking )
   // Run 10 update cycles at constant velocity 1.0 rad/s, dt=0.01s
   // Expected final desired_pos = 0 + 10 * 1.0 * 0.01 = 0.1
   for ( int i = 0; i < 10; i++ ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 0.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 1.0;
+    hector_test::reference( *controller_, 1 ) = 0.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     callUpdate();
   }
 
@@ -745,9 +768,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, PositionClampedAtUpperLimit )
   activateController();
 
   // Command large positive velocity on joint2 to push past the limit
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 10.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 10.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   // Run multiple cycles to integrate well past the limit
   for ( int i = 0; i < 50; i++ ) { callUpdate(); }
@@ -769,9 +792,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, PositionClampedAtLowerLimit )
   activateController();
 
   // Command large negative velocity on joint2 to push past the limit
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = -10.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = -10.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 50; i++ ) { callUpdate(); }
 
@@ -796,7 +819,7 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, ContinuousJointNotClamped )
 
   // Command velocity at max_velocity for many cycles -> should exceed any typical limit
   // max_velocity defaults to 1.0, so 500 cycles * 0.01 * 1.0 = 5.0 rad
-  controller_->reference_interfaces_[0] = 10.0; // clamped to max_velocity (1.0)
+  hector_test::reference( *controller_, 0 ) = 10.0; // clamped to max_velocity (1.0)
   for ( int i = 0; i < 500; i++ ) { callUpdate(); }
 
   // Should have integrated freely past any typical revolute limit
@@ -814,9 +837,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, DesiredPositionClampedPrevent
   activateController();
 
   // Drive joint2 into the upper limit for many cycles
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 10.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 10.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 100; i++ ) { callUpdate(); }
 
@@ -841,9 +864,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, IndependentBrakingWithProfile
 
   // Move both synced joints together
   for ( int i = 0; i < 10; i++ ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 1.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 1.0;
+    hector_test::reference( *controller_, 1 ) = 1.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     setPosition( 0, ( i + 1 ) * 0.01 );
     setPosition( 1, ( i + 1 ) * 0.01 );
     setVelocity( 0, 1.0 );
@@ -854,8 +877,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, IndependentBrakingWithProfile
   // Stop both — joint0 has low velocity (stops quickly), joint1 has high velocity
   setVelocity( 0, 0.1 );
   setVelocity( 1, 0.8 );
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
   callUpdate();
 
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
@@ -902,9 +925,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SyncOffsetsInitializedWhenMov
 
   // Move both joints together at same velocity
   for ( int i = 0; i < 10; i++ ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 1.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 1.0;
+    hector_test::reference( *controller_, 1 ) = 1.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     setPosition( 0, ( i + 1 ) * 0.01 );
     setPosition( 1, 0.1 + ( i + 1 ) * 0.01 );
     setVelocity( 0, 1.0 );
@@ -939,9 +962,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SyncRestoredAfterRepeatedStop
 
     // Move for 20 cycles
     for ( int i = 0; i < 20; i++ ) {
-      controller_->reference_interfaces_[0] = vel;
-      controller_->reference_interfaces_[1] = vel;
-      controller_->reference_interfaces_[2] = 0.0;
+      hector_test::reference( *controller_, 0 ) = vel;
+      hector_test::reference( *controller_, 1 ) = vel;
+      hector_test::reference( *controller_, 2 ) = 0.0;
       // Simulate: joint0 tracks well, joint1 has slight drift
       pos0 += vel * 0.01;
       pos1 += vel * 0.01 * 1.02; // 2% drift per cycle
@@ -953,8 +976,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SyncRestoredAfterRepeatedStop
     }
 
     // Stop both
-    controller_->reference_interfaces_[0] = 0.0;
-    controller_->reference_interfaces_[1] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 0.0;
+    hector_test::reference( *controller_, 1 ) = 0.0;
     setVelocity( 0, vel * 0.5 );
     setVelocity( 1, vel * 0.5 );
     callUpdate();
@@ -998,9 +1021,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OffsetPreservedAcrossStopRest
 
   // Move together for a few ticks (commands equal -> synced, offset frozen).
   for ( int i = 0; i < 5; i++ ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 1.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 1.0;
+    hector_test::reference( *controller_, 1 ) = 1.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     setVelocity( 0, 1.0 );
     setVelocity( 1, 1.0 );
     callUpdate();
@@ -1008,8 +1031,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OffsetPreservedAcrossStopRest
 
   // Stop both. Inject asymmetric braking drift: joint1 ends up further than the
   // captured offset would imply (offset becomes 0.2 physically).
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
   callUpdate();
   for ( int i = 0; i < 20; i++ ) { callUpdate(); }
   setPosition( 0, 0.5 );
@@ -1019,8 +1042,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OffsetPreservedAcrossStopRest
   callUpdate();
 
   // Restart with EQUAL commands -> must NOT re-capture the drifted offset.
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 1.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 1.0;
   setVelocity( 0, 1.0 );
   setVelocity( 1, 1.0 );
   callUpdate();
@@ -1046,9 +1069,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OffsetRecapturedAfterIndepend
   // Drive independently: only joint0 moves. This arms re-capture and applies no
   // correction. Advance joint0 so the relative pose changes to ~0.3.
   for ( int i = 0; i < 5; i++ ) {
-    controller_->reference_interfaces_[0] = 1.0;
-    controller_->reference_interfaces_[1] = 0.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 1.0;
+    hector_test::reference( *controller_, 1 ) = 0.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     callUpdate();
   }
   EXPECT_TRUE( controller_->group_pending_recapture_[controller_->group_index_map_["group1"]] );
@@ -1058,8 +1081,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OffsetRecapturedAfterIndepend
   setPosition( 1, 0.1 ); // new offset should become 0.1 - (-0.2) = 0.3
   setVelocity( 0, 1.0 );
   setVelocity( 1, 1.0 );
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 1.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 1.0;
   callUpdate();
 
   EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.3, 1e-9 )
@@ -1080,9 +1103,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, OnePartnerZeroIsIndependentDr
   const size_t g = controller_->group_index_map_["group1"];
   EXPECT_FALSE( controller_->group_pending_recapture_[g] );
 
-  controller_->reference_interfaces_[0] = 0.8;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.8;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   EXPECT_TRUE( controller_->group_pending_recapture_[g] );
@@ -1119,14 +1142,45 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionSuccessZeroesOffse
   controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
   controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
 
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   for ( int i = 0; i < 110; i++ ) { callUpdate(); }
 
   ASSERT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
   EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.0, 1e-9 )
       << "Successful action to a common target must align the offset to ~0";
+}
+
+// A group action consumes the references of the joints it drives, so the velocity they held
+// does not come back once the action has ended. The joint outside the group keeps its own.
+TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionConsumesTheReferencesItDrives )
+{
+  std::vector<std::string> sync_groups = { "group1", "group1", "group2" };
+  initController( sync_groups );
+  configureController();
+  setupHardwareInterfaces();
+  activateController();
+
+  const size_t group_idx = controller_->group_index_map_["group1"];
+  GroupActionCommand cmd;
+  cmd.active = true;
+  cmd.start_time = rclcpp::Time( 0, 0, RCL_ROS_TIME );
+  cmd.target_position = 0.5;
+  TrapezoidalProfile prof = TrapezoidalProfile::compute( 0.0, 0.5, 1.0, 2.0 );
+  cmd.joint_profiles.push_back( prof );
+  cmd.joint_profiles.push_back( prof );
+  controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
+  controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
+
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.3;
+  callUpdate();
+
+  EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, 0 ) ) );
+  EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, 1 ) ) );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 2 ), 0.3 );
 }
 
 // When partners share a target but clamp to *different* URDF limits, the success
@@ -1154,9 +1208,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionSuccessUsesClamped
   controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
   controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
 
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   for ( int i = 0; i < 400; i++ ) { callUpdate(); }
 
   ASSERT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
@@ -1193,9 +1247,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SuccessOffsetSurvivesComplete
   controller_->rt_group_action_cmds_[group_idx].writeFromNonRT( cmd );
   controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
 
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   for ( int i = 0; i < 110; i++ ) { callUpdate(); }
   ASSERT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::COMPLETED );
   EXPECT_NEAR( controller_->sync_pairs_.get_offset( 0 ), 0.0, 1e-9 );
@@ -1206,8 +1260,8 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, SuccessOffsetSurvivesComplete
   controller_->group_action_states_[group_idx].store( GroupActionState::IDLE );
   setPosition( 0, 0.0 );
   setPosition( 1, 0.3 );
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
   callUpdate();
   callUpdate();
 
@@ -1238,9 +1292,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, ClientCancelReseedsCurrentOff
   controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
 
   // One RT tick observes EXECUTING.
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
   ASSERT_EQ( controller_->group_last_rt_state_[group_idx], GroupActionState::EXECUTING );
 
@@ -1343,17 +1397,17 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityTimeoutZerosReference
   activateController();
 
   // Send non-zero velocity for a few cycles
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate(); // t=0ms, resets last_command_time
 
   // Now send zero velocity for enough cycles to exceed timeout (50ms = 5 cycles)
-  controller_->reference_interfaces_[0] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
   for ( int i = 0; i < 6; i++ ) { callUpdate(); }
 
   // After timeout, references should remain 0 (already were 0, timeout just ensures it)
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.0 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.0 );
 }
 
 TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityTimeoutDisabledByDefault )
@@ -1364,13 +1418,13 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityTimeoutDisabledByDefa
   activateController();
 
   // Default timeout is 0 (disabled). Sending NaN-ish references should not crash.
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   for ( int i = 0; i < 100; i++ ) { callUpdate(); }
   // Should not crash, references remain 0
-  EXPECT_DOUBLE_EQ( controller_->reference_interfaces_[0], 0.0 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.0 );
 }
 
 // ============================================================================
@@ -1386,9 +1440,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityClampedToMaxVelocity 
 
   // max_velocity defaults to 1.0
   // Command 10.0 rad/s -> should be clamped to 1.0 in the update loop
-  controller_->reference_interfaces_[0] = 10.0;
-  controller_->reference_interfaces_[1] = -10.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 10.0;
+  hector_test::reference( *controller_, 1 ) = -10.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
 
   // desired_pos should integrate with clamped velocity (1.0), not 10.0
@@ -1424,14 +1478,14 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionCancelledByVelocit
   controller_->group_action_states_[group_idx].store( GroupActionState::EXECUTING );
 
   // First update with zero velocities -- action should continue
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   callUpdate();
   EXPECT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::EXECUTING );
 
   // Now send a non-zero velocity command on joint 0 (in group1) -> action must be cancelled
-  controller_->reference_interfaces_[0] = 0.5;
+  hector_test::reference( *controller_, 0 ) = 0.5;
   callUpdate();
   EXPECT_EQ( controller_->group_action_states_[group_idx].load(), GroupActionState::CANCELLED );
 
@@ -1460,9 +1514,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, GroupActionNotCancelledByOthe
   controller_->group_action_states_[group1_idx].store( GroupActionState::EXECUTING );
 
   // Send velocity command on joint 2 (group2) -- should NOT affect group1's action
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 1.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 1.0;
   callUpdate();
 
   // group1 action should still be executing
@@ -1712,9 +1766,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityTimeoutTriggersBrakin
   activateController();
 
   // Drive joint0 with non-zero velocity for several cycles to reach MOVING state
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 1.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   for ( int i = 0; i < 3; i++ ) {
     setVelocity( 0, 1.0 );
     setPosition( 0, ( i + 1 ) * 0.01 );
@@ -1727,7 +1781,7 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, VelocityTimeoutTriggersBrakin
   // continued non-zero refs would refresh; instead model "stale" by setting to 0.
   // After timeout, the timeout branch zeros refs (already zero) and update_move_states
   // sees vel_command==0.0 -> transitions MOVING -> STOPPING.
-  controller_->reference_interfaces_[0] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
   setVelocity( 0, 1.0 ); // joint still has measured velocity
   for ( int i = 0; i < 7; i++ ) { callUpdate(); }
   EXPECT_EQ( controller_->move_states_[0], MoveState::STOPPING );
@@ -1751,9 +1805,9 @@ TEST_F( SyncGroupVelocityToPositionControllerTest, NegativeMaxVelocityClampedSaf
   // Bypass parameter callback (which rejects negatives) and force the unsafe state directly.
   controller_->max_velocity_ = -2.0;
 
-  controller_->reference_interfaces_[0] = 5.0; // would exceed +2.0
-  controller_->reference_interfaces_[1] = -5.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 5.0; // would exceed +2.0
+  hector_test::reference( *controller_, 1 ) = -5.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
 

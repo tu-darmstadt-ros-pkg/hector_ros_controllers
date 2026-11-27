@@ -1,5 +1,7 @@
 #include "test_helpers.hpp"
 
+#include <std_msgs/msg/bool.hpp>
+
 using SafetyForwardControllerStatus = hector_ros_controllers_msgs::msg::SafetyForwardControllerStatus;
 
 class SafetyForwardControllerTest
@@ -50,8 +52,8 @@ public:
     auto cb = controller_->on_configure( unconfigured );
     ASSERT_EQ( cb, controller_interface::CallbackReturn::SUCCESS );
 
-    // on_export_reference_interfaces is normally called by CM; we must size reference_interfaces_
-    controller_->reference_interfaces_.assign( joints_.size(), 0.0 );
+    // The controller manager exports the references after configure
+    ASSERT_EQ( controller_->export_reference_interfaces().size(), joints_.size() );
   }
 
   void setupHardwareInterfaces( const std::string &iface_type )
@@ -62,15 +64,10 @@ public:
     cmd_ifaces_.clear();
     state_ifaces_.clear();
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     for ( size_t i = 0; i < joints_.size(); ++i ) {
-      cmd_ifaces_.push_back( std::make_shared<hardware_interface::CommandInterface>(
-          joints_[i], iface_type, &hw_cmd_values_[i] ) );
-      state_ifaces_.push_back( std::make_shared<hardware_interface::StateInterface>(
-          joints_[i], iface_type, &hw_state_values_[i] ) );
+      cmd_ifaces_.push_back( hw_cmd_values_.make_command( i, joints_[i], iface_type ) );
+      state_ifaces_.push_back( hw_state_values_.make_state( i, joints_[i], iface_type ) );
     }
-#pragma GCC diagnostic pop
 
     controller_->command_interfaces_.clear();
     controller_->state_interfaces_.clear();
@@ -162,9 +159,9 @@ TEST_F( SafetyForwardControllerTest, NormalForwardingVelocity )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = -0.3;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = -0.3;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
@@ -183,9 +180,9 @@ TEST_F( SafetyForwardControllerTest, VelocityClamped )
   activateController();
 
   // joint1 velocity limit = 1.0, set reference beyond
-  controller_->reference_interfaces_[0] = 5.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 5.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
   EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 1.0 ); // clamped to velocity limit
@@ -201,9 +198,9 @@ TEST_F( SafetyForwardControllerTest, VelocityClampedNegative )
   activateController();
 
   // joint2 velocity limit = 2.0, set negative beyond
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = -10.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = -10.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
   EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -2.0 ); // clamped to -velocity limit
@@ -219,9 +216,9 @@ TEST_F( SafetyForwardControllerTest, EffortClamped )
   activateController();
 
   // joint1 effort limit = 10.0
-  controller_->reference_interfaces_[0] = 20.0;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 20.0;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
   EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 10.0 ); // clamped to effort limit
@@ -237,19 +234,16 @@ TEST_F( SafetyForwardControllerTest, PositionClamped )
   activateController();
 
   // joint2 position limits [-1.5, 1.5]
-  controller_->reference_interfaces_[0] = 0.0;
-  controller_->reference_interfaces_[1] = 5.0; // exceeds upper
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.0;
+  hector_test::reference( *controller_, 1 ) = 5.0; // exceeds upper
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   callUpdate();
   EXPECT_DOUBLE_EQ( hw_cmd_values_[1], 1.5 ); // clamped to upper limit
 }
 
-// ============================================================================
-// E-Stop Tests
-// ============================================================================
-
-TEST_F( SafetyForwardControllerTest, EstopEngagePosition )
+// The controller manager owns the e-stop and stops this controller on it
+TEST_F( SafetyForwardControllerTest, SubscribesToNoEstop )
 {
   initController( "position" );
   configureController();
@@ -258,23 +252,52 @@ TEST_F( SafetyForwardControllerTest, EstopEngagePosition )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  // Set current state positions (for hold)
-  hw_state_values_[0] = 0.5;
-  hw_state_values_[1] = -0.3;
-  hw_state_values_[2] = 1.0;
-
-  sendEstop( true );
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-
-  // Commands should be hold positions
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.3 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 1.0 );
+  const auto node_name = std::string( controller_->get_node()->get_fully_qualified_name() );
+  EXPECT_FALSE( rtest::findSubscription<std_msgs::msg::Bool>( controller_->get_node(),
+                                                              node_name + "/safety_estop" ) );
+  EXPECT_TRUE( controller_->state_interface_configuration().names.empty() );
 }
 
-TEST_F( SafetyForwardControllerTest, EstopEngageVelocity )
+// No reference is a target: the hardware holds until one arrives, on activation and after a switch
+TEST_F( SafetyForwardControllerTest, ReferencesStartInvalidOnActivation )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+    EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) ) << "exported as 0.0";
+  }
+  activateController();
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  ASSERT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
+
+  deactivateController();
+  activateController();
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_TRUE( std::isnan( hw_cmd_values_[0] ) ) << "a re-activation resumed the old reference";
+}
+
+TEST_F( SafetyForwardControllerTest, ChainedModeSwitchInvalidatesReferences )
+{
+  initController( "velocity" );
+  configureController();
+  for ( const bool chained : { true, false } ) {
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      hector_test::reference( *controller_, i ) = 0.5;
+    }
+    ASSERT_TRUE( controller_->on_set_chained_mode( chained ) );
+    for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+      EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) )
+          << ( chained ? "chained" : "unchained" ) << " mode kept reference " << i;
+    }
+  }
+}
+
+// A malformed command is no command: no target, and no sign of life that restarts the dead man timer
+TEST_F( SafetyForwardControllerTest, AWrongSizeCommandHoldsAndKeepsTheTimeout )
 {
   initController( "velocity" );
   configureController();
@@ -282,38 +305,21 @@ TEST_F( SafetyForwardControllerTest, EstopEngageVelocity )
   findMocks();
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  controller_->safety_engaged_.store( true );
 
-  // Set some non-zero commands first
-  controller_->reference_interfaces_[0] = 1.0;
-  controller_->reference_interfaces_[1] = 1.0;
-  controller_->reference_interfaces_[2] = 1.0;
+  auto sub = controller_->joints_command_subscriber_;
+  ASSERT_TRUE( sub );
+  auto msg = std::make_shared<std_msgs::msg::Float64MultiArray>();
+  msg->data = { 1.0 };
+  sub->handle_message( msg );
+  EXPECT_TRUE( controller_->safety_engaged_.load() ) << "a malformed message reset the timeout";
 
-  sendEstop( true );
-  callUpdate();
-
-  // Velocity e-stop zeros commands
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], 0.0 );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[2], 0.0 );
-}
-
-TEST_F( SafetyForwardControllerTest, EstopRelease )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-  activateController();
-
-  sendEstop( true );
-  callUpdate(); // engage
-  sendEstop( false );
-  callUpdate(); // release
-
-  // reference_interfaces_ should be NaN after release
-  for ( size_t i = 0; i < joints_.size(); ++i ) {
-    EXPECT_TRUE( std::isnan( controller_->reference_interfaces_[i] ) );
+  EXPECT_EQ( controller_->update_reference_from_subscribers( rclcpp::Time( 0, 0, RCL_ROS_TIME ),
+                                                             rclcpp::Duration( 0, 10000000 ) ),
+             controller_interface::return_type::OK );
+  for ( std::size_t i = 0; i < joints_.size(); ++i ) {
+    EXPECT_TRUE( std::isnan( hector_test::reference( *controller_, i ) ) ) << "kept a command";
   }
 }
 
@@ -330,9 +336,9 @@ TEST_F( SafetyForwardControllerTest, SafetyTimerEngages )
   EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
   activateController();
 
-  controller_->reference_interfaces_[0] = 0.5;
-  controller_->reference_interfaces_[1] = 0.5;
-  controller_->reference_interfaces_[2] = 0.5;
+  hector_test::reference( *controller_, 0 ) = 0.5;
+  hector_test::reference( *controller_, 1 ) = 0.5;
+  hector_test::reference( *controller_, 2 ) = 0.5;
 
   // Manually trigger safety engaged
   controller_->safety_engaged_.store( true );
@@ -361,29 +367,41 @@ TEST_F( SafetyForwardControllerTest, ChainedModeCleanup )
   initController( "velocity" );
   configureController();
 
-  EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
+  // Subscribed only while active and unchained, so a command cannot arrive before activation
+  EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
   EXPECT_TRUE( controller_->safety_timer_ != nullptr );
 
   controller_->on_set_chained_mode( true );
 
   EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
-  EXPECT_TRUE( controller_->safety_timer_ == nullptr );
+  ASSERT_TRUE( controller_->safety_timer_ != nullptr );
+  EXPECT_TRUE( controller_->safety_timer_->is_canceled() );
 }
 
+// The dead man timer must survive a chained period, or later unchained activations run without it
 TEST_F( SafetyForwardControllerTest, ChainedToUnchainedTransition )
 {
   initController( "velocity" );
   configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
 
-  // Switch to chained mode: subscriber and timer are destroyed
-  controller_->on_set_chained_mode( true );
-  EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
-  EXPECT_TRUE( controller_->safety_timer_ == nullptr );
+  ASSERT_TRUE( controller_->set_chained_mode( true ) );
+  activateController();
+  EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr )
+      << "chained, commands come from upstream";
+  ASSERT_TRUE( controller_->safety_timer_ != nullptr ) << "the dead man timer was destroyed";
+  EXPECT_TRUE( controller_->safety_timer_->is_canceled() );
+  deactivateController();
 
-  // Switch back to unchained: rt buffer is cleared
-  controller_->on_set_chained_mode( false );
+  ASSERT_TRUE( controller_->set_chained_mode( false ) );
   auto cmd = controller_->rt_command_ptr_.readFromRT();
   EXPECT_TRUE( !cmd || !( *cmd ) );
+  activateController();
+  EXPECT_TRUE( controller_->joints_command_subscriber_ != nullptr );
+  ASSERT_TRUE( controller_->safety_timer_ != nullptr ) << "the dead man timer was destroyed";
+  EXPECT_FALSE( controller_->safety_timer_->is_canceled() );
 }
 
 TEST_F( SafetyForwardControllerTest, ChainedModeUpdateForwardsReferences )
@@ -399,13 +417,87 @@ TEST_F( SafetyForwardControllerTest, ChainedModeUpdateForwardsReferences )
   controller_->on_set_chained_mode( true );
 
   // Set reference_interfaces directly (as a chaining controller would)
-  controller_->reference_interfaces_[0] = 0.7;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
+  hector_test::reference( *controller_, 0 ) = 0.7;
+  hector_test::reference( *controller_, 1 ) = 0.0;
+  hector_test::reference( *controller_, 2 ) = 0.0;
 
   auto ret = callUpdate();
   EXPECT_EQ( ret, controller_interface::return_type::OK );
   EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.7 );
+}
+
+TEST_F( SafetyForwardControllerTest, UnchainedCommandBecomesTheReference )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  auto msg = std::make_shared<safety_forward_controller::CmdType>();
+  msg->data = { 0.4, -0.2, 0.0 };
+  controller_->rt_command_ptr_.writeFromNonRT( msg );
+
+  rclcpp::Time now( 0, 0, RCL_ROS_TIME );
+  rclcpp::Duration period( std::chrono::milliseconds( 10 ) );
+  ASSERT_EQ( controller_->update_reference_from_subscribers( now, period ),
+             controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.4 );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 1 ), -0.2 );
+
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.4 );
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[1], -0.2 );
+}
+
+TEST_F( SafetyForwardControllerTest, BusyReferenceHandleKeepsLastCyclesValue )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+  controller_->on_set_chained_mode( true );
+
+  hector_test::reference( *controller_, 0 ) = 0.7;
+  ASSERT_EQ( callUpdate(), controller_interface::return_type::OK );
+  hw_cmd_values_[0] = 99.0;
+
+  std::unique_lock<std::shared_mutex> busy(
+      controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+  EXPECT_EQ( callUpdate(), controller_interface::return_type::OK )
+      << "a busy reference handle must not fail the update";
+  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.7 );
+}
+
+TEST_F( SafetyForwardControllerTest, BusyReferenceHandleTakesTheCommandOnceFree )
+{
+  initController( "velocity" );
+  configureController();
+  setupHardwareInterfaces( "velocity" );
+  findMocks();
+  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
+  activateController();
+
+  auto msg = std::make_shared<safety_forward_controller::CmdType>();
+  msg->data = { 0.4, -0.2, 0.0 };
+  controller_->rt_command_ptr_.writeFromNonRT( msg );
+  rclcpp::Time now( 0, 0, RCL_ROS_TIME );
+  rclcpp::Duration period( std::chrono::milliseconds( 10 ) );
+  {
+    std::unique_lock<std::shared_mutex> busy(
+        controller_->ordered_exported_reference_interfaces_[0]->get_mutex() );
+    EXPECT_EQ( controller_->update_reference_from_subscribers( now, period ),
+               controller_interface::return_type::OK )
+        << "a busy reference handle must not fail the update";
+  }
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 1 ), -0.2 );
+
+  ASSERT_EQ( controller_->update_reference_from_subscribers( now, period ),
+             controller_interface::return_type::OK );
+  EXPECT_DOUBLE_EQ( hector_test::reference( *controller_, 0 ), 0.4 );
 }
 
 // ============================================================================
@@ -425,50 +517,7 @@ TEST_F( SafetyForwardControllerTest, StatusPublishesCorrectly )
 
   activateController();
 
-  EXPECT_FALSE( captured.estop_engaged );
   EXPECT_FALSE( captured.safety_timer_engaged );
-}
-
-TEST_F( SafetyForwardControllerTest, StatusUpdatesOnEstopEngage )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-
-  SafetyForwardControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-  EXPECT_FALSE( captured.estop_engaged );
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-  EXPECT_FALSE( captured.safety_timer_engaged );
-}
-
-TEST_F( SafetyForwardControllerTest, StatusUpdatesOnEstopRelease )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-
-  SafetyForwardControllerStatus captured;
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) )
-      .WillRepeatedly( [&captured]( const auto &msg ) { captured = msg; } );
-
-  activateController();
-
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( captured.estop_engaged );
-
-  sendEstop( false );
-  callUpdate();
-  EXPECT_FALSE( captured.estop_engaged );
 }
 
 TEST_F( SafetyForwardControllerTest, StatusUpdatesOnSafetyTimerEngage )
@@ -490,7 +539,6 @@ TEST_F( SafetyForwardControllerTest, StatusUpdatesOnSafetyTimerEngage )
   controller_->safety_engaged_.store( true );
   controller_->publish_status();
   EXPECT_TRUE( captured.safety_timer_engaged );
-  EXPECT_FALSE( captured.estop_engaged );
 }
 
 // ============================================================================
@@ -509,9 +557,9 @@ TEST_F( SafetyForwardControllerTest, RepeatedActivateDeactivateCycles )
     activateController();
 
     // Verify functional after activation
-    controller_->reference_interfaces_[0] = 0.5;
-    controller_->reference_interfaces_[1] = 0.0;
-    controller_->reference_interfaces_[2] = 0.0;
+    hector_test::reference( *controller_, 0 ) = 0.5;
+    hector_test::reference( *controller_, 1 ) = 0.0;
+    hector_test::reference( *controller_, 2 ) = 0.0;
     auto ret = callUpdate();
     EXPECT_EQ( ret, controller_interface::return_type::OK );
     EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.5 );
@@ -519,44 +567,9 @@ TEST_F( SafetyForwardControllerTest, RepeatedActivateDeactivateCycles )
     deactivateController();
 
     // Verify state is reset after deactivation
-    EXPECT_FALSE( controller_->estop_active_.load() );
-    EXPECT_FALSE( controller_->estop_engaged_.load() );
     EXPECT_FALSE( controller_->safety_engaged_.load() );
     EXPECT_TRUE( controller_->joints_command_subscriber_ == nullptr );
-    EXPECT_TRUE( controller_->safety_estop_subscriber_ == nullptr );
   }
-}
-
-TEST_F( SafetyForwardControllerTest, ReactivateAfterEstop )
-{
-  initController( "velocity" );
-  configureController();
-  setupHardwareInterfaces( "velocity" );
-  findMocks();
-  EXPECT_CALL( *status_pub_mock_, publish( ::testing::_ ) ).Times( ::testing::AnyNumber() );
-
-  activateController();
-  sendEstop( true );
-  callUpdate();
-  EXPECT_TRUE( controller_->estop_engaged_.load() );
-
-  deactivateController();
-  // After deactivation, estop should be reset
-  EXPECT_FALSE( controller_->estop_active_.load() );
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-
-  activateController();
-  // Controller should be in clean state
-  EXPECT_FALSE( controller_->estop_engaged_.load() );
-  EXPECT_FALSE( controller_->safety_engaged_.load() );
-
-  // Verify it works normally after re-activation
-  controller_->reference_interfaces_[0] = 0.3;
-  controller_->reference_interfaces_[1] = 0.0;
-  controller_->reference_interfaces_[2] = 0.0;
-  auto ret = callUpdate();
-  EXPECT_EQ( ret, controller_interface::return_type::OK );
-  EXPECT_DOUBLE_EQ( hw_cmd_values_[0], 0.3 );
 }
 
 // ============================================================================

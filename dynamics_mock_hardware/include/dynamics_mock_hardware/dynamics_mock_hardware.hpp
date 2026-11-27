@@ -1,6 +1,7 @@
 #ifndef DYNAMICS_MOCK_HARDWARE__DYNAMICS_MOCK_HARDWARE_HPP_
 #define DYNAMICS_MOCK_HARDWARE__DYNAMICS_MOCK_HARDWARE_HPP_
 
+#include <atomic>
 #include <cstddef>
 #include <limits>
 #include <string>
@@ -22,7 +23,8 @@ namespace dynamics_mock_hardware
 using hardware_interface::return_type;
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
-enum class ControlMode { POSITION, VELOCITY, ACCELERATION, EFFORT };
+/// TORQUE_OFF is claimed through <joint>/torque_off. The motor applies no torque and the joint goes limp.
+enum class ControlMode { POSITION, VELOCITY, ACCELERATION, EFFORT, TORQUE_OFF };
 
 /// Per-joint data bridging ros2_control and pinocchio.
 struct JointData {
@@ -44,6 +46,10 @@ struct JointData {
   bool wrap_position{ false };
 
   ControlMode control_mode{ ControlMode::POSITION };
+  // TORQUE_OFF outlives the claim, a released joint stays limp until a motion command starts
+  bool torque_off_claimed{ false };
+  /// Position held while the position command is NaN, latched at the first NaN.
+  double nan_hold_position{ std::numeric_limits<double>::quiet_NaN() };
 
   /// Accumulated angle for continuous joints (avoids atan2 discontinuity).
   double accumulated_angle{ 0.0 };
@@ -72,6 +78,9 @@ struct MimicJointData {
 /// Receives position/velocity/acceleration/effort commands and simulates the
 /// resulting motion using pinocchio's ABA forward dynamics algorithm.  Per-joint
 /// torque limits allow realistic reproduction of motor saturation effects.
+/// The command interface whose claim switches a joint's torque off. Nothing is written to it.
+constexpr char TORQUE_OFF_INTERFACE[] = "torque_off";
+
 class DynamicsMockHardware : public hardware_interface::SystemInterface
 {
 public:
@@ -82,6 +91,8 @@ public:
   CallbackReturn on_activate( const rclcpp_lifecycle::State &previous_state ) override;
 
   CallbackReturn on_deactivate( const rclcpp_lifecycle::State &previous_state ) override;
+
+  CallbackReturn on_error( const rclcpp_lifecycle::State &previous_state ) override;
 
   return_type prepare_command_mode_switch( const std::vector<std::string> &start_interfaces,
                                            const std::vector<std::string> &stop_interfaces ) override;
@@ -101,7 +112,8 @@ private:
 
   void enforceMimicConstraints( Eigen::VectorXd &q, Eigen::VectorXd &v ) const;
 
-  void computeTorques( const Eigen::VectorXd &q, const Eigen::VectorXd &v, Eigen::VectorXd &tau );
+  void computeTorques( const Eigen::VectorXd &q, const Eigen::VectorXd &v, double dt,
+                       Eigen::VectorXd &tau );
 
   static double clampSymmetric( double val, double limit );
   static double wrapAngle( double angle );
@@ -127,6 +139,8 @@ private:
   Eigen::VectorXd tau_;
   Eigen::VectorXd ddq_;
   Eigen::VectorXd q_next_;
+  /// Per velocity index, 1 / (M^-1)_ii at the start of the control period.
+  Eigen::VectorXd effective_inertia_;
 
   // Global PD gains for internal position/velocity controllers
   double position_kp_{ 100.0 };
@@ -142,6 +156,10 @@ private:
   // Debug logging
   int debug_log_interval_{ 0 }; // 0 = disabled, >0 = every N write() cycles
   int write_cycle_count_{ 0 };
+
+  // Power cut injection through the bool parameter simulate_power_cut on the hardware's node
+  std::atomic<bool> power_cut_{ false };
+  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr power_cut_callback_;
 };
 
 } // namespace dynamics_mock_hardware

@@ -2,6 +2,20 @@
 
 Mock hardware interface that supports position, velocity, effort (torque) control and uses pinocchio to simulate the robots behavior.
 
+A joint that declares `<command_interface name="torque_off"/>` goes limp while a controller claims
+that interface (for example `claim_only_controller/ClaimOnlyController`), as a Dynamixel joint does.
+When the claim ends alone the joint stays limp. Torque comes back when a motion command interface
+of the joint starts, holding where the joint was left.
+
+A NaN command means no target, as on the Dynamixel driver. A NaN position holds where the joint was
+at the first NaN. A NaN velocity commands zero velocity, so a joint under gravity sags slowly, as
+the real arm does in velocity mode.
+
+At a handover the mock keeps whatever the successor has written into the command. That relies on
+`hector_controller_manager` writing NaN into every interface it releases, so a successor that writes
+nothing in its first cycle makes the joint hold. Under the stock ros2_control controller manager
+the command still holds the last value an earlier controller wrote, and the joint drives towards it.
+
 - [dynamics_mock_hardware](#dynamics_mock_hardware)
 
 

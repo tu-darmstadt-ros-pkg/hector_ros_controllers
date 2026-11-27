@@ -70,7 +70,8 @@ public:
 protected:
   rcl_interfaces::msg::SetParametersResult setParamCb( const rclcpp::Parameter &p );
 
-  std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
+  std::vector<hardware_interface::CommandInterface::SharedPtr>
+  on_export_reference_interfaces_list() override;
 
   controller_interface::return_type
   update_reference_from_subscribers( const rclcpp::Time &time,
@@ -130,6 +131,7 @@ protected:
 
   std::vector<double> joint_angles_;
   std::vector<double> prev_command_vals_;
+  std::vector<double> reference_values_; ///< references of this cycle, read once from the handles
 
   std::map<std::string, std::vector<CollisionPrimitive>> link_collision_primitives_;
 

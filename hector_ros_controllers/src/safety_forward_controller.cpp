@@ -1,9 +1,12 @@
 #include "safety_forward_controller/safety_forward_controller.hpp"
+#include "hector_ros_controllers/reference_handles.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -17,8 +20,7 @@ namespace safety_forward_controller
 
 SafetyForwardController::SafetyForwardController()
     : controller_interface::ChainableControllerInterface(), safety_engaged_( false ),
-      safety_timer_period_ms_( 0 ), estop_active_( false ), estop_engaged_( false ),
-      rt_command_ptr_( nullptr ), joints_command_subscriber_( nullptr )
+      safety_timer_period_ms_( 0 ), rt_command_ptr_( nullptr ), joints_command_subscriber_( nullptr )
 {
 }
 
@@ -62,7 +64,6 @@ controller_interface::CallbackReturn SafetyForwardController::read_parameters()
   const urdf::ModelInterfaceSharedPtr urdf = urdf::parseURDF( this->get_robot_description() );
 
   command_interface_types_.clear();
-  state_interface_types_.clear();
   joints_.clear();
   joint_limits_.clear();
 
@@ -70,8 +71,6 @@ controller_interface::CallbackReturn SafetyForwardController::read_parameters()
     joints_.push_back( joint );
 
     command_interface_types_.push_back( interface_prefix + joint + "/" + interface_type_ );
-    // For now, we use the same interface type for states
-    state_interface_types_.push_back( joint + "/" + interface_type_ );
 
     if ( urdf && urdf->getJoint( joint ) ) {
       joint_limits_.push_back( urdf->getJoint( joint )->limits );
@@ -80,8 +79,6 @@ controller_interface::CallbackReturn SafetyForwardController::read_parameters()
       RCLCPP_WARN( get_node()->get_logger(), "No URDF limits found for joint '%s'", joint.c_str() );
     }
   }
-
-  hold_positions_.assign( joints_.size(), 0.0 );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -105,19 +102,6 @@ SafetyForwardController::on_configure( const rclcpp_lifecycle::State & /*previou
   if ( ret != controller_interface::CallbackReturn::SUCCESS ) {
     return ret;
   }
-
-  // Subscriber for external commands (used when NOT in chained mode)
-  joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
-      "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
-        rt_command_ptr_.writeFromNonRT( msg );
-        const bool was_engaged = safety_engaged_.exchange( false );
-        if ( safety_timer_ ) {
-          safety_timer_->reset();
-        }
-        if ( was_engaged ) {
-          publish_status();
-        }
-      } );
 
   // Safety timer: if no commands for some time, engage safety (zero commands)
   if ( params_.interface_type != "position" ) // Position controllers don't need a safety timer
@@ -155,13 +139,7 @@ SafetyForwardController::command_interface_configuration() const
 }
 
 controller_interface::InterfaceConfiguration SafetyForwardController::state_interface_configuration() const
-{
-  controller_interface::InterfaceConfiguration state_interface_config;
-  state_interface_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  state_interface_config.names = state_interface_types_;
-
-  return state_interface_config;
-}
+{ return { controller_interface::interface_configuration_type::NONE, {} }; }
 
 controller_interface::CallbackReturn
 SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous_state*/ )
@@ -177,36 +155,36 @@ SafetyForwardController::on_activate( const rclcpp_lifecycle::State & /*previous
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  // Reset command buffer if a command came through callback when controller was inactive
+  // Drop the last command of an earlier activation
   rt_command_ptr_ = realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>>( nullptr );
-
-  safety_engaged_.store( false );
-  if ( safety_timer_ ) {
-    safety_timer_->reset();
+  // No target until a new command arrives, so the hardware holds instead of resuming an old one
+  if ( !hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ ) ) {
+    RCLCPP_ERROR( get_node()->get_logger(), "Could not reset the reference interfaces" );
+    return controller_interface::CallbackReturn::ERROR;
   }
 
-  joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
-      "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
-        rt_command_ptr_.writeFromNonRT( msg );
-        const bool was_engaged = safety_engaged_.exchange( false );
-        if ( safety_timer_ ) {
-          safety_timer_->reset();
-        }
-        if ( was_engaged ) {
-          publish_status();
-        }
-      } );
-
-  // E-stop subscription
-  safety_estop_subscriber_ = get_node()->create_subscription<std_msgs::msg::Bool>(
-      "~/safety_estop", rclcpp::SystemDefaultsQoS(),
-      [this]( const std_msgs::msg::Bool::SharedPtr msg ) {
-        if ( msg->data != estop_active_.load() ) {
-          estop_active_.store( msg->data );
-          RCLCPP_WARN( get_node()->get_logger(), "E-STOP %s",
-                       estop_active_ ? "ENGAGED" : "DISENGAGED" );
-        }
-      } );
+  safety_engaged_.store( false );
+  // Chained, the commands come from the preceding controller and the timeout does not apply
+  if ( !is_in_chained_mode() ) {
+    if ( safety_timer_ ) {
+      safety_timer_->reset();
+    }
+    joints_command_subscriber_ = get_node()->create_subscription<CmdType>(
+        "~/commands", rclcpp::SystemDefaultsQoS(), [this]( const CmdType::SharedPtr msg ) {
+          rt_command_ptr_.writeFromNonRT( msg );
+          // A malformed message is no sign of life from the commanding side
+          if ( msg->data.size() != joints_.size() ) {
+            return;
+          }
+          const bool was_engaged = safety_engaged_.exchange( false );
+          if ( safety_timer_ ) {
+            safety_timer_->reset();
+          }
+          if ( was_engaged ) {
+            publish_status();
+          }
+        } );
+  }
 
   publish_status();
 
@@ -223,24 +201,18 @@ SafetyForwardController::on_deactivate( const rclcpp_lifecycle::State & /*previo
     safety_timer_->cancel();
   }
 
-  safety_estop_subscriber_.reset();
   joints_command_subscriber_.reset();
 
-  estop_active_.store( false );
-  estop_engaged_.store( false );
   safety_engaged_.store( false );
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
-std::vector<hardware_interface::CommandInterface>
-SafetyForwardController::on_export_reference_interfaces()
+std::vector<hardware_interface::CommandInterface::SharedPtr>
+SafetyForwardController::on_export_reference_interfaces_list()
 {
-  std::vector<hardware_interface::CommandInterface> refs;
+  std::vector<hardware_interface::CommandInterface::SharedPtr> refs;
   refs.reserve( joints_.size() );
-
-  // One reference per joint.
-  reference_interfaces_.assign( joints_.size(), 0.0 );
 
   const std::string controller_name = get_node()->get_name(); // e.g. "flipper_velocity_controller"
 
@@ -248,120 +220,76 @@ SafetyForwardController::on_export_reference_interfaces()
     // Resource name must start with controller name
     const std::string resource_name = controller_name + "/" + joints_[i];
     // Interface type is the same as the hardware command interface ("position"/"velocity"/"effort")
-    refs.emplace_back( resource_name, interface_type_, &reference_interfaces_[i] );
+    refs.push_back(
+        std::make_shared<hardware_interface::CommandInterface>( resource_name, interface_type_ ) );
   }
+  reference_values_.assign( refs.size(), std::numeric_limits<double>::quiet_NaN() );
 
   return refs;
 }
-
-std::vector<hardware_interface::StateInterface> SafetyForwardController::on_export_state_interfaces()
-{ return {}; }
 
 controller_interface::return_type
 SafetyForwardController::update_reference_from_subscribers( const rclcpp::Time & /*time*/,
                                                             const rclcpp::Duration & /*period*/ )
 {
   // In chained mode, references come from preceding controller,
-  // so we DON'T touch reference_interfaces_ here.
+  // so we DON'T touch the references here.
   if ( is_in_chained_mode() ) {
     return controller_interface::return_type::OK;
   }
 
   const auto joint_commands = rt_command_ptr_.readFromRT();
   if ( !joint_commands || !( *joint_commands ) ) {
-    // No new command message → keep previous reference_interfaces_ values
+    // No new command message → keep previous references
     return controller_interface::return_type::OK;
   }
 
   const auto &data = ( *joint_commands )->data;
 
-  if ( data.size() < reference_interfaces_.size() ) {
-    RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
-                           "Received command of size %zu, but controller expects %zu", data.size(),
-                           reference_interfaces_.size() );
-    // Use only the available part
+  const auto &references = ordered_exported_reference_interfaces_;
+  if ( data.size() != references.size() ) {
+    // Not a command to this controller, and keeping the previous one would keep a velocity running
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
+                          "Holding: a command of size %zu, %zu joints are controlled", data.size(),
+                          references.size() );
+    std::ignore = hector_ros_controllers::clear_references( references );
+    return controller_interface::return_type::OK;
   }
 
-  const std::size_t n = std::min( reference_interfaces_.size(), data.size() );
-  for ( std::size_t i = 0; i < n; ++i ) { reference_interfaces_[i] = data[i]; }
-
+  if ( const auto busy = hector_ros_controllers::write_references( references, data ); busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
+                          "%zu reference interfaces were busy; they keep their previous value",
+                          busy );
+  }
   return controller_interface::return_type::OK;
 }
 
-static std::size_t find_joint_index( const std::vector<std::string> &joints, const std::string &name )
-{
-  for ( std::size_t i = 0; i < joints.size(); ++i ) {
-    if ( joints[i] == name ) {
-      return i;
-    }
-  }
-  return static_cast<std::size_t>( -1 );
-}
-
-void SafetyForwardController::record_hold_positions()
-{
-  hold_positions_.assign( joints_.size(), 0.0 );
-
-  for ( const auto &state_iface : state_interfaces_ ) {
-    const auto &joint_name = state_iface.get_prefix_name();
-    const auto &iface_name = state_iface.get_interface_name();
-
-    if ( iface_name == "position" ) {
-      const std::size_t idx = find_joint_index( joints_, joint_name );
-      if ( idx < joints_.size() ) {
-        const auto opt = state_iface.get_optional();
-        if ( opt.has_value() )
-          hold_positions_[idx] = opt.value();
-      }
-    }
-  }
-}
 bool SafetyForwardController::on_set_chained_mode( const bool chained_mode )
 {
   if ( chained_mode ) {
     joints_command_subscriber_.reset();
-    safety_timer_.reset();
+    // Cancelled, not destroyed, because an unchained activation later needs it again
+    if ( safety_timer_ ) {
+      safety_timer_->cancel();
+    }
     RCLCPP_INFO( get_node()->get_logger(), "Switched to CHAINED mode" );
   } else {
     RCLCPP_INFO( get_node()->get_logger(), "Switched to UNCHAINED mode" );
     rt_command_ptr_.reset();
   }
-  return true;
+  // The previous source's last reference must not outlive the switch
+  return hector_ros_controllers::invalidate_references( ordered_exported_reference_interfaces_ );
 }
 
 controller_interface::return_type
 SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*/,
                                                     const rclcpp::Duration & /*period*/ )
 {
-  const bool estop_active = estop_active_.load();
-  bool estop_engaged = estop_engaged_.load();
-
-  // Detect edge: requested state vs. actually engaged state
-  if ( estop_active != estop_engaged ) {
-    if ( estop_active ) {
-      if ( params_.interface_type == "position" ) {
-        // -------- E-STOP ENGAGE --------
-        // Latch current joint positions (if available from state interfaces)
-        record_hold_positions();
-      }
-
-      estop_engaged_.store( true );
-      estop_engaged = true;
-
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP engaged: latching positions for %zu joints",
-                   hold_positions_.size() );
-      publish_status();
-    } else {
-      // -------- E-STOP RELEASE --------
-      estop_engaged_.store( false );
-      estop_engaged = false;
-
-      RCLCPP_WARN( get_node()->get_logger(), "E-STOP released: resuming command output" );
-      publish_status();
-      // on e-stop release, invalidate commands once
-      for ( auto &ref : reference_interfaces_ ) ref = std::numeric_limits<double>::quiet_NaN();
-      return controller_interface::return_type::OK;
-    }
+  if ( const auto busy = hector_ros_controllers::read_references(
+           ordered_exported_reference_interfaces_, reference_values_ );
+       busy > 0 ) {
+    RCLCPP_WARN_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
+                          "%zu reference interfaces were busy; using their last value", busy );
   }
 
   bool successful = true;
@@ -370,29 +298,20 @@ SafetyForwardController::update_and_write_commands( const rclcpp::Time & /*time*
   for ( std::size_t index = 0; index < command_interfaces_.size(); ++index ) {
     double command_value = 0.0;
 
-    if ( estop_engaged ) {
-      // --- E-STOP BEHAVIOR ---
-      if ( interface_type_ == "position" ) {
-        // Hold current position
-        command_value = hold_positions_[index];
-      } else {
-        // velocity / effort → stop (zero)
-        command_value = 0.0;
-      }
-    } else if ( safety_engaged_.load() ) {
-      // --- SAFETY TIMER BEHAVIOR (no e-stop) ---
+    if ( safety_engaged_.load() ) {
+      // --- SAFETY TIMER BEHAVIOR ---
       command_value = 0.0;
     } else {
       // --- NORMAL OPERATION ---
-      if ( index >= reference_interfaces_.size() ) {
+      if ( index >= reference_values_.size() ) {
         RCLCPP_ERROR_THROTTLE( get_node()->get_logger(), *get_node()->get_clock(), 5000,
-                               "reference_interfaces_ too small (index %zu, size %zu)", index,
-                               reference_interfaces_.size() );
+                               "too few reference interfaces (index %zu, size %zu)", index,
+                               reference_values_.size() );
         successful = false;
         continue;
       }
 
-      command_value = reference_interfaces_[index];
+      command_value = reference_values_[index];
 
       const auto &limits = joint_limits_[index];
       if ( limits ) {
@@ -429,7 +348,6 @@ void SafetyForwardController::publish_status()
   }
   hector_ros_controllers_msgs::msg::SafetyForwardControllerStatus msg;
   msg.header.stamp = get_node()->now();
-  msg.estop_engaged = estop_engaged_.load();
   msg.safety_timer_engaged = safety_engaged_.load();
   status_pub_->publish( msg );
 }
